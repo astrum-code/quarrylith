@@ -234,9 +234,11 @@ branch name of 51 bytes.
 
 - **Encoded** is one measure on both backends, `schema.size(value)`: the
   length of `schema.canonical(value)` (JSON with sorted keys, no spaces,
-  UTF-8, tuples as lists), with each float counted as 9 bytes. That bounds
-  the value's msgpack size. 768 KiB leaves Henge's 1 MiB `max_inline` room
-  for the rest.
+  UTF-8, tuples as lists), with each float counted as 9 bytes. That gives
+  the value's msgpack size within a margin: a `str` of 256 bytes or more
+  costs msgpack 1 to 3 header bytes past JSON's quotes, under 3 KiB on a
+  768 KiB entry. 768 KiB leaves Henge's 1 MiB `max_inline` room for that
+  and the rest.
 - **The priors** are decided by the decide step, which both backends run,
   so SQLite computes them as well. It measures the entry and refuses the
   same operations, and then stores only the event. Invariant 4 holds at the
@@ -284,9 +286,8 @@ class Event:
 ### `Record`: the contract
 
 `open_record(url, *, readonly=False, shared=False, allow_undurable=False,
-home=None, actor, via, authorize=None)` -> a `Record`. `url` is
-`sqlite:///path/record.sqlite` or `henge:<folder>#<name>`. `home` is the
-Henge record's own folder, for its writer lock (below). `BACKENDS =
+actor, via, authorize=None)` -> a `Record`. `url` is
+`sqlite:///path/record.sqlite` or `henge:<folder>#<name>`. `BACKENDS =
 {"sqlite": SqliteRecord, "henge": HengeRecord}`. `authorize(actor, op,
 before, after) -> None | str` is the caller's policy: a string refuses the
 operation with that reason. Who may move what (bin/lith's roles, a yard's
@@ -483,14 +484,15 @@ with `expect`, `get`, `get_many`, `watch` and `sync`, all of plain values
 the placement: `single` and `mirror` hold it alike.
 
 - **One writer per record.** A record on Henge is written by the one
-  process that holds its writer lock. `open_henge(folder, name, *, home)`:
-  1. takes an exclusive `fcntl.flock` on `<home>/<name>.lock`. `home` is the
-     record's own folder (made `0700` if absent), which the caller keeps
-     beside the record's configuration: the yard's, in step 5, or the CLI's
-     `--home`. A Henge open without `home` is refused. The lock is refused,
-     naming the holder's pid, while another open file holds it, and its
-     descriptor is not inherited by children. Nothing of quarrylith's sits
-     in henge's folder (Rationale).
+  process that holds its writer lock. `open_henge(folder, name)`:
+  1. takes an exclusive `fcntl.flock` on `<folder>/quarrylith.<name>.lock`,
+     in the store's own folder, which every opener of the record names. It
+     is refused, naming the holder's pid, while another open file holds it,
+     and its descriptor is not inherited by children. The store's spec lets
+     a foreign file stay in its folder: its conversion moves only the
+     entries it names (henge's review of that spec, its Note 2). The lock is
+     for liveness. Correctness does not rest on it (the commit protocol,
+     below; Rationale).
   2. connects with `Store.connect`, and reads the store's report,
      `durability(space)` on the record's `.journal`. A store without the
      `sync` and `durability` operations cannot run the commit protocol and
@@ -502,8 +504,9 @@ the placement: `single` and `mirror` hold it alike.
 
   **One engine per folder is the store's**: its `henge.lock` binds every
   opener of the folder (`henge single`, `henge local`, `Store.single`,
-  `Store.local`). The writer lock only keeps two record writers apart. A
-  writer that has gone can still have a request in flight. So **every put
+  `Store.local`). The writer lock keeps two record writers apart. A
+  writer that has gone can still have a request in flight, and an opener
+  that bypassed the lock is a second live writer. So **every put
   the writer makes, but the commit put itself**, carries `expect={"version":
   v}` (or `absent` for a new object), the version the writer last read or
   wrote. That covers the records, the index chunks and directories, every
@@ -514,6 +517,9 @@ the placement: `single` and `mirror` hold it alike.
   `.state` puts, and the bookkeeping, all under the one lock that orders
   its operations. So the store takes the record's writes in one order, on
   every worker that holds them (Boundaries: "a prefix after a power cut").
+  The record's spaces keep the store's default `write_ack` (every home). A
+  space that declared `write_ack: 1` on a mirror would break that one
+  order.
 - **Other processes** may follow the record's events directly: `watch`
   `.state ["head"]` and `get_many` `.journal` up to it, over the same
   socket. Every other read, and every operation, goes through the writer's
@@ -557,9 +563,10 @@ the placement: `single` and `mirror` hold it alike.
     - A chunk's **range** runs from its lowest key up to the next listed
       key. Every key below the first listed lowest key is chunk 0's, so a
       key below every key so far needs no directory change.
-    - A key goes in the chunk whose range holds it. A reader, and recovery,
-      take from a chunk only the keys in its range and ignore any other
-      (the duplicates a split leaves, below).
+    - A key goes in the chunk whose range holds it. **Every load of a
+      chunk filters it to its range**: a reader's, recovery's, and the
+      writer's own load for an edit or a split. Every other key is ignored,
+      such as the duplicates a split leaves (below).
   - **A split is deterministic.** It runs after the event's edits are applied to
     the chunk in memory. A chunk past either bound is cut, in key order,
     into pieces of at most 4,096 keys and 256 KiB, each filled before the
@@ -577,11 +584,18 @@ the placement: `single` and `mirror` hold it alike.
     - after (2), the old chunk still holds keys that now belong to a new
       chunk's range, and readers ignore them.
 
-    Recovery redoes the event's index edits from its priors against
-    the chunks and directory as it finds them. It computes the same split,
-    with the same numbers and the same keys, and puts each object against
-    the version it reads first. Any prefix of the three puts is
-    redoable.
+    Recovery redoes the event's index edits from its priors against the
+    chunks and directory as it finds them, and puts each object against
+    the version it reads first:
+    - **before (2)**, the directory and the old chunk are unchanged, so it
+      computes the same split, with the same numbers and the same keys,
+      and puts over the orphans;
+    - **after (2)**, the directory already lists the new chunks. The old
+      chunk, loaded filtered to its range, is the first piece alone and
+      within the bounds, so no second split is made. The redo only rewrites
+      it to its range, which also drops the duplicates' bytes.
+
+    Any prefix of the three puts is redoable.
   - An event's index edits are batched, so each chunk and directory it
     touches is written once per event (a split's three puts aside). An
     import event of 5,000 comments rewrites a chunk once, not 5,000 times.
@@ -598,7 +612,9 @@ the placement: `single` and `mirror` hold it alike.
      record's `.journal`; the space names only the grant, and the barrier
      covers every write), then `put(state, ["head"], seq)`, then wake the
      waiting readers, then return. Both `.state` puts carry the version they
-     expect. The operation is acknowledged only after its sync, so it is
+     expect, and **neither moves backward**: each is put only while the
+     value read is below seq. A value at or past seq is left as it is. The
+     operation is acknowledged only after its sync, so it is
      power-safe when its caller hears of it, and a follower that sees `head`
      at seq sees a synced event. One sync per operation, not per write, is
      enough because the store keeps the record's writes in their order: a
@@ -620,15 +636,47 @@ the placement: `single` and `mirror` hold it alike.
     another entry is the case above. If the store stays unreachable past the
     record's timeout, the record closes and the operation raises `Unknown`.
     If the entry landed, the next open's recovery finishes it.
-  - **An error at steps 3 or 4** comes after the commit. The writer reads
-    the object's version and puts again. Whole values and the priors make
-    a second put the same, and a version `Conflict` means a late request
-    changed the object, so it re-reads and puts again. If the store stays
-    unreachable, the record closes and the operation raises `Unknown`: it
-    happened, and the next open's recovery finishes it.
+    - **The same request where the client allows it.** The client retries
+      a call with the same request id until it is answered or its `tries`
+      are spent. The store's request memory then answers a write that
+      landed with its first reply, and on a mirror re-ships it to a copy
+      that lacks it. The record sets the client's `tries` and timeout so
+      that the commit's whole wait is one call where it can. At 437de30 a
+      caller cannot give a request id of its own. So a resend after a call
+      has given up is a new request: its `Conflict` with this entry still
+      means committed, and a mirror copy that lacked the entry is made good
+      by the store's scan. A way to resend with the caller's own id is
+      henge's to offer, and step 6 uses it if it exists by then.
+  - **An error at steps 3 or 4** comes after the commit. On any error or
+    `Conflict` at an object, the writer **first reads the object's
+    version, then reads `journal/[seq+1]`**, in that order:
+    - **`journal/[seq+1]` exists**: another writer is live. It committed
+      past seq, so it saw seq's entry at its own `Conflict` and applied it.
+      This writer puts nothing more, closes, and raises `Unknown` (the event
+      is committed and applied by the other writer).
+    - **absent**: the only other writer is a gone one whose late request
+      changed the object. The writer puts again against the version it
+      read. Whole values and the priors make a second put the same.
+
+    The order of the two reads closes the race. A live writer puts an
+    object for seq+1 only after its entry at seq+1 is answered, so if the
+    version read already shows such a put, the journal read after it finds
+    seq+1. A put landing after both reads moves the version, and the
+    writer's put then meets `Conflict` and checks again.
+    - A **cursor's** retry puts the larger of the value read and its own,
+      so a gone writer's late, forward value never moves it back.
+    - If the store stays unreachable, the record closes and the operation
+      raises `Unknown`: it happened, and the next open's recovery finishes
+      it.
+    - Recovery's own puts follow the same rule.
+
+    Correctness therefore never rests on the writer lock: a second live
+    writer costs liveness (`Unavailable` and `Unknown`), never a torn
+    record, and `applied` and `head` never step back (henge-2, round 3).
 - **Recovery** at open: read `applied`, then `get` journal seqs from
   `applied + 1` until one is absent. One writer, deciding at `applied`, can
-  leave at most one entry past it. For that entry, it redoes step 3 whole,
+  leave at most one entry past it; recovery redoes every entry it finds, in
+  seq order, all the same. For each entry, it redoes step 3 whole,
   without checking `_seq`: every record put (whole values, so a second put
   is the same), and every index move from the priors, each against the
   version it reads first. Then it does step 4. An event whose journal
@@ -891,7 +939,8 @@ What looked reusable but was not:
     after the commit point overwrites a newer value: every put but the
     commit put (records, indexes, `.state`, cursors, beats) carries the
     version it expects. Any prefix of an event's puts, a split's included,
-    is finished by recovery.
+    is finished by recovery. Even two live writers (the lock bypassed)
+    never tear the record, and `applied` and `head` never move backward.
 14. **A shared record is durable.**
 15. **quarrylith's `src/` names nothing of a yard, a role, a harness or a
     repo host**, and no internal name. Its imports are on an allow-list,
@@ -981,10 +1030,16 @@ Each item is a test marked `templet:3159`, run over every backend in
 - [ ] SQLite: every connection reads back `synchronous` FULL and, on macOS,
   `fullfsync` and `checkpoint_fullfsync` on; one opened without them reads
   `durable` false
-- [ ] Henge: a second `open_henge` on a held record (the same `home`) is
-  refused, naming the holder's pid, and so is a `readonly` open; an open
-  without `home` is refused, and the open writes nothing into the store's
-  folder
+- [ ] Henge: a second `open_henge` on a held record is refused, naming the
+  holder's pid, and so is a `readonly` open; the lock file
+  `<folder>/quarrylith.<name>.lock` is the only thing the open writes into
+  the store's folder
+- [ ] Henge: two live writers on one record (the lock bypassed for the
+  second), with one writer's record put after the commit held back until
+  the other has committed past it, run 200 interleaved operations: the
+  replay equals the records, `check()` is clean, `applied` and `head` never
+  step back (read after every operation), and the held-back writer ends in
+  `Unknown`, never a put after it saw `journal/[seq+1]`
 - [ ] Henge: a store without `sync` and `durability` is refused at open;
   one whose report is not `power_safe and ordered` reads `durable` false,
   and a shared open of it is refused unless `allow_undurable`
@@ -1010,8 +1065,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   every match field agrees with `dump()`, and `dump()` holds every record
 - [ ] Henge: a crash after each put of a split (B, the directory, A) is
   recovered: `read` gives every key once, and the directory lists every
-  chunk; a key below every key of a directory goes in chunk 0 with no
-  directory put
+  chunk; a redo after the directory put makes no second split; a key below
+  every key of a directory goes in chunk 0 with no directory put
 - [ ] Henge: a `Conflict` at the commit point that is the writer's own
   retried put (its entry read back with tuples as lists) goes on as
   committed; an error at the commit point re-sends
@@ -1116,7 +1171,7 @@ closes with it.
    `MOVES` equal to bin/lith's.
    Aim: tier 3.
 6. **The Henge backend** -- quarrylith: `HengeRecord`, `open_henge` over
-   `Store.connect`, the writer lock in `home`, the layout and its chunks with
+   `Store.connect`, the writer lock in the store's folder, the layout and its chunks with
    their split order, the commit protocol with its versions, one put at a
    time, its one sync and its errors, recovery, the
    resumable load, events and followers, and `check()`'s Henge findings;
@@ -1250,20 +1305,37 @@ writer and never splits it (out of scope). The lock is `flock` rather than
 `lockf`: a `lockf` lock is per process, so a second open in the same
 process would pass.
 
-**The writer lock in the record's `home`, not in henge's folder** (both
-reviews of round 2). The store's folder is henge's, run under memLith, and
-its conversion and its "one folder" invariant describe what henge keeps
-there. A file of quarrylith's would be a foreign file that henge's spec
-would have to allow. So the lock sits in a folder of the record's own,
-beside its configuration, which names the URL and `home` together. Every
-opener of one record therefore finds one lock. If two openers did name
-different homes, the record would still not tear: two live writers would
-meet `Conflict` at each other's seqs and fail with `Unavailable` (henge-2's
-reading). The lock is for liveness, and correctness does not rest on it.
-Rejected:
-- the lock in the store's folder: a foreign file in henge's folder;
-- a sibling folder derived from the store's path: still a write into a
-  folder the record does not own, and it needs no less configuration.
+**The writer lock in the store's folder** (henge-2, round 3). Round 2
+moved the lock to a `home` the caller named. Two callers naming two homes
+then held two locks on one record, and the protocol of round 2 let two live
+writers tear it. So the lock is tied to the store again:
+`<folder>/quarrylith.<name>.lock`. The folder is the one thing every opener
+of the record names (it is in the URL), so every opener finds one lock,
+with no configuration to agree on. Round 2's objection was that this is a
+foreign file in henge's folder. The store's spec now lets one stay there,
+since its conversion moves only the entries it names (henge's review of
+that spec, Note 2, taken in its redraft). If the agreed spec says
+otherwise, step 6 moves the lock by a `proposed:` line. Rejected:
+- a caller-named `home` (round 2): two homes, two writers;
+- a sibling folder derived from the store's path: a write into a folder
+  neither henge nor the record owns, which buys nothing once the store
+  allows the file;
+- `.state ["writer"]` put with `expect` at open: a lease in the store,
+  which a crashed writer leaves held until something expires it. `flock`
+  is released by the kernel.
+
+**Correctness never rests on the lock** (henge-2, round 3). After the
+commit point, a `Conflict` first reads the object, then
+`journal/[seq+1]`. If that seq exists, another live writer has committed
+past this one, and it applied this event at its own `Conflict`. So this
+writer stops with `Unknown` and puts nothing more. `applied` and `head` are
+put only while they are below seq. Round 2 claimed this safety ("two live
+writers meet `Conflict` and never tear the record"), but its retry at
+steps 3 and 4 assumed the only other writer was a gone one. A slow live
+writer could re-put seq's values over seq+1's and move `applied` back. The
+check makes the claim true, at the cost of two reads on a conflict, which
+only a second writer or a late request causes. Rejected: trusting the lock
+alone, which is a matter of configuration and of a tool that bypasses it.
 
 **One put at a time.** With puts sent concurrently, two mirror workers
 could apply them in different orders. After a power cut, a store could
@@ -1282,7 +1354,10 @@ after any of them. Written as new chunks, then the directory, then the
 shrunk chunk:
 - no key is ever in no chunk, since the old chunk keeps every key until
   the directory lists the new ones;
-- the only stale state is a key held twice, which the range rule hides;
+- the only stale state is a key held twice, which the range rule hides on
+  every load, the writer's own included, so a redo after the directory put
+  finds the old chunk within its bounds and does not split it again
+  (henge-2, round 3);
 - the split is a function of the chunk and the directory, so recovery
   remakes the same split with the same numbers.
 
@@ -1299,7 +1374,8 @@ limit on the event alone would let Henge refuse, `TooLarge`, what SQLite
 takes. Both backends run the decide step, so both can measure the entry,
 and one rule refuses the same operations on each. `schema.size` counts a
 float as 9 bytes, so a JSON measure, which the standard library gives
-steps 1 to 5, bounds the msgpack the store holds.
+steps 1 to 5, gives the msgpack the store holds within a margin of a few
+kilobytes (henge-2, round 3), which the 256 KiB under `max_inline` covers.
 
 **A follower's `idle_s` of 1 s** (henge-2, round 2). `watch` promises a
 note at least once, but the publisher drops notes for a slow subscriber,
@@ -1471,3 +1547,9 @@ client alone is the dependency (above).
   put but the commit put, `MOVES` inline, a synthetic sample document, and
   the writer lock in the record's `home`; and named as henge's store spec
   names it at 75b39f4 (this PR)
+- 2026-10-30 revised: answering round 3 of henge-2's review: after the
+  commit, a `Conflict` reads the object and then `journal/[seq+1]`, and
+  stops with `Unknown` when that seq exists; `applied` and `head` never move
+  backward, so two live writers never tear the record; the writer lock back
+  in the store's folder, which the store's spec lets stay; every load of a
+  chunk filtered to its range; and round 3's notes (this PR)

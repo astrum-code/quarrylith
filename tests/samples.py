@@ -6,7 +6,7 @@ from quarrylith.record import schema
 from quarrylith.record.schema import RECORDS
 
 
-def sample(kind, **over):
+def sample(kind, /, **over):
     """A valid record of `kind`: every field set to a small value of its
     type (null where it may be), `over` on top."""
     k = RECORDS[kind]

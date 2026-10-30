@@ -345,10 +345,10 @@ def test_label_grammar():
     """templet:3159 -- a second label of one key, an effort: or state: label,
     an unsorted list and more than 64 are refused; the good ones pass."""
     assert schema.check_labels([]) == []
-    assert schema.check_labels(["team:henge", "repo:widgets", "x:a/b.c_d"])
+    assert schema.check_labels(["repo:widgets", "team:alpha", "x:a/b.c_d"])
     with pytest.raises(SchemaError, match="one label per key"):
         schema.check_labels(["team:a", "team:b"])
-    for barred in ("effort:0001", "state:ready"):
+    for barred in ("effort:alpha", "state:ready"):
         with pytest.raises(SchemaError, match="effort.*state|state.*effort"):
             schema.check_labels([barred])
     with pytest.raises(SchemaError, match="sorted"):

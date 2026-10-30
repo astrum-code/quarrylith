@@ -150,7 +150,7 @@ caller's (`authorize`, below).
 ### The records
 
 Each kind is declared in `RECORDS` as `Kind(name, key, fields, match, live,
-journaled=True)`. A field is `Field(name, type, null=False, default=None)`,
+journaled=True, one_of=())`. A field is `Field(name, type, null=False, default=None)`,
 and its `type` is one of **`str`, `int`, `bool`, `json`**. `json` is plain
 data: dicts with `str` keys, lists, `str`, `int`, `float`, `bool`, `None`.
 Times are `int` milliseconds since the epoch, UTC. Amounts of a resource
@@ -167,8 +167,10 @@ code point. SQLite's BINARY collation over UTF-8 gives the same order, and
 the Henge backend sorts by the Python tuple. `read()` and `dump()` give
 rows in that order, as lists, never tuples.
 
-`match` names the fields `read()` may match on, and `live` names the field
-whose `None` means the record is still open. **No record is ever deleted.**
+`match` names the fields `read()` may match on, `live` names the fields
+whose `None` means the record is still open (all of them: a change is open
+until it is merged or dropped), and `one_of` names the fields of which
+exactly one is set (`deps`, `holds`). **No record is ever deleted.**
 A record ends by its end field (`lifted_at`, `released_at`, `merged_at`,
 ...), and a closed item stays.
 
@@ -824,22 +826,38 @@ never reads the legacy file, and bin/lith never imports quarrylith.
   ```json
   {"format": "quarrylith-import/1",
    "source": {"name": "legacy-board", "path": "...", "schema_version": 1,
-              "last_seq": 65965, "read_at": 1793371508596},
+              "last_seq": 65965, "read_at": 1793371508596,
+              "tables": {"items": 3009, "journal": 65966, "...": 0}},
    "records": {"efforts": [...], "items": [...], "item_text": [...], "...": []},
    "counters": {"next:items": 3181, "next:change:widgets": 120, "...": 0},
    "pulled": [{"table": "items", "legacy_key": [3159], "record": "items", "record_key": [3159]}],
-   "left": [{"table": "journal", "legacy_key": null, "count": 65966, "why": "..."}]}
+   "left": [{"table": "journal", "legacy_key": null, "count": 65966, "why": "..."},
+            {"table": "runs", "legacy_key": null, "column": "pid", "count": 3049,
+             "why": "..."}]}
   ```
+
+  `source.tables` is the rows read per legacy table, which is what makes
+  invariant 12 checkable from the document alone. A `left` row for a column
+  carries `column` (and a null `legacy_key`): `compose` keys it
+  `column:<name>`. A `left` row with a null `legacy_key` and no `column` is a
+  whole table, keyed `*`. `compose` keys every other row by its legacy key's
+  canonical JSON.
 
 - **`quarrylith record import FILE --into URL`**:
   - `check_import(doc)` checks that every record is valid against
-    `RECORDS`, that every `pulled` row names a record in `records`, and
-    that every legacy table is named in `pulled` or `left`.
+    `RECORDS`, that every `pulled` row names a record in `records` (or a
+    counter), that every legacy table in `source.tables` is named in
+    `pulled` or `left` and that per table the pulled rows plus the left rows'
+    counts (a column is not a row) equal the rows read, and that each counter
+    is past the highest id its records hold (`next:change:<repo>`: the
+    highest `n` of that repo). It refuses with every fault it finds
+    (`ImportRefused`), not the first only.
   - `compose(doc)` writes one `imports` record, then the records in
     `RECORDS` order as `import` events (one per record kind, split to stay
     under the journal entry's limit), then `pulled` and `left` as `import` events,
-    then the counters as `meta.set`, all `via="import"`. Compose is pure,
-    so the same document gives the same dump.
+    then the counters as `meta.set`, all `via="import"`, each at the
+    source's `read_at`; it adds `next:imports` itself. Compose is pure, so
+    the same document gives the same dump.
   - It splits by the entry, the event and its priors together. A load
     goes into an empty record, so each put's prior is `[kind, key, null]`,
     and compose computes them as it fills an event. It closes the event
@@ -1744,3 +1762,9 @@ client alone is the dependency (above).
   two-writer test run once per row; no object ever deleted, `loading`
   cleared by a versioned null; and `ordered` in the store spec's words at
   f955dab (this PR)
+- 2026-10-30 proposed: the import document names the rows read per legacy
+  table (`source.tables`) and marks a column's `left` row with `column`, so
+  `check_import` can hold invariant 12 from the document alone; `check_import`
+  also checks the counters against the ids in use; `Kind` gains `one_of`
+  (`deps`, `holds`) and its `live` may name several fields (`changes`), as the
+  table says (this PR)

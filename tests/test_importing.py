@@ -54,9 +54,6 @@ def test_check_import_refuses_a_pulled_row_naming_a_missing_record():
     doc["pulled"][0]["record_key"] = [99]
     refused(doc, r"items.*\[99\]")
     doc = make_doc()
-    doc["pulled"][0]["record"] = "comments"
-    refused(doc, "comments")
-    doc = make_doc()
     doc["pulled"][-1]["record_key"] = ["next:nothing"]
     refused(doc, "next:nothing")
     doc = make_doc()

@@ -26,7 +26,7 @@ pins:
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.local
-      - src/henge/store/client/store.py::Store.close
+      - src/henge/store/client/asyncstore.py::AsyncStore.watch
       - src/henge/store/client/api.py::Item
       - src/henge/store/client/api.py::encode_key
     paths: [src/henge/store/client/ops.py]
@@ -37,8 +37,6 @@ pins:
       - src/henge/store/serve/engine.py::Partition._check
       - src/henge/store/serve/engine.py::Space
       - src/henge/store/serve/local.py::Local
-      - src/henge/store/serve/local.py::running
-      - src/henge/store/serve/local.py::stop
       - src/henge/store/serve/router.py::MANY
       - src/henge/store/serve/segments.py::Durability
     at: 1081c1b
@@ -103,11 +101,12 @@ flowchart LR
   imp["bin/lith quarry export<br/>(legacy, read-only)"] -->|import document| L["load(compose(doc))"]
   L --> C
   C["the contract: Record<br/>decide -> one Event"] -->|"event + puts,<br/>one transaction"| S[("SQLite backend<br/>tables + journal")]
-  C -->|"single writer, folder lock:<br/>journal/[seq] put expect absent,<br/>then records + index, then head"| H[("Henge backend<br/>single-node store")]
+  C -->|"single writer, writer lock:<br/>journal/[seq] put expect absent,<br/>records + index, applied,<br/>one sync, then head"| H[("Henge backend:<br/>Store.connect(ipc) to<br/>henge's single-node store")]
   S -->|"events(cursor)<br/>data_version poll"| E["events / cursor / ack"]
   H -->|"events(cursor)<br/>in-process wake"| E
   E --> svc
-  svc -->|"events to other processes<br/>(step 5's socket)"| fol["followers"]
+  H -->|"watch .state head,<br/>get_many .journal"| fol["followers in<br/>other processes"]
+  S -->|"read the file"| fol
   S -->|reads| G["gauges, the ready read"]
   H -->|reads| G
   G --> dash["dashboard, CLI (step 7)"]
@@ -127,9 +126,11 @@ events and so hold the same records, and `dump()` shows it.
 quarrylith is one package, `quarrylith`, Apache-2.0. Through build step 5
 it depends on **the standard library only**. Step 6 adds
 **henge-store-client** (Apache-2.0), imported only by
-`quarrylith.record.henge`. What serves the store in step 6 is open until
-the single-node store's package is known (`Store.local` needs
-henge-store-serve today, which is FSL-1.1; Rationale). Its modules:
+`quarrylith.record.henge`, and nothing else: the Henge backend reaches a
+running store with `Store.connect(ipc://...)`, which needs only the client
+(user, 2026-10-30). `src/` never imports henge-store-serve (FSL-1.1).
+henge-store-serve is a **dev-only** dependency, for the tests that start a
+store (Rationale). Its modules:
 
 | module | holds |
 |---|---|
@@ -137,7 +138,7 @@ henge-store-serve today, which is FSL-1.1; Rationale). Its modules:
 | `quarrylith.record.events` | `Event`, `EVENT_KINDS`, `apply(view, event)`: the fold |
 | `quarrylith.record.contract` | `Record` (an `abc.ABC`), the operations written once over it, `open_record`, `BACKENDS`, `Refused`, `Unavailable`, `Unknown` |
 | `quarrylith.record.sqlite` | `SqliteRecord` |
-| `quarrylith.record.henge` | `HengeRecord(store, name)`; `open_local(folder, name)` (step 6) |
+| `quarrylith.record.henge` | `HengeRecord(store, name)`; `open_henge(folder, name)` (step 6) |
 | `quarrylith.record.importing` | `IMPORT_FORMAT`, `check_import(doc)`, `compose(doc) -> dump` |
 | `quarrylith.gauges` | `Gauge`, `GAUGES` |
 | `quarrylith.cli` | `quarrylith record init|check|dump|load|import|events|gauges` |
@@ -391,19 +392,26 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
   transaction. On Henge it is resumable (below).
 - **A shared record is durable.** `open_record(..., shared=True)` is
   refused on a backend whose `durable` is false, unless it is given
-  `allow_undurable=True` (tests and the bench only). **`durable` means**
-  that an acknowledged event survives a crash of the process or of the OS,
-  by the backend's own sync. On macOS neither SQLite's `FULL` nor Henge's
-  `os.fsync` flushes the drive's cache without `F_FULLFSYNC` (`PRAGMA
-  fullfsync`). So on the laptop `durable` means the same on both backends,
-  and power-safe on neither. Whether it must also mean power-safe is the
-  user's to decide (Rationale).
+  `allow_undurable=True` (tests and the bench only).
+- **`durable` means power-safe** (user, 2026-10-30): an acknowledged event
+  survives a crash of the process, of the OS and a power cut. Each backend
+  syncs before it acknowledges, with `F_FULLFSYNC` on macOS (a plain
+  `fsync` there leaves the drive's cache unflushed) and `fsync` on Linux.
+  Both backends make that one promise, and `durable` is false on any open
+  that does not.
 
 ### The SQLite backend
 
 - One file. WAL, `synchronous = FULL`, foreign keys on, a 10 s busy
   timeout, SQLite at least 3.37 (STRICT tables), as `board_open` sets them.
   Many processes write it.
+- **Power-safe on every platform**: on macOS, also `PRAGMA fullfsync = ON`
+  and `PRAGMA checkpoint_fullfsync = ON`, so a commit and a WAL checkpoint
+  sync with `F_FULLFSYNC`. `board_open` sets neither, so the legacy board is
+  crash-safe but not power-safe on the laptop. On Linux, `FULL` already
+  syncs with `fsync`. Every connection sets the pragmas, since they are per
+  connection. The cost is one full flush per commit, which the bake-off
+  times beside Henge's sync.
 - One STRICT table per record kind, named as the kind, with the declared
   fields as columns (`json` as TEXT with `json_valid`), the key as its
   primary key, and an index per `match` field. Plus `journal(seq INTEGER
@@ -425,46 +433,64 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
 - `events(wait=)` polls `PRAGMA data_version` at most every 250 ms, as
   `wait_events` does. Other processes may open the file, so a follower in
   another process reads the file.
-- `durable` is true when `synchronous` reads FULL or EXTRA. A test may open
-  the file with `synchronous=NORMAL` (a test-only argument), whose
-  `durable` reads false. That is the stand-in for an undurable backend
-  before Henge exists.
+- `durable` is true when `synchronous` reads FULL or EXTRA and, on macOS,
+  `fullfsync` and `checkpoint_fullfsync` read 1, all read back from the
+  connection. A test may open the file with `synchronous=NORMAL` (a
+  test-only argument), whose `durable` reads false. That is the stand-in
+  for an undurable backend before Henge exists.
 - `schema_version` in `meta` (`RECORD_SCHEMA_VERSION = 1`). An open
   refuses a newer version, and an older one names `quarrylith record
   migrate`.
 
 ### The Henge backend
 
-The Henge backend runs on **henge's single-node store** (below): one store
-in one process, from one folder, serving henge-store-client's `Store`
-operations, with no router and no ring. Its build step waits for it (user,
-2026-10-30). The layout uses only `put` and `delete` with `expect`, `get`
-and `get_many` of plain values, so it does not depend on what serves them.
-It does not use `watch`.
+The Henge backend runs on **henge's single-node store, effort 0001 (user,
+2026-10-30)** (Boundaries). That store is henge's router-and-worker pattern on
+one host, over `ipc://`, from one folder. The router and the worker ask a
+new plugin point, `henge.placements`, for where a key lives: `single` (one
+worker), `mirror` (two workers holding the same data) or `ring` (today's
+ring). It serves the same `Store` operations as a cluster, `get_many` and
+`watch` included. It holds its own lock on its folder until its engines
+have stopped, and it acknowledges a `sync` barrier only once everything
+written before it is power-safe on disk. The record's build step waits for
+it (user, 2026-10-30).
 
-- **One writer, and the folder is quarrylith's alone.** A record on Henge
-  is written by the one process that holds it. `open_local(folder, name)`:
-  1. takes an exclusive `fcntl.flock` on `<folder>/quarrylith.lock`. It is
-     refused, naming the holder's pid, while another open file holds it.
-     The lock's descriptor is not inherited by children.
-  2. **then** starts the store on the folder;
-  3. and gives the `HengeRecord`.
+The backend reaches it with **`Store.connect("ipc://<folder>/henge.sock")`**,
+which needs only the Apache-2.0 client, to a store that runs as its own
+process (`henge single DIR`, which memLith will run under it). The backend
+never starts or stops the store. The layout uses only `put` and `delete`
+with `expect`, `get`, `get_many`, `watch` and `sync`, all of plain values,
+so it does not depend on the placement: `single` and `mirror` hold it alike.
 
-  `close()` **stops the store** (`local.stop(folder)` today, the
-  single-node store's stop once it exists), and only then releases the
-  lock. So the lock is held for as long as an engine runs on the folder.
+- **One writer per record.** A record on Henge is written by the one
+  process that holds its writer lock. `open_henge(folder, name)`:
+  1. takes an exclusive `fcntl.flock` on `<folder>/quarrylith.<name>.lock`.
+     It is refused, naming the holder's pid, while another open file holds
+     it. The lock's descriptor is not inherited by children.
+  2. connects with `Store.connect`, and refuses a store whose durability
+     report is missing;
+  3. runs recovery, and gives the `HengeRecord`.
 
-  The lock binds quarrylith's openers only. Nothing else may open the
-  folder (`henge local DIR`, a bare `Store.local(DIR)`) until the
-  single-node store locks its own folder (Boundaries).
-- Other processes reach the record through the writer's process, which is
-  step 5's service. Inside the process, one lock orders the operations,
-  and a `reading()` holds a read lock. So a `dump()` or a gauge sweep
-  delays the writer for its length, where SQLite's WAL readers delay
-  nothing (the bake-off times it).
-- **`readonly=True`** takes the same lock, so it is refused while the folder
-  is held. It runs recovery (the only writes it makes), then refuses every
-  operation.
+  `close()` closes the client, then releases the lock.
+
+  **One engine per folder is the store's**: its `henge.lock` binds every
+  opener of the folder (`henge single`, `henge local`, `Store.single`,
+  `Store.local`). The writer lock only keeps two record writers apart. A
+  writer that has gone can still have a request in flight. Every put after
+  the commit point carries `expect={"version": v}`, the version the writer
+  last read or wrote, so a late request can never overwrite a newer value
+  (below).
+- **Other processes** may follow the record's events directly: `watch`
+  `.state ["head"]` and `get_many` `.journal` up to it, over the same
+  socket. Every other read, and every operation, goes through the writer's
+  process, which is step 5's service. Records past `head` may be half
+  applied, so a reader in another process must not read `.rec`. Inside the
+  process, one lock orders the operations, and a `reading()` holds a read
+  lock. So a `dump()` or a gauge sweep delays the writer for its length,
+  where SQLite's WAL readers delay nothing (the bake-off times it).
+- **`readonly=True`** takes the same writer lock, so it is refused while
+  the record is held. It runs recovery (the only writes it makes), then
+  refuses every operation.
 - **The layout**, in four spaces named `quarrylith.<name>.*`, every key a
   list of plain values:
 
@@ -499,38 +525,59 @@ It does not use `watch`.
   2. `put(journal, [seq], entry, expect={"absent": True})`, where seq is
      `head + 1`. **This is the commit point.**
   3. Each put of the event, `put(rec, [kind, *key], value)`, then the
-     event's index edits, batched.
-  4. `put(state, ["applied"], seq)`, `put(state, ["head"], seq)`, then wake
-     the waiting readers, then return.
-- **An error at the commit point or after it.**
-  - A `Conflict` at step 2 is read back. If `journal/[seq]` holds this
+     event's index edits, batched. Each carries `expect={"version": v}`
+     (or `absent` for a new object), from the writer's last read or write
+     of that object.
+  4. `put(state, ["applied"], seq)`, then **one `sync()`**, then
+     `put(state, ["head"], seq)`, then wake the waiting readers, then
+     return. The operation is acknowledged only after its sync, so it is
+     power-safe when its caller hears of it, and a follower that sees
+     `head` at seq sees a synced event. One sync per operation, not per
+     write, is enough because the store keeps writes in their order: a
+     power cut loses only a tail, and the journal entry comes first, so
+     recovery handles any tail.
+- **An error at the commit point or after it.** The writer takes no other
+  operation until the operation's outcome is known.
+  - **A `Conflict` at step 2** is read back. If `journal/[seq]` holds this
     entry, it was this writer's own retried put (henge's retry gap, #158),
-    and the operation goes on to step 3.
-  - Any other `Conflict`, and any error at steps 2 to 4, stops the writer.
-    It stops the store, opens it again and runs recovery before it takes
-    another operation, so no request it stopped waiting for can land
-    later.
-  - The operation is then reported by what recovery found. If its entry is
-    in the journal, it happened and recovery finished it, so the operation
-    returns its result. If not, it raises `Unavailable`: it did not happen.
-    If the reopen fails too, it raises `Unknown`.
+    and the operation goes on to step 3. If it holds another entry, a
+    request from a writer that has gone landed late at that seq. The writer
+    runs recovery, which applies that entry, and the operation raises
+    `Unavailable`: it did not happen.
+  - **Any other error at step 2** (the store unreachable, a timeout): the
+    writer sends the same put again, `expect absent`, until the store
+    answers. The commit put is idempotent by content, so a success, or a
+    `Conflict` with this entry, means it committed, and a `Conflict` with
+    another entry is the case above. If the store stays unreachable past the
+    record's timeout, the record closes and the operation raises `Unknown`.
+    If the entry landed, the next open's recovery finishes it.
+  - **An error at steps 3 or 4** comes after the commit. The writer reads
+    the object's version and puts again. Whole values and the priors make
+    a second put the same, and a version `Conflict` means a late request
+    changed the object, so it re-reads and puts again. If the store stays
+    unreachable, the record closes and the operation raises `Unknown`: it
+    happened, and the next open's recovery finishes it.
 - **Recovery** at open: read `applied`, then `get` journal seqs from
   `applied + 1` until one is absent. One writer, deciding at `applied`, can
-  leave at most one entry past it. For that entry it redoes step 3 whole:
-  every record put (whole values, so a second put is the same) and every
-  index move from the priors, without checking `_seq`. Then it sets
-  `applied` and `head`. An event whose journal entry was written is never
-  lost by a crash between steps 2 and 4. One whose entry was not written
-  never happened, and its seq is given to the next operation.
+  leave at most one entry past it. For that entry, it redoes step 3 whole,
+  without checking `_seq`: every record put (whole values, so a second put
+  is the same), and every index move from the priors, each against the
+  version it reads first. Then it does step 4. An event whose journal
+  entry was written is never lost by a crash between steps 2 and 4. One
+  whose entry was not written never happened, and its seq is given to the
+  next operation.
 - **Reads** are `get` on `.rec`. `read(**match)` reads the index chunks
   for the first match field, then `get_many`s the keys in batches of at
   most 1,000 (henge's `MANY`), and checks each record against every match
   field. `dump()` walks `[kind, "*", chunk]` the same way. No read lists a
   space.
 - **Events**: `events(wait=)` wakes on the writer's own commit, in the
-  process. A follower in another process is step 5's (its socket), and
-  gets events up to `head`. `cursors` are `.rec` entries the writer puts
-  without an event.
+  process. A follower in another process watches `.state ["head"]` (at
+  least once, with the version, catching up by a read after a quiet
+  spell, as `AsyncStore.watch` does). It reads `.journal` from its cursor
+  up to `head` with `get_many`, and gives the same semantics as
+  `events()`. `cursors` are `.rec` entries the writer puts without an
+  event. A follower's cursor is its own, until step 5's service records it.
 - **The resumable load** writes events in seq order, each through the
   commit protocol. It first writes `.state ["loading"]`, with the digest
   of the dump (sha256 of its canonical encoding). A load stopped part-way
@@ -541,11 +588,12 @@ It does not use `watch`.
   `head`), a record whose `_seq` is past `applied`, and an index chunk that
   disagrees with the records. An undurable store (tests, the bench) can
   come back torn after a power cut, and these findings say so.
-- **`durable`** is the store's own report of its durability. It is true only
-  when the store acknowledges a write once it is durable and keeps writes
-  in their order. Under today's local mode (`batch`, 64 separately synced
-  partitions) it is false, so a shared record on Henge waits for the
-  single-node store (Boundaries).
+- **`durable`** reads the store's durability report. It is true only when
+  the report says the `sync` barrier is power-safe (`F_FULLFSYNC` on macOS,
+  `fsync` on Linux) and that writes keep their order, with `single` or
+  `mirror` alike (on the mirror, `sync` is a barrier on both workers). A
+  store with no report (today's local mode: `batch`, 64 separately synced
+  partitions, no `sync`) is refused at open.
 
 ### The import
 
@@ -687,9 +735,11 @@ read. Each is computed from the records named, and none is stored:
 - 2710's review heads -- `reviews.heads` written once, the one binding of
   an approval.
 - henge-store-client `Store.put`/`delete` with `expect`, `get`,
-  `get_many` -- the Henge backend's only operations.
-- henge-store-serve `local.running`/`stop` -- the store's start and stop,
-  which the folder lock brackets until the single-node store gives its own.
+  `get_many`, `AsyncStore.watch` -- the Henge backend's operations, with
+  the single-node store's `Store.connect`, `sync()` and durability report
+  once they exist.
+- henge-store-serve, dev-only: `henge single DIR` and `Store.single`, which
+  the Henge tests start a store with.
 - 1423's conformance pattern (`BACKENDS`, `over_backends`, a fixture per
   backend, a skip with its reason, never a pass) -- the suite in
   quarrylith's `tests/`.
@@ -705,10 +755,10 @@ What looked reusable but was not:
 - **Henge logs** for the journal: `append` takes no `expect`, so two
   appends cannot be ordered against a decision. A blob per seq written
   `absent` can.
-- **Henge `watch`** for followers: it is not reachable through
-  `Store.local` (no watch endpoint, no listen address, and no `watch` grant
-  for the local role), and the folder lock keeps other processes off the
-  store anyway. Followers go through step 5's service.
+- **`Store.local`** for the backend: it starts the store inside the
+  writer's process, needs FSL henge-store-serve, and has no `watch` (no
+  watch endpoint, no listen address, no grant for the local role).
+  `Store.connect` to the single-node store has none of these problems.
 - **memlith `board.py`**: a GitHub mirror whose record is GitHub. It is not
   a backend.
 
@@ -751,8 +801,10 @@ What looked reusable but was not:
     or in `left`, and `pulled` plus `left` counts equal the rows read, per
     table.
 13. **One writer per Henge record, and one engine per folder**: the
-    folder's lock is taken before its store starts, and released only
-    after its store has stopped.
+    record's writer lock is held while a writer is open on it, and the
+    store's own folder lock is held until its engines have stopped. No put
+    after the commit point overwrites a newer value (every one carries the
+    version it expects).
 14. **A shared record is durable.**
 15. **quarrylith's `src/` names nothing of a yard, a role, a harness or a
     repo host**, and no internal name. Its imports are on an allow-list,
@@ -781,8 +833,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   `pulled` nor `left`, and one whose `pulled` row names a missing record
 - [ ] imports: every module under `src/quarrylith` imports only the
   standard library and `quarrylith`, and `henge.store.client` only from
-  `quarrylith/record/henge.py` (an allow-list read from the import
-  statements, naming no internal module)
+  `quarrylith/record/henge.py`, never `henge.store.serve` (an allow-list
+  read from the import statements, naming no internal module)
 - [ ] a refused operation writes no record, no event and takes no id or
   seq: the next operation gets the numbers it would have had
 - [ ] after a run of mixed operations, the replay of the journal from seq 1
@@ -834,19 +886,33 @@ Each item is a test marked `templet:3159`, run over every backend in
 - [ ] SQLite: `open_record` refuses a newer `schema_version` and names
   `migrate` for an older one
 - [ ] SQLite: a `DELETE` on a record table is aborted by its trigger
-- [ ] Henge: a second `open_local` on a held folder is refused, naming the
+- [ ] SQLite: every connection reads back `synchronous` FULL and, on macOS,
+  `fullfsync` and `checkpoint_fullfsync` on; one opened without them reads
+  `durable` false
+- [ ] Henge: a second `open_henge` on a held record is refused, naming the
   holder's pid, and so is a `readonly` open
-- [ ] Henge: after `close()`, the folder's store stops before the lock is
-  free, so a second opener that takes the lock finds no engine running on
-  the folder
+- [ ] Henge: a store without a durability report, or whose report is not
+  power-safe and ordered, is refused at open (or reads `durable` false,
+  for `allow_undurable`)
+- [ ] Henge: an operation's `sync()` comes after its last record and index
+  put and before its `head` put and its return, once per operation
+- [ ] Henge: a late request from a writer that has gone (held back, then
+  released after a new writer committed) never overwrites a newer value,
+  and a late commit put at a seq the new writer took is recovered as that
+  entry
+- [ ] Henge: a follower in another process, connected over `ipc://`, gets
+  every event up to `head` in order, with no gap, by `watch` and
+  `get_many`
 - [ ] Henge: a crash after the journal put and before `applied` is
   recovered at the next open, and the replay still equals the records
 - [ ] Henge: a crash between a record put and its index puts (an item
   moved from ready to claimed, and an item filed) is recovered: `read` by
   every match field agrees with `dump()`, and `dump()` holds every record
 - [ ] Henge: a `Conflict` at the commit point that is the writer's own
-  retried put goes on as committed, and an error after the commit point
-  reopens the store and returns the operation's result
+  retried put goes on as committed; an error at the commit point re-sends
+  the same put and returns the operation's result; a store unreachable past
+  the timeout raises `Unknown`, and the next open finishes an entry that
+  landed
 - [ ] Henge: a load stopped part-way continues from `head() + 1` at the
   next open when given the same dump, refuses a different dump, and refuses
   every other operation until it ends
@@ -907,7 +973,7 @@ closes with it.
    Acceptance: refused writes nothing; replay; `events` order; waiting
    `events`; `ack`; `dump` of a load; `read` outside `match`; effort links;
    `ready()` leaves out; `MOVES`; `authorize`; `shared` refused; SQLite
-   `schema_version`; SQLite `DELETE` aborted.
+   `schema_version`; SQLite `DELETE` aborted; SQLite power-safe pragmas.
    Aim: tier 4, deep: the transaction and the journal's guarantees across
    processes.
 3. **Work in flight on SQLite** -- quarrylith: `leases`, `tasks`, `nodes`,
@@ -933,12 +999,15 @@ closes with it.
    Acceptance: export read-only and `0600`; every item pulled; decisions
    and merges; every legacy column; the linking pass; the sample document.
    Aim: tier 3.
-6. **The Henge backend** -- quarrylith: `HengeRecord`, `open_local`, the
-   folder lock and its lifetime, the layout and its chunks, the commit
-   protocol and its errors, recovery, the resumable load, events, and
-   `check()`'s Henge findings; the henge-store-client dependency. `BACKENDS`
-   gains `henge`, and the whole suite runs over it. **Waits on the
-   single-node store step of effort 0001 (user, 2026-10-30).**
+6. **The Henge backend** -- quarrylith: `HengeRecord`, `open_henge` over
+   `Store.connect`, the writer lock, the layout and its chunks, the commit
+   protocol with its versions, its one sync and its errors, recovery, the
+   resumable load, events and followers, and `check()`'s Henge findings;
+   henge-store-client as the one dependency, and henge-store-serve as a
+   dev-only one for the fixture. `BACKENDS` gains `henge`, and the whole
+   suite runs over it, on the `single` store and on the `mirror`. **Waits
+   on henge's single-node store, effort 0001 (user, 2026-10-30), the
+   mirror included.**
    Acceptance: every `Henge:` item.
    Aim: tier 5, deep: a commit protocol over single-object writes and its
    recovery. henge reviews it as the second role.
@@ -965,23 +1034,25 @@ after step 6. The switch (#3170) waits on the bake-off.
 - No roles: who may move, grant or merge, and every `when` condition of
   `MOVES`, is the caller's `authorize`.
 - **Henge is henge's.** The Henge backend uses `Store`'s operations as they
-  are, and its build step waits on a store henge provides: the
-  **single-node store**. It was the user's proposal (2026-10-30): the
-  engine without the router or the ring, serving the same operations, run
-  from one folder. It is **the single-node store step of effort 0001
-  (user, 2026-10-30)**, a henge step a planner session is writing up with
-  the user, and its number comes later. What the record needs of it, and
-  no more:
-  - **a write is acknowledged only once it is durable**, and what a power
-    cut keeps is the writes in their order, so the record's recovery sees
-    at most a lost tail. The unit of sync (each write, a barrier per
-    operation on one ordered log, a group commit) is the store's step's to
-    choose;
-  - it reports its durability, so `durable` can read it;
-  - it locks its own folder, so no second engine starts on it, whoever
-    opens it;
-  - `put` and `delete` with `expect`, `get`, `get_many` (with its limit
-    stated), and a stop that returns once the engine has stopped.
+  are, and its build step waits on a store henge provides: **henge's
+  single-node store, effort 0001 (user, 2026-10-30)**. It is a henge step
+  written up by the planner with the user (the effort's
+  `steps/henge-single-node-store.md`), and its number comes later. It is
+  henge's router-and-worker pattern on one host, over `ipc://`, with the
+  ring behind a new plugin point, `henge.placements`: `single`, `mirror` or
+  `ring`. It is not a fork of local mode, and not a store without the
+  router. What the record needs of it, and no more:
+  - the same `Store` operations: `put` and `delete` with `expect`, `get`,
+    `get_many` (with its limit stated) and `watch`, for a follower in
+    another process;
+  - one folder, reached by `Store.connect("ipc://<folder>/henge.sock")`
+    with the Apache-2.0 client alone;
+  - its own folder lock, held until the engine stops, whoever opens the
+    folder;
+  - **a write acknowledged only once it is durable**, power-safe, with
+    writes kept in their order. The store decided how: a `sync` barrier,
+    once per operation, with group commit (user, 2026-10-30);
+  - its durability reported, so `durable` can read it.
 
   This page edits nothing of henge's.
 - The legacy board is read only: opened `mode=ro`, never copied into place,
@@ -1026,27 +1097,36 @@ SQLite journal do not carry them. Rejected:
 - rebuilding the touched chunks from the records: it needs the old value
   too.
 
-**One writer on Henge, and the lock's lifetime.** Local mode runs its store
-inside the opening process and does not lock its folder. So two processes
-opening one folder would be two engines on one set of segments: each checks
-`expect absent` against its own memory, and either one's compaction can
-replace files the other appends to. The lock rules that out only if it is
-held for as long as the engine runs. `Store.close` does not stop the
-engine, so `close()` stops it before the lock goes. The lock also makes the
-decide step safe: between operations the writer's view is the record.
+**One engine per folder is the store's; one writer per record is the
+record's.** Two engines on one set of segments would each check `expect
+absent` against their own memory, and either one's compaction could replace
+files the other appends to. Round 1 ruled that out with quarrylith's own
+lock held until it stopped the store. With the store in its own process,
+reached by `Store.connect`, the backend no longer owns the engine, and the
+store's `henge.lock` binds every opener itself (henge's single-node store,
+effort 0001). What stays the record's is one writer per record: it makes the
+decide step safe, since between operations the writer's view is the record.
 Multi-writer Henge would need a fenced writer lease and a re-read on every
 conflict, which nothing on one node needs. The mesh's placement moves the
 writer and never splits it (out of scope). The lock is `flock` rather than
 `lockf`: a `lockf` lock is per process, so a second open in the same
 process would pass.
 
+**Versions on every put after the commit.** A writer over a socket cannot
+stop the store to end a request it stopped waiting for. So a request from a
+writer that has gone can land after the next writer has written. Every put
+after the commit point therefore expects the version the writer last saw,
+and a late one fails rather than overwriting a newer value. The commit put
+expects `absent`, so a late one meets the seq taken and is either the same
+entry or recovered as its own.
+
 **An error at the commit point is resolved, not passed on.** A store error
 at step 2 may be a write that landed. Reporting it as not done would be
-false, and reporting every one as unknown would hand each caller a read. So
-the writer stops the store, which ends any request in flight, and reads the
-journal. The answer is then known, except when the store cannot be opened
-again. Step 5's service needs the same rule for a caller whose connection
-drops (left to it).
+false, and reporting every one as unknown would hand each caller a read.
+The commit put is idempotent by content, so the writer sends it again until
+the store answers, and the answer is then known. It is `Unknown` only when
+the store stays unreachable. Step 5's service needs the same rule for a
+caller whose connection drops (left to it).
 
 **Indexes as blob chunks.** No Henge read lists a space, so every read the
 contract offers has to come from a key the record already knows. Chunks by
@@ -1063,12 +1143,13 @@ list. So `pulled` and `left` key on the legacy key's canonical JSON as a
 `str` only, SQLite's BINARY order over UTF-8 and Python's tuple order are
 the same.
 
-**Followers through the service.** A follower in another process cannot
-`watch` today's local mode, and a Henge record has one writer process by
-design. Rather than ask henge for listen addresses, a watch endpoint and a
-grant, the record delivers events in its own process, and step 5's service
-carries them further. On SQLite a follower may read the file, as it can
-today.
+**Followers by `watch`, reads through the writer.** The single-node store
+serves `watch` over `ipc://`, so a follower in another process watches
+`head` and reads the journal itself, with no hop through step 5's service.
+That is the cheaper path, and the events are the record's contract either
+way. Record reads stay with the writer, since only it knows which records
+are past `head` and half applied. On SQLite a follower may read the file,
+as it can today.
 
 **Item states kept as the legacy board's nine, and every move kept.** The
 review flow (2710's `PR_OUT`), the landing mode and the import all read
@@ -1099,9 +1180,11 @@ not imported) catches drift between the writer and the reader before the
 switch.
 
 **Henge before the switch** (user, 2026-10-30). Today's local mode is a
-router and a worker with a ring, for one node. The user asked:
-- for an engine-only single-node store instead;
-- for the Henge step to wait for it;
+router and a worker with a one-node ring, in process. The user asked:
+- for henge's single-node store instead: the same router-and-worker
+  pattern on one host over `ipc://`, the ring a plugin behind
+  `henge.placements`, one Henge and not a fork;
+- for the Henge step to wait for it, the mirror included;
 - for that store to join effort 0001 now, as a henge step.
 
 So the order has no cycle: step 6 waits on the store's step, the bake-off's
@@ -1115,24 +1198,54 @@ sweep's burst (the legacy journal's peak is 273 events in one second) would
 queue for seconds. henge-2's reading is that one ordered log with one sync
 per operation is as safe for this protocol: a power cut then loses only a
 tail, and since the journal entry is written first, recovery handles any
-tail. That holds. So the page asks only that a write is acknowledged once
-it is durable and that writes keep their order, and leaves the unit of
-sync to the store's step.
+tail. That holds. So the page asked only that a write is acknowledged once
+it is durable and that writes keep their order, and left the unit of sync
+to the store's step. That step decided it: one `sync` barrier per
+operation, with group commit (user, 2026-10-30). The backend calls it once,
+at step 4.
 
-**The dependency waits for step 6.** Steps 1 to 5 use nothing of Henge, so
-they depend on nothing, and `bin/lith standalone quarrylith` pulls in no
-client and no zmq for them. What serves the store in step 6 is the
-single-node store's package, not yet known. If it is FSL, like
-henge-store-serve, whether Apache-2.0 quarrylith may depend on it (as an
-optional extra or not) is the user's to decide (left open).
+**`durable` means power-safe** (user, 2026-10-30). A record that runs our
+development must survive the laptop losing power. So both backends sync
+with `F_FULLFSYNC` on macOS and `fsync` on Linux: Henge through the store's
+`sync`, SQLite through `fullfsync` and `checkpoint_fullfsync`, which
+`board_open` never set. The two backends then make the same promise, and
+the bake-off measures what that costs each of them. Rejected: crash-safe
+only, which is what `FULL` with a plain `fsync` gives on macOS. It would
+have left the meaning of `durable` hanging on the platform.
+
+**The dependency: the client alone** (user, 2026-10-30). Steps 1 to 5 use
+nothing of Henge, so they depend on nothing, and `bin/lith standalone
+quarrylith` pulls in no client and no zmq for them. Step 6 reaches the
+store by `Store.connect(ipc://...)`, which needs only the Apache-2.0
+client. So Apache-2.0 quarrylith never imports FSL henge-store-serve, and
+the licence question is settled. `Store.single(folder)` starts the store in
+the calling process and needs henge-store-serve, so the backend does not
+use it.
+
+**The tests may start a store, as a dev-only dependency.**
+henge-store-serve sits in quarrylith's dev group only. It is never in the
+package's dependencies, so nothing that installs quarrylith gets it, and
+the imports test keeps it out of `src/`.
+- The Henge fixture starts `henge single DIR` (and `--mirror`) as a
+  process and connects with `Store.connect`, so the suite runs the path
+  production takes.
+- A test that needs the store in its own process may use `Store.single`.
+- Without henge-store-serve installed, the Henge tests skip with that
+  reason, never pass (1423's pattern).
+
+Rejected: a fake store for the whole Henge suite. It would test the layout
+and not the sync, the lock or `watch` over `ipc://`, and "Real before fake"
+asks for the real one where it exists.
 
 **Left to later steps**:
 - the order, the admission filter's ranking and the landing limit
   (step 4);
 - the allocator's policy and its standing consumers (step 3);
-- the services, their socket, followers in other processes, a dropped
+- the services, their socket, a follower's cursor kept for it, a dropped
   caller's unknown outcome, supervision's kill of the process tree and the
   sandbox drivers (step 5);
+- running `henge single` as a yard service under memLith (memlith's, in a
+  later step);
 - the dashboard's views (step 7);
 - the choice of default backend for a release (the bake-off, #2707).
 
@@ -1140,10 +1253,9 @@ optional extra or not) is the user's to decide (left open).
 (#3044) shaped the `efforts`, `effort_links` and `statements` records here,
 and gate evaluation stays its own.
 
-**Left open for the user**: whether `durable` must mean power-safe on macOS
-(`F_FULLFSYNC` on both backends, at its cost on every sync), and the
-licence of step 6's server-side dependency (above). Neither blocks steps 1
-to 5.
+**Nothing is left open for the user.** Round 2 left two questions, and the
+user answered both on 2026-10-30: `durable` means power-safe, and the
+client alone is the dependency (above).
 
 ## History
 
@@ -1152,3 +1264,8 @@ to 5.
   and should-fix of round 1's reviews (henge-2, the second role;
   workbench-4, the owner) and the order the user decided ("Henge before
   the switch") (this PR)
+- 2026-10-30 revised: aligned with henge's single-node store, effort 0001
+  (user, 2026-10-30): the router-and-worker pattern on one host with
+  `henge.placements`; `durable` power-safe on both backends; the backend
+  on `Store.connect` with the client alone, and henge-store-serve dev-only
+  for the tests (this PR)

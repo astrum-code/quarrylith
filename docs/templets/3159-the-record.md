@@ -469,8 +469,8 @@ written before it is power-safe on disk. The record's build step waits for
 it (user, 2026-10-30).
 
 **The store's names** are its spec's: benchLith's
-`docs/efforts/0001-the-queue/specs/henge-single-node-store.md`, at 75b39f4
-(not yet reviewed). They are `Store.connect("ipc://<folder>/henge.sock")`,
+`docs/efforts/0001-the-queue/specs/henge-single-node-store.md`, at f955dab
+(under review). They are `Store.connect("ipc://<folder>/henge.sock")`,
 `sync(space)` and `durability(space)`, whose report carries `power_safe`
 and `ordered`. If the store's review changes them, step 6 updates this page
 by a `proposed:` line.
@@ -478,10 +478,18 @@ by a `proposed:` line.
 The backend reaches it with **`Store.connect("ipc://<folder>/henge.sock")`**,
 which needs only the Apache-2.0 client, to a store that runs as its own
 process (`henge single DIR`, which memLith will run under it). The backend
-never starts or stops the store. The layout uses only `put` and `delete`
-with `expect`, `get`, `get_many`, `watch` and `sync`, all of plain values
-(blobs, which sit in the store's one segment log), so it does not depend on
-the placement: `single` and `mirror` hold it alike.
+never starts or stops the store. The layout uses only `put` with `expect`,
+`get`, `get_many`, `watch` and `sync`, all of plain values (blobs, which sit
+in the store's one segment log), so it does not depend on the placement:
+`single` and `mirror` hold it alike.
+
+**The backend never deletes an object.** On Henge, `expect absent`
+succeeds on a deleted key (`Partition._live` gives `None` for an object in
+the trash, and `_check` takes that as absent). So a late `absent` put could
+bring a deleted object back. With no delete, an object once written stays,
+and a late `absent` put meets `Conflict`. What would be a delete is a
+versioned put of null: `.state ["loading"]`, at a load's end, is the one
+such case.
 
 - **One writer per record.** A record on Henge is written by the one
   process that holds its writer lock. `open_henge(folder, name)`:
@@ -490,7 +498,7 @@ the placement: `single` and `mirror` hold it alike.
      is refused, naming the holder's pid, while another open file holds it,
      and its descriptor is not inherited by children. The store's spec lets
      a foreign file stay in its folder: its conversion moves only the
-     entries it names (henge's review of that spec, its Note 2). The lock is
+     entries it names (its S49 at f955dab, from henge's review of it). The lock is
      for liveness. Correctness does not rest on it (the commit protocol,
      below; Rationale).
   2. connects with `Store.connect`, and reads the store's report,
@@ -506,12 +514,10 @@ the placement: `single` and `mirror` hold it alike.
   opener of the folder (`henge single`, `henge local`, `Store.single`,
   `Store.local`). The writer lock keeps two record writers apart. A
   writer that has gone can still have a request in flight, and an opener
-  that bypassed the lock is a second live writer. So **every put
-  the writer makes, but the commit put itself**, carries `expect={"version":
-  v}` (or `absent` for a new object), the version the writer last read or
-  wrote. That covers the records, the index chunks and directories, every
-  `.state` key, and the `cursors` and `beats` entries. A late request can
-  then never overwrite a newer value (below).
+  that bypassed the lock is a second live writer. So **every put the writer
+  makes, but the commit put itself, passes one guard** (below, "The
+  guard"), and the table "Every put the writer makes" lists each path with
+  it.
 - **One put at a time.** The writer sends each put only after the one
   before it is answered: the commit put, the record and index puts, the
   `.state` puts, and the bookkeeping, all under the one lock that orders
@@ -585,8 +591,8 @@ the placement: `single` and `mirror` hold it alike.
       chunk's range, and readers ignore them.
 
     Recovery redoes the event's index edits from its priors against the
-    chunks and directory as it finds them, and puts each object against
-    the version it reads first:
+    chunks and directory as it finds them, each put through the guard
+    (below):
     - **before (2)**, the directory and the old chunk are unchanged, so it
       computes the same split, with the same numbers and the same keys,
       and puts over the orphans;
@@ -601,34 +607,78 @@ the placement: `single` and `mirror` hold it alike.
     import event of 5,000 comments rewrites a chunk once, not 5,000 times.
 - **The commit protocol**, per operation:
   1. Decide the event and its priors against the record at `applied`,
-     which equals `head` between operations.
+     which equals `head` between operations. At decide the writer reads
+     every object the event will put: its records, its index chunks
+     (filtered to their range) and their directories, `applied` and `head`.
+     So every version steps 3 and 4 expect was seen before step 2.
   2. `put(journal, [seq], entry, expect={"absent": True})`, where seq is
-     `head + 1`. **This is the commit point.**
+     `head + 1`. **This is the commit point.** Its success is also the
+     guard's check for steps 3 and 4 (below).
   3. Each put of the event, `put(rec, [kind, *key], value)`, then the
      event's index edits, batched, a split in its order. Each carries
-     `expect={"version": v}` (or `absent` for a new object), from the
-     writer's last read or write of that object.
+     `expect={"version": v}` (or `absent` for a new object), by the guard.
   4. `put(state, ["applied"], seq)`, then **one `sync(space)`** (on the
      record's `.journal`; the space names only the grant, and the barrier
      covers every write), then `put(state, ["head"], seq)`, then wake the
-     waiting readers, then return. Both `.state` puts carry the version they
-     expect, and **neither moves backward**: each is put only while the
-     value read is below seq. A value at or past seq is left as it is. The
-     operation is acknowledged only after its sync, so it is
-     power-safe when its caller hears of it, and a follower that sees `head`
-     at seq sees a synced event. One sync per operation, not per write, is
-     enough because the store keeps the record's writes in their order: a
-     power cut loses only a tail, and the journal entry comes first, so
-     recovery handles any tail.
+     waiting readers, then return. Both `.state` puts pass the guard, and
+     **neither moves backward**: each is put only while the value read is
+     below seq. A value at or past seq is left as it is. The operation is
+     acknowledged only after its sync, so it is power-safe when its caller
+     hears of it, and a follower that sees `head` at seq sees a synced
+     event. One sync per operation, not per write, is enough because the
+     store keeps the record's writes in their order: a power cut keeps a
+     write only with every write answered before it was sent, and the
+     journal entry comes first, so recovery handles any tail.
+- **The guard: one rule for every put but the commit put** (henge-2, round
+  4). `high` is the highest seq this writer knows to be committed: its own
+  seq inside an operation, the one entry recovery found, and `head`
+  between operations.
+  - **A put's `expect`** is either:
+    - the version of the writer's own last put of that object. Any later
+      put by anyone moves it, so the put would meet `Conflict`; or
+    - a version (or `absent`) **read before a check that found
+      `journal/[high+1]` absent**.
+  - **The check** is `get(journal, [high+1])`, or the commit put itself,
+    whose `absent` at `high + 1` succeeded (and `high` is then its seq). So
+    a put against a version read after the last check is preceded by an
+    explicit check, in this order: read the object, then the journal, then
+    put.
+  - **The check finds the entry**: another writer is live and has committed
+    past `high`. This writer puts nothing more and closes the record. Inside
+    an operation past its commit point it raises `Unknown`. The event is
+    committed, and the other writer applied it at its own `Conflict` before
+    it could commit past it. Anywhere else (an open's recovery, a load's
+    `loading`, bookkeeping) it raises `Unavailable`.
+  - **A `Conflict` at the put** means the object moved after its version was
+    seen. The writer reads it again, checks again, and puts again. The same
+    applies after any error from the store at a put.
+  - **Why it holds.** Another writer puts an object for an event past
+    `high` only after its entry at `high + 1` exists: no seq is taken
+    before the one below it, and step 3 follows step 2. So:
+    - if the version read already shows such a put, it was read after that
+      entry existed, and the check after it finds it;
+    - a put landing after the version was seen moves the version, so this
+      writer's put meets `Conflict`.
+
+    Either way, no put of this writer lands over a value of an event past
+    `high`. Nor does it land over a newer event at or below `high`: an
+    operation puts only its own seq's values, and recovery redoes only
+    one entry (below).
+  - **Monotone values** keep their order under a retry. `applied` and `head`
+    are put only upward. A cursor takes the larger of the value read and its
+    own, and a beat the later `at`.
+  - **The cost.** None on the normal path, where the versions come from
+    decide and the commit put is the check. A retry or a redo costs one more
+    read per object.
 - **An error at the commit point or after it.** The writer takes no other
   operation until the operation's outcome is known.
   - **A `Conflict` at step 2** is read back. If `journal/[seq]` holds this
     entry (compared by `schema.canonical`, since msgpack gives tuples back
     as lists), it was this writer's own retried put (henge's retry gap,
-    #158), and the operation goes on to step 3. If it holds another entry, a
-    request from a writer that has gone landed late at that seq. The writer
-    runs recovery, which applies that entry, and the operation raises
-    `Unavailable`: it did not happen.
+    #158), and the operation goes on to step 3. If it holds another entry,
+    another writer took that seq: a gone one's late request, or a live one.
+    The writer runs recovery, and the operation raises `Unavailable`: it did
+    not happen.
   - **Any other error at step 2** (the store unreachable, a timeout): the
     writer sends the same put again, `expect absent`, until the store
     answers. The commit put is idempotent by content, so a success, or a
@@ -647,42 +697,56 @@ the placement: `single` and `mirror` hold it alike.
       means committed, and a mirror copy that lacked the entry is made good
       by the store's scan. A way to resend with the caller's own id is
       henge's to offer, and step 6 uses it if it exists by then.
-  - **An error at steps 3 or 4** comes after the commit. On any error or
-    `Conflict` at an object, the writer **first reads the object's
-    version, then reads `journal/[seq+1]`**, in that order:
-    - **`journal/[seq+1]` exists**: another writer is live. It committed
-      past seq, so it saw seq's entry at its own `Conflict` and applied it.
-      This writer puts nothing more, closes, and raises `Unknown` (the event
-      is committed and applied by the other writer).
-    - **absent**: the only other writer is a gone one whose late request
-      changed the object. The writer puts again against the version it
-      read. Whole values and the priors make a second put the same.
+  - **An error or a `Conflict` at steps 3 or 4** is the guard's retry: read
+    the object, check `journal/[seq+1]`, put again. If the store stays
+    unreachable, the record closes and the operation raises `Unknown`. It
+    happened, and the next open's recovery finishes it.
+- **Recovery**, at open and after a step-2 `Conflict` with another entry.
+  It reads `applied` (call it a), then `journal/[a+1]` and `journal/[a+2]`.
+  - **No entry at a+1:** nothing to redo. Step 4, through the guard, brings
+    `head` up to a (a crash can fall between the two `.state` puts).
+  - **One entry, at a+1, and none at a+2:** it redoes that entry whole,
+    with `high` = a+1. That covers every record put (whole values), every
+    index move from the priors (loads filtered to their range, a split
+    remade as above), and then step 4, each put through the guard. It does
+    not check `_seq`. An event whose journal entry was written is never
+    lost by a crash between steps 2 and 4. One whose entry was not written
+    never happened, and its seq is given to the next operation.
+  - **A second entry, at a+2: another writer is live.** It redoes nothing,
+    and raises `Unavailable`: the open is refused, or the operation did not
+    happen. A writer commits seq only once the store's `applied` is at least
+    seq − 1 (its own step 4, or its recovery's), and `applied` never moves
+    back. So at rest at most one entry lies past `applied`. A second one
+    means a writer moved `applied` and committed again during this scan.
+    Redoing the older entry over the newer one's values is the tear of
+    henge-2's round 4, so recovery never redoes past one entry.
+- **Every put the writer makes**, each with its guard. "Fresh read" is a
+  read made after the last check, so the row's check follows it; "own put"
+  is the version of the writer's last put of that object.
 
-    The order of the two reads closes the race. A live writer puts an
-    object for seq+1 only after its entry at seq+1 is answered, so if the
-    version read already shows such a put, the journal read after it finds
-    seq+1. A put landing after both reads moves the version, and the
-    writer's put then meets `Conflict` and checks again.
-    - A **cursor's** retry puts the larger of the value read and its own,
-      so a gone writer's late, forward value never moves it back.
-    - If the store stays unreachable, the record closes and the operation
-      raises `Unknown`: it happened, and the next open's recovery finishes
-      it.
-    - Recovery's own puts follow the same rule.
+  | # | put path | objects | `expect` from | check | when the check finds an entry |
+  |---|---|---|---|---|---|
+  | 1 | the commit, step 2 (re-sent after an error) | `journal/[seq]` | `absent` | itself: one entry per seq | its `Conflict` is read back: this entry goes on; another entry, recovery (row 6) and `Unavailable` |
+  | 2 | the event's records, step 3 (`meta` counters included) | `.rec` | decide's read, or own put | the commit put | `Unknown` |
+  | 3 | the event's index edits and a split, step 3 | chunks, directories; new chunks `absent` | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
+  | 4 | `applied` and `head`, step 4, only upward | `.state` | decide's read, or own put | the commit put | `Unknown` |
+  | 5 | a retry after an error or `Conflict` at rows 2-4 | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
+  | 6 | recovery's redo of one entry, a split's redo and step 4 included | as rows 2-4 | fresh read | `journal/[a+2]`; a second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
+  | 7 | `.state ["writer"]`, at open after recovery | `.state` | fresh read | `journal/[head+1]` | `Unavailable`: the open is refused |
+  | 8 | `init()`: `.state ["schema"]`, and `applied` and `head` at 0 | `.state` | `absent` | `journal/[1]` | `Unavailable` |
+  | 9 | the load's start: `.state ["loading"]` with the dump's digest | `.state` | `absent`, or fresh read of a null | `journal/[head+1]` | `Unavailable` |
+  | 10 | the load's events | rows 1-6 | | | |
+  | 11 | the load's end: `loading` put to null, never deleted | `.state` | own put (row 9), or fresh read | `journal/[head+1]` after a fresh read | `Unavailable`: `loading` stays, and the next open goes on with the same dump |
+  | 12 | `ack`: a cursor, the larger of read and own | `.rec` `cursors` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
+  | 13 | `beat`: a beat, the later `at` | `.rec` `beats` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
 
-    Correctness therefore never rests on the writer lock: a second live
-    writer costs liveness (`Unavailable` and `Unknown`), never a torn
-    record, and `applied` and `head` never step back (henge-2, round 3).
-- **Recovery** at open: read `applied`, then `get` journal seqs from
-  `applied + 1` until one is absent. One writer, deciding at `applied`, can
-  leave at most one entry past it; recovery redoes every entry it finds, in
-  seq order, all the same. For each entry, it redoes step 3 whole,
-  without checking `_seq`: every record put (whole values, so a second put
-  is the same), and every index move from the priors, each against the
-  version it reads first. Then it does step 4. An event whose journal
-  entry was written is never lost by a crash between steps 2 and 4. One
-  whose entry was not written never happened, and its seq is given to the
-  next operation.
+  A `readonly` open makes rows 6 and 7 only. `check()`, `dump()` and every
+  read put nothing. A path not in this table is a change to this page.
+
+  Correctness therefore never rests on the writer lock. A second live
+  writer costs liveness (`Unavailable` and `Unknown`), never a torn record,
+  and `applied`, `head` and the cursors never step back (henge-2, rounds 3
+  and 4; Rationale, "Two live writers, row by row").
 - **Reads** are `get` on `.rec`. `read(**match)` reads the index chunks
   for the first match field, then `get_many`s the keys in batches of at
   most 1,000 (henge's `MANY`), and checks each record against every match
@@ -703,16 +767,24 @@ the placement: `single` and `mirror` hold it alike.
   of the dump (sha256 of its canonical encoding). A load stopped part-way
   and opened again refuses every other operation. It goes on from
   `head() + 1` only when given a dump of the same digest, and any other
-  dump is refused. The load's end clears `loading`.
+  dump is refused. The load's end clears `loading` by a versioned put of
+  null, never a delete, so a late `absent` put of the load's start meets
+  `Conflict` and cannot bring it back (henge-2, round 4).
 - **`check()`** on Henge also reports a journal hole (a seq absent below
   `head`), a record whose `_seq` is past `applied`, and an index chunk that
   disagrees with the records. An undurable store (tests, the bench) can
   come back torn after a power cut, and these findings say so.
 - **`durable`** reads the store's report, `durability(space)`: it is
   `power_safe and ordered`. That is, the `sync` barrier is power-safe
-  (`F_FULLFSYNC` on macOS, `fsync` on Linux), and a power cut keeps the
-  writes as a prefix, with `single` or `mirror` alike (on the mirror, `sync`
-  is a barrier on both workers).
+  (`F_FULLFSYNC` on macOS, `fsync` on Linux), and the store is
+  **`ordered`** in its spec's words: "after a power cut, a write survives
+  only with every write answered before it was sent". That holds with
+  `single` or `mirror` alike (on the mirror, `sync` is a barrier on both
+  workers).
+  - It gives the record a prefix of its writes because the writer sends one
+    put at a time, each answered before the next is sent. Every earlier put
+    was answered before a later one was sent, so a surviving put survives
+    with every put before it: a prefix, in the writer's order.
   - A store whose report says otherwise (a `ring`, or `full_sync: None`)
     opens with `durable` false, so a shared open of it is refused unless
     `allow_undurable` (tests and the bench).
@@ -867,7 +939,7 @@ read. Each is computed from the records named, and none is stored:
   a report, never a release) -- `lease_view` reads them the same way.
 - 2710's review heads -- `reviews.heads` written once, the one binding of
   an approval.
-- henge-store-client `Store.put`/`delete` with `expect`, `get`,
+- henge-store-client `Store.put` with `expect`, `get`,
   `get_many`, `AsyncStore.watch` -- the Henge backend's operations, with
   the single-node store's `Store.connect`, `sync(space)` and
   `durability(space)` once they exist.
@@ -938,9 +1010,12 @@ What looked reusable but was not:
     store's own folder lock is held until its engines have stopped. No put
     after the commit point overwrites a newer value: every put but the
     commit put (records, indexes, `.state`, cursors, beats) carries the
-    version it expects. Any prefix of an event's puts, a split's included,
-    is finished by recovery. Even two live writers (the lock bypassed)
-    never tear the record, and `applied` and `head` never move backward.
+    version it expects, by the one guard, and every put path is a row of
+    the table "Every put the writer makes". Any prefix of an event's puts,
+    a split's included, is finished by recovery, which redoes at most one
+    entry. Even two live writers (the lock bypassed) never tear the record,
+    and `applied`, `head` and the cursors never move backward. No object is
+    ever deleted.
 14. **A shared record is durable.**
 15. **quarrylith's `src/` names nothing of a yard, a role, a harness or a
     repo host**, and no internal name. Its imports are on an allow-list,
@@ -1034,12 +1109,29 @@ Each item is a test marked `templet:3159`, run over every backend in
   holder's pid, and so is a `readonly` open; the lock file
   `<folder>/quarrylith.<name>.lock` is the only thing the open writes into
   the store's folder
-- [ ] Henge: two live writers on one record (the lock bypassed for the
-  second), with one writer's record put after the commit held back until
-  the other has committed past it, run 200 interleaved operations: the
-  replay equals the records, `check()` is clean, `applied` and `head` never
-  step back (read after every operation), and the held-back writer ends in
-  `Unknown`, never a put after it saw `journal/[seq+1]`
+- [ ] Henge, **two live writers, every row of the put table**: two
+  writers on one record (the lock bypassed for the second) run 200
+  interleaved operations over a store fake that can hold back any one put
+  and release it later. It is run once per row of "Every put the writer
+  makes", each time holding back a put of that row until the other writer
+  has committed past it:
+  - rows 1-5: the commit, a record, an index chunk, each of a split's three
+    puts, `applied` and `head`, and a retry;
+  - row 6: an open whose recovery runs while the other writer commits and
+    puts, held at each of its own puts in turn, and one whose scan finds
+    two entries;
+  - rows 7-11: an open's `writer`, two `init()`s racing, a load's start, its
+    events and its end, beside the other writer's operations;
+  - rows 12-13: an `ack` and a `beat`, each released late.
+
+  Each run: the replay equals the records, `check()` is clean, `applied`,
+  `head` and every cursor never step back (read after every operation), and
+  a writer that ends in `Unknown` or `Unavailable` made no put after a check
+  found `journal/[high+1]` (the fake records every put and read in order).
+  A test lists the table's rows and fails if a row has no run
+- [ ] Henge: no object is ever deleted (the store fake refuses `delete`);
+  a load's end puts `loading` to null, and a late `absent` put of the load's
+  start then meets `Conflict`
 - [ ] Henge: a store without `sync` and `durability` is refused at open;
   one whose report is not `power_safe and ordered` reads `durable` false,
   and a shared open of it is refused unless `allow_undurable`
@@ -1172,8 +1264,9 @@ closes with it.
    Aim: tier 3.
 6. **The Henge backend** -- quarrylith: `HengeRecord`, `open_henge` over
    `Store.connect`, the writer lock in the store's folder, the layout and its chunks with
-   their split order, the commit protocol with its versions, one put at a
-   time, its one sync and its errors, recovery, the
+   their split order, the commit protocol with its versions, the guard on
+   every row of its put table, one put at a time, its one sync and its
+   errors, recovery of at most one entry, the
    resumable load, events and followers, and `check()`'s Henge findings;
    henge-store-client as the one dependency, and henge-store-serve as a
    dev-only one for the fixture. `BACKENDS` gains `henge`, and the whole
@@ -1226,12 +1319,13 @@ after step 6. The switch (#3170) waits on the bake-off.
   - **a write acknowledged only once it is durable**, power-safe, with
     writes kept in their order. The store decided how: a `sync` barrier,
     once per operation, with group commit (user, 2026-10-30);
-  - **a prefix after a power cut.** The store serves a prefix of the
-    record's writes, in the order they were answered. If it serves a write,
-    it serves every write answered before that one was sent, and never a
-    per-key mix of two workers' tails (henge-2, round 2).
-    - The writer sends one put at a time, so each worker takes the record's
-      writes in that one order.
+  - **a prefix after a power cut.** The store is `ordered` in its spec's
+    words (f955dab): "after a power cut, a write survives only with every
+    write answered before it was sent", and never as a per-key mix of two
+    workers' tails (henge-2, round 2).
+    - The writer sends one put at a time, each answered before the next, so
+      each worker takes the record's writes in that one order, and what
+      survives is a prefix of them.
     - The store's spec meets this in its section "The mirror". Both workers
       take a write before it is answered. Each log reopens as a prefix of
       its own (its invariant 6). A mirror that starts from `both` runs one
@@ -1313,9 +1407,10 @@ writers tear it. So the lock is tied to the store again:
 of the record names (it is in the URL), so every opener finds one lock,
 with no configuration to agree on. Round 2's objection was that this is a
 foreign file in henge's folder. The store's spec now lets one stay there,
-since its conversion moves only the entries it names (henge's review of
-that spec, Note 2, taken in its redraft). If the agreed spec says
-otherwise, step 6 moves the lock by a `proposed:` line. Rejected:
+since its conversion moves only the entries it names, and its S49 keeps a
+foreign file and folder in place (f955dab, taking henge's review of it,
+Note 2). If the agreed spec says otherwise, step 6 moves the lock by a
+`proposed:` line. Rejected:
 - a caller-named `home` (round 2): two homes, two writers;
 - a sibling folder derived from the store's path: a write into a folder
   neither henge nor the record owns, which buys nothing once the store
@@ -1324,18 +1419,106 @@ otherwise, step 6 moves the lock by a `proposed:` line. Rejected:
   which a crashed writer leaves held until something expires it. `flock`
   is released by the kernel.
 
-**Correctness never rests on the lock** (henge-2, round 3). After the
-commit point, a `Conflict` first reads the object, then
-`journal/[seq+1]`. If that seq exists, another live writer has committed
-past this one, and it applied this event at its own `Conflict`. So this
-writer stops with `Unknown` and puts nothing more. `applied` and `head` are
-put only while they are below seq. Round 2 claimed this safety ("two live
-writers meet `Conflict` and never tear the record"), but its retry at
-steps 3 and 4 assumed the only other writer was a gone one. A slow live
-writer could re-put seq's values over seq+1's and move `applied` back. The
-check makes the claim true, at the cost of two reads on a conflict, which
-only a second writer or a late request causes. Rejected: trusting the lock
-alone, which is a matter of configuration and of a tool that bypasses it.
+**One guard, and a table of every put** (henge-2, round 4). Rounds 2, 3
+and 4 each found one more path by which a second live writer tears the
+record:
+- round 2's lock in a caller's `home`;
+- round 3's retry at steps 3 and 4;
+- round 4's recovery, which put against a version it had just read and so
+  never met the `Conflict` that ran the check.
+
+Patching each path as it was found left the next one open. So the page now
+has one rule, the guard, which says where a put's `expect` may come from:
+the writer's own last put, or a read made before a check that found
+`journal/[high+1]` absent. It has one table listing every put path with
+its form of that rule, and a path not in the table is a change to this
+page. The commit put is the check on the normal path, so the guard costs
+nothing there. Recovery redoes at most one entry, since at rest only one
+can lie past `applied`. A second entry means a live writer, and redoing
+past it is round 4's tear. Rejected:
+- trusting the lock alone, which is a matter of configuration and of a
+  tool that bypasses it;
+- checking only on a `Conflict` (round 3), which a fresh read hides;
+- a fenced writer lease in `.state`, which a crashed writer leaves held
+  until something expires it.
+
+**Two live writers, row by row: what was checked.** W1 and W2 both pass
+the lock, and either can be slow at any put. Three facts are used
+throughout:
+- **(F1)** No seq is taken before the one below it, and a writer puts for
+  seq only after its entry at seq is answered (one put at a time).
+- **(F2)** A writer commits seq only once the store's `applied` is at least
+  seq − 1, and `applied` never moves back. So at rest at most one entry
+  lies past `applied`.
+- **(G)** The guard. A put of W1 can land over a value W2 wrote for an event
+  past W1's `high` only if W1's `expect` already shows that write. That
+  version was then read after `journal/[high+1]` existed (F1), so the check
+  after the read finds it. A write by W2 after the version was seen moves
+  the version, and W1's put meets `Conflict`.
+
+The store side is assumed: one leader answers every put with `expect` and
+every `get` of a key in one order, as the store's spec gives (its review
+checks it).
+
+Row by row, with s the seq at stake:
+- **Row 1, the commit.** `absent` lets one of W1 and W2 take s. The other reads
+   back another entry, runs recovery (row 6) and raises `Unavailable`. A
+   slow commit put lands before the other's, and wins, or after it, and
+   meets `Conflict`. A re-sent commit is read back by content. No seq is
+   taken twice and none is skipped (F1).
+- **Row 2, a record R.** W1 has committed s and is slow at R. W2 meets `Conflict`
+   at s, and its recovery puts R with s's value, the same value as W1's.
+   Whichever lands second meets `Conflict` and retries (row 5).
+   - If W2 has committed s+1, W1's journal read finds it, and W1 stops
+     with `Unknown`.
+   - Otherwise W1 puts s's value again, which is the same value.
+   - When W2 puts R for s+1, its `expect` came before any later put of
+     W1's, or W2 retries with `journal/[s+2]` absent. So s+1's value stands.
+   - W1 never puts s's value over s+1's, by G.
+- **Row 3, index chunks and a split.** Each chunk and directory is an object as
+   in row 2.
+   - A split's new chunks are `absent`. If the other writer's redo made one
+     first, the put meets `Conflict`, and the retry finds the same content
+     (the split is deterministic) and puts it against the version read.
+   - Filtered loads mean neither writer's redo splits a chunk twice.
+   - A key's membership never takes s's priors over s+1's, by G.
+- **Row 4, `applied` and `head`.** W1, slow at `applied` = s, meets a value W2 put
+   at s+1. Its `expect` came before that put (by G), so it meets
+   `Conflict`. It re-reads, finds s+1 at or past s, and leaves it. Neither
+   key ever moves back.
+- **Row 5, a retry,** is the guard's explicit form, covered in rows 2 to 4.
+- **Row 6, recovery** (round 4's case). W1 opens while W2 commits.
+   - If W2 commits during W1's scan, W1 sees two entries past `applied`
+     (F2) and stops before any put. Round 4's case, a scan that finds s
+     and s+1, stops there.
+   - If the scan sees one entry, a+1, W1 redoes it with `high` = a+1.
+     - An object W1 reads after W2's puts for a+2 has its check find a+2,
+       and W1 stops.
+     - An object W1 reads before them: W1's put lands first, and W2's
+       then meets `Conflict` and retries, or it lands second and meets
+       `Conflict` itself, and its check finds a+2.
+
+   So recovery never redoes an older event over a newer one.
+- **Row 7, `writer`.** It is a fresh read and a check. A stale value only
+   misnames the holder, and nothing reads it for correctness.
+- **Row 8, `init()`.** Both writers put `schema`, `applied` and `head` `absent`.
+   The second meets `Conflict` and re-reads the same values. A check that
+   finds `journal/[1]` stops it.
+- **Rows 9 and 11, the load's start and end.**
+   - A start whose check finds the other writer's entry stops.
+   - Otherwise the load's first commit meets `Conflict` with the other's
+     entry (row 1) and raises `Unavailable`. `loading` stays set, and the
+     next open asks for the same dump: liveness, not a tear.
+   - `loading` is never deleted, so a gone writer's late `absent` start
+     meets `Conflict`. An end's null against an old version meets
+     `Conflict` and re-reads.
+- **Row 10, the load's events,** are rows 1 to 6.
+- **Rows 12 and 13, cursors and beats,** are not journaled, so they cannot tear the
+    record. A put against a moved version meets `Conflict`, re-reads and
+    puts the larger value or the later `at`, so neither steps back.
+
+Not checked here: the store's side of the mirror after a power cut, which
+is its spec's review.
 
 **One put at a time.** With puts sent concurrently, two mirror workers
 could apply them in different orders. After a power cut, a store could
@@ -1553,3 +1736,11 @@ client alone is the dependency (above).
   backward, so two live writers never tear the record; the writer lock back
   in the store's folder, which the store's spec lets stay; every load of a
   chunk filtered to its range; and round 3's notes (this PR)
+- 2026-10-30 revised: answering round 4 of henge-2's review: one guard for
+  every put but the commit put (`expect` from the writer's own last put, or
+  read before a check that found `journal/[high+1]` absent), a table of
+  every put path with its guard, recovery redoing at most one entry and
+  stopping on a second, the two-writer walk-through under Rationale, the
+  two-writer test run once per row; no object ever deleted, `loading`
+  cleared by a versioned null; and `ordered` in the store spec's words at
+  f955dab (this PR)

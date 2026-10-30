@@ -1,0 +1,27 @@
+# quarrylith's public form (docs/PUBLIC.md, "The .publicignore"): added to
+# the defaults in agent-rules/publicignore.
+
+[strip]
+
+# The allow-list: only these paths are public. A new file is private until it
+# is named here, so a page or a file that is not meant for the mirror needs no
+# entry of its own. The package's basics are named ahead of the code that
+# brings them.
+[keep]
+README.md
+CHANGELOG.md
+LICENSE
+.flake8
+.gitignore
+pyproject.toml
+poetry.toml
+src/
+tests/
+
+[replace]
+
+[message]
+
+[deny]
+
+[secrets]

@@ -174,7 +174,7 @@ def _legacy_ref(row):
     return _canon(row["legacy_key"])
 
 
-def _pulled(doc, tables, records, counters, at, problems):
+def _pulled(doc, tables, keys, counters, at, problems):
     raw = doc.get("pulled")
     if not isinstance(raw, list):
         problems.append("pulled: a list")
@@ -210,8 +210,11 @@ def _pulled(doc, tables, records, counters, at, problems):
                 and isinstance(rkey[0], str)
                 and rkey[0] in counters
             )
-        elif kind in records and isinstance(rkey, list):
-            found = list(rkey) in [schema.key_of(kind, r) for r in records[kind]]
+        elif kind in keys and isinstance(rkey, list):
+            try:
+                found = tuple(rkey) in keys[kind]
+            except TypeError:  # a part that is not hashable is no key
+                found = False
         else:
             found = False
         if not found:
@@ -288,6 +291,19 @@ def _left(doc, tables, at, problems):
         if not rec["why"]:
             problems.append(f"{label}: why is empty")
             continue
+        count = rec["count"]
+        if count < 0:
+            problems.append(f"{label}: a count of {count}, below 0")
+            continue
+        if key is not None and count != 1:
+            problems.append(f"{label}: a row's count is 1, not {count}")
+            continue
+        if column is not None and count > tables.get(table, 0):
+            problems.append(
+                f"{label}: a count of {count}, past the "
+                f"{tables.get(table, 0)} rows read"
+            )
+            continue
         ident = (table, rec["legacy_ref"])
         if ident in seen:
             problems.append(f"{label}: left twice")
@@ -345,7 +361,12 @@ def _parse(doc):
         return problems, None
     at = source["read_at"] if schema.is_int(source.get("read_at")) else 0
     tables = source["tables"]
-    pulled = _pulled(doc, tables, records, counters, at, problems)
+    # each kind's keys once, so a pulled row is found without a scan
+    keys = {
+        kind: {tuple(schema.key_of(kind, r)) for r in rows}
+        for kind, rows in records.items()
+    }
+    pulled = _pulled(doc, tables, keys, counters, at, problems)
     left = _left(doc, tables, at, problems)
     n_pulled, n_left, columns = _counts(tables, pulled, left, problems)
 

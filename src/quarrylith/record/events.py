@@ -78,7 +78,7 @@ class Event:
     actor: str  # who, as the caller names them
     via: str  # VIAS
     kind: str  # EVENT_KINDS
-    subject: str | None  # "item:3159", "task:12", "effort:0001", "node:laptop"
+    subject: str | None  # "item:12", "task:12", "effort:0001", "node:laptop"
     data: dict  # what a consumer needs without a second read
     puts: tuple  # ((kind, key, value), ...): every record written, whole
 

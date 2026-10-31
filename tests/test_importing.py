@@ -82,11 +82,25 @@ def test_pulled_and_left_counts_equal_the_rows_read():
     doc["left"][0]["count"] = 39
     refused(doc, "journal.*40")
     doc = make_doc()
-    doc["left"][3]["count"] = 99  # a column row does not count as rows
+    doc["left"][3]["count"] = 1  # a column row does not count as rows
     assert check_import(doc) is None
     doc = make_doc()
     doc["pulled"].append(dict(doc["pulled"][0]))
     refused(doc, "twice|duplicate")
+    # a negative count cannot balance rows pulled past the rows read
+    doc = make_doc()
+    doc["source"]["tables"]["items"] = 1
+    doc["left"].append({"table": "items", "legacy_key": None, "count": -1, "why": "w"})
+    refused(doc, "below 0")
+    # a row-keyed left row stands for one row
+    doc = make_doc()
+    doc["source"]["tables"]["meta"] = 7
+    doc["left"][2]["count"] = 5
+    refused(doc, "a row's count is 1")
+    # a column's count is at most the table's rows read
+    doc = make_doc()
+    doc["left"][3]["count"] = 3
+    refused(doc, "past the 2 rows read")
 
 
 def test_check_import_refuses_a_malformed_document():

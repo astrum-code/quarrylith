@@ -357,7 +357,7 @@ def test_label_grammar():
         schema.check_labels(["repo:WidgetShop", "repo:MixedCase"])
     with pytest.raises(SchemaError, match="one label per key"):
         schema.check_labels(["team:a", "team:b"])
-    for barred in ("effort:alpha", "state:ready"):
+    for barred in ("effort:0001", "effort:alpha", "state:ready"):
         with pytest.raises(SchemaError, match="effort.*state|state.*effort"):
             schema.check_labels([barred])
     with pytest.raises(SchemaError, match="sorted"):
@@ -375,6 +375,23 @@ def test_label_grammar():
         schema.validate("items", rec)
     with pytest.raises(SchemaError, match="labels"):
         schema.validate("tasks", sample("tasks", labels=["state:open"]))
+    node = sample("nodes", labels=["zone:A1"], drivers=["podman", "process"])
+    assert schema.validate("nodes", node)
+    for bad in (["zone:a", "rack:b"], ["Zone:a"], ["zone:a", "zone:b"]):
+        with pytest.raises(SchemaError, match="nodes.labels"):
+            schema.validate("nodes", sample("nodes", labels=bad))
+
+
+def test_a_nodes_drivers_are_a_sorted_list_of_strs():
+    """templet:3159 -- a node's drivers are a sorted list of strs."""
+    assert schema.check_names(["podman", "process", "vm"]) == [
+        "podman",
+        "process",
+        "vm",
+    ]
+    for bad in (["vm", "process"], ["vm", 1], "vm", {"vm": 1}):
+        with pytest.raises(SchemaError, match="nodes.drivers"):
+            schema.validate("nodes", sample("nodes", drivers=bad))
 
 
 def test_flag_grammar():

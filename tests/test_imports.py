@@ -28,12 +28,21 @@ def imported_names(tree):
 
 
 def dynamic_imports(tree):
+    """(line, what) of every dynamic import: `importlib.import_module` taken by
+    name (under any alias), and every call of it or of `__import__`."""
+    names = {"__import__", "import_module"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            for alias in node.names:
+                if alias.name == "import_module":
+                    names.add(alias.asname or alias.name)
+                    yield node.lineno, "imports importlib.import_module"
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
             name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name in ("__import__", "import_module"):
-                yield node.lineno, name
+            if name in names:
+                yield node.lineno, f"calls {name}"
 
 
 def violations(path, source):
@@ -50,8 +59,8 @@ def violations(path, source):
             if parts == client[: len(parts)] or parts[: len(client)] == client:
                 continue
         out.append(f"{path}:{line}: imports {name}")
-    for line, name in dynamic_imports(ast.parse(source)):
-        out.append(f"{path}:{line}: calls {name}")
+    for line, what in dynamic_imports(ast.parse(source)):
+        out.append(f"{path}:{line}: {what}")
     return out
 
 
@@ -96,3 +105,10 @@ def test_the_allow_list_refuses_what_it_should():
         assert violations(STORE_MODULE, serve), serve
     assert violations(other, "x = __import__('yaml')")
     assert violations(other, "import importlib\nimportlib.import_module('yaml')")
+    assert violations(
+        other, "from importlib import import_module as im\nim('yaml')"
+    ) == [
+        f"{other}:1: imports importlib.import_module",
+        f"{other}:2: calls im",
+    ]
+    assert violations(other, "from importlib import import_module")

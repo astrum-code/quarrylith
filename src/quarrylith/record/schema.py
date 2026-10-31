@@ -2,7 +2,8 @@
 """The record's declarations: every kind of record, once, and what a record
 may hold.
 
-A kind is `Kind(name, key, fields, match, live, journaled=True)`; a field is
+A kind is `Kind(name, key, fields, match, live, journaled=True, one_of=())`; a
+field is
 `Field(name, type, null=False, default=None)` of one of four types: `str`,
 `int`, `bool` and `json` (plain data: dicts with `str` keys, lists, `str`,
 `int`, `float`, `bool` and None). Nothing else exists, so a record fits
@@ -11,7 +12,8 @@ what the two would take differently: a float that is NaN or infinite, an int
 outside signed 64 bits and a `str` that is not valid UTF-8.
 
 Times are `int` milliseconds since the epoch, UTC. No record is ever deleted:
-a record ends by its end field, the kind's `live` field.
+a record ends by its end fields, the kind's `live`, which may name several (a
+change is open until it is merged or dropped).
 """
 
 import copy
@@ -38,16 +40,20 @@ LIMITS = {
     "flags": 64,
 }
 
-#: `key:value`, both starting with a letter; a value may also hold `/`.
+#: `key:value`: the key lowercase, starting with a letter; the value may hold
+#: capitals, may start with a digit, and may also hold `/`.
 LABEL_RE = re.compile(r"[a-z][a-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_./-]*")
-#: A word of the label alphabet, optionally with a `:qualifier` (`needs:lab`).
+#: A word of the label key's alphabet, optionally with a `:qualifier`
+#: (`needs:lab`).
 FLAG_RE = re.compile(r"[a-z][a-z0-9_.-]*(:[a-z][a-z0-9_./-]*)?")
 #: Effort links are records and the state is a field, so neither is a label.
 BARRED_LABEL_KEYS = ("effort", "state")
 
-#: The `json` fields that hold labels, and those that hold flags, by kind.
-LABEL_FIELDS = {"items": "labels", "tasks": "labels"}
+#: The `json` fields that hold labels, those that hold flags, and those that
+#: hold a sorted list of names, by kind.
+LABEL_FIELDS = {"items": "labels", "tasks": "labels", "nodes": "labels"}
 FLAG_FIELDS = {"items": "flags", "tasks": "flags"}
+NAME_FIELDS = {"nodes": "drivers"}
 
 
 class SchemaError(ValueError):
@@ -480,6 +486,18 @@ def check_flags(value):
     return flags
 
 
+def check_names(value):
+    """`value` as a sorted list of names (a node's drivers), each a str."""
+    if not isinstance(value, (list, tuple)):
+        raise SchemaError(f"names are a list, not {type(value).__name__}")
+    for name in value:
+        if not isinstance(name, str):
+            raise SchemaError(f"a name is a str, not {name!r}")
+    if list(value) != sorted(value):
+        raise SchemaError("names are stored sorted")
+    return list(value)
+
+
 # -- keys -----------------------------------------------------------------
 
 
@@ -581,7 +599,11 @@ def validate(kind, record):
         out[f.name] = _field(k, f, value)
     if k.one_of and sum(out[n] is not None for n in k.one_of) != 1:
         raise SchemaError(f"{kind}: exactly one of {', '.join(k.one_of)} is set")
-    for table, check in ((LABEL_FIELDS, check_labels), (FLAG_FIELDS, check_flags)):
+    for table, check in (
+        (LABEL_FIELDS, check_labels),
+        (FLAG_FIELDS, check_flags),
+        (NAME_FIELDS, check_names),
+    ):
         name = table.get(kind)
         if name:
             try:

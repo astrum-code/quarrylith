@@ -19,7 +19,7 @@ def sample(kind, /, **over):
         elif f.type == schema.BOOL:
             value = False
         else:
-            value = [] if f.name in ("labels", "flags") else {}
+            value = [] if f.name in ("labels", "flags", "drivers") else {}
         if f.null and f.name not in k.key_names:
             value = None
         rec[f.name] = value

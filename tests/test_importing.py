@@ -9,7 +9,7 @@ import random
 import pytest
 from samples import make_doc, sample
 
-from quarrylith.record import importing
+from quarrylith.record import importing, schema
 from quarrylith.record.events import EVENT_KINDS, Event, MemoryView, apply
 from quarrylith.record.importing import (
     IMPORT_FORMAT,
@@ -289,3 +289,81 @@ def test_compose_keeps_every_record_it_was_given():
             rows, key=lambda r: [r[f.name] for f in RECORDS[kind].key]
         ), kind
     assert importing.__doc__
+
+
+# -- build step 2 ---------------------------------------------------------------
+
+
+def _old_canon(value):
+    """step 1's private encoding, which legacy_ref keys were built from."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def test_canonical_is_byte_identical_to_the_old_encoding():
+    """templet:3159 -- schema.canonical gives byte for byte what step 1's
+    private encoding gave, over the sample document and every legacy key, so
+    the pulled and left keys stay as they were."""
+    doc = make_doc()
+    assert schema.canonical(doc) == _old_canon(doc)
+    for value in [*doc["records"].values(), *doc["pulled"], *doc["left"]]:
+        assert schema.canonical(value) == _old_canon(value)
+    dump = compose(doc)
+    assert schema.canonical(dump) == _old_canon(dump)
+    refs = {r["legacy_ref"] for r in dump["records"]["pulled"]}
+    assert _old_canon([3]) in refs and _old_canon(["next_number"]) in refs
+    assert not hasattr(importing, "_canon")
+    assert not hasattr(schema, "_json_bytes")
+
+
+def test_a_pulled_row_s_record_key_is_checked_as_a_key():
+    """templet:3159 -- a pulled row's record_key is a key of its kind: a bool
+    or a float that equals a key is refused, not matched."""
+    for bad in ([True], [1.0], [1, 2], ["1"]):
+        doc = make_doc()
+        doc["pulled"][0]["record_key"] = bad
+        refused(doc, "no record items")
+
+
+def _entry(event):
+    priors = [[k, key, None] for k, key, _ in event["puts"]]
+    return schema.size({"event": event, "priors": priors})
+
+
+def test_compose_splits_by_the_journal_entry():
+    """templet:3159 -- compose splits an import of many small records with
+    long keys so that every entry, the event and its null priors by
+    schema.size, fits within 768 KiB; the dump is the fold of its journal."""
+    doc = make_doc()
+    long = "t" * 240
+    links = [
+        sample("effort_links", effort="0001", kind="plan", target=f"{i:05d}{long}")
+        for i in range(3000)
+    ]
+    doc["records"]["effort_links"] += links
+    dump = compose(doc)
+    limit = schema.LIMITS["entry_bytes"]
+    sizes = [_entry(e) for e in dump["journal"]]
+    assert max(sizes) <= limit
+    groups = [e for e in dump["journal"] if e["data"].get("kind") == "effort_links"]
+    assert len(groups) >= 2
+    assert sum(e["data"]["count"] for e in groups) == 3002
+    assert sum(len(e["puts"]) for e in groups) == 3002
+    assert sum(schema.size(e) for e in groups) > limit  # one event would not fit
+    assert [e["seq"] for e in dump["journal"]] == list(
+        range(1, len(dump["journal"]) + 1)
+    )
+    view = MemoryView()
+    for raw in dump["journal"]:
+        apply(view, Event.from_dict(raw))
+    assert view.records() == dump["records"]
+    assert compose(doc) == dump
+
+
+def test_compose_refuses_a_record_too_large_for_one_entry():
+    """templet:3159 -- a record whose put alone passes the entry's limit is
+    refused, not written past it."""
+    doc = make_doc()
+    big = "x" * (256 * 1024 - 10)
+    doc["records"]["items"][0].update(title=big, filed_by=big, source_ref=big)
+    with pytest.raises(ImportRefused, match="entry"):
+        compose(doc)

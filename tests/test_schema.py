@@ -593,3 +593,91 @@ def test_sort_keys_refuses_a_key_it_cannot_order():
             schema.sort_keys([bad])
     out = schema.sort_keys([(2,), (1,)])
     assert out == [[1], [2]] and all(isinstance(k, list) for k in out)
+
+
+# -- build step 2: the one encoding, and the enumerated values ---------------
+
+
+def test_canonical_is_sorted_compact_utf8_json():
+    """templet:3159 -- schema.canonical is JSON with sorted keys, no spaces,
+    UTF-8 (not escaped), tuples as lists; it refuses a NaN."""
+    assert schema.canonical({"b": [1, (2, 3)], "a": "é"}) == '{"a":"é","b":[1,[2,3]]}'
+    assert schema.canonical(None) == "null" and schema.canonical(True) == "true"
+    with pytest.raises(SchemaError):
+        schema.canonical([float("nan")])
+    with pytest.raises(SchemaError):
+        schema.canonical({"a": object()})
+
+
+def test_size_is_the_canonical_length_with_a_float_as_nine_bytes():
+    """templet:3159 -- schema.size is the UTF-8 length of schema.canonical,
+    each float counted as 9 bytes."""
+    assert schema.size({"a": "é"}) == len('{"a":"é"}'.encode()) == 10
+    assert schema.size([1.5]) == 2 + 9
+    assert schema.size([0.1, 1e300, -2.5e-7]) == 2 + 2 + 3 * 9
+    assert schema.size({"k": [True, None, 3]}) == len('{"k":[true,null,3]}')
+    assert schema.size(("x",)) == schema.size(["x"]) == 5
+
+
+def test_a_json_field_is_measured_by_size():
+    """templet:3159 -- a json field's limit is by schema.size, floats as 9
+    bytes: a list whose JSON text fits but whose size does not is refused."""
+    limit = schema.LIMITS["json_bytes"]
+    floats = [1.0] * (limit // 9)
+    assert len(schema.canonical(floats)) < limit < schema.size(floats)
+    with pytest.raises(SchemaError, match="value"):
+        schema.validate("readings", sample("readings", value=floats))
+    assert schema.validate("readings", sample("readings", value=[1.0] * 1000))
+
+
+#: The page's enumerated fields and their values, held inline.
+VALUES = {
+    ("efforts", "standing"): ("proposed", "admitted", "parked", "concluded"),
+    ("efforts", "outcome"): ("complete", "incomplete", "disproved"),
+    ("effort_links", "kind"): ("plan", "item", "effort"),
+    ("items", "kind"): ("task", "plan", "review", "mission", "ask", "finding", "batch"),
+    ("items", "state"): (
+        "triage",
+        "ready",
+        "claimed",
+        "blocked",
+        "in-review",
+        "reviewed",
+        "merge-ready",
+        "done",
+        "dropped",
+    ),
+    ("items", "source"): ("local", "legacy"),
+    ("tasks", "kind"): ("agent", "gate", "review", "cell", "sweep", "job"),
+    ("tasks", "state"): ("open", "running", "done", "failed", "cancelled"),
+    ("changes", "relation"): ("closes", "part"),
+    ("checks", "state"): ("green", "red", "skipped", "pending"),
+    ("reviews", "kind"): ("pool", "second", "templet", "conformance", "user"),
+    ("reviews", "verdict"): ("approve", "changes"),
+    ("questions", "kind"): ("blocked", "pr"),
+    ("statements", "type"): (
+        "observation",
+        "inference",
+        "proposal",
+        "decision",
+        "action",
+        "outcome",
+        "correction",
+    ),
+}
+
+
+def test_an_enumerated_field_takes_only_its_values():
+    """templet:3159 -- schema.VALUES names the page's enumerated fields and
+    their values, and validate refuses any other value (null stays null where
+    the field may be)."""
+    assert schema.VALUES == VALUES
+    assert schema.ITEM_STATES == VALUES[("items", "state")]
+    for (kind, field), values in VALUES.items():
+        for value in values:
+            assert schema.validate(kind, sample(kind, **{field: value}))[field] == value
+        with pytest.raises(SchemaError, match=field):
+            schema.validate(kind, sample(kind, **{field: "other"}))
+    assert (
+        schema.validate("efforts", sample("efforts", outcome=None))["outcome"] is None
+    )

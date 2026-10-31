@@ -217,8 +217,9 @@ their legacy numbers, and `next:items` starts past the legacy board's
 `next_number`. Imported changes keep their `n`, and each
 `next:change:<repo>` starts past the legacy `next_change:<repo>`.
 
-**Labels and flags.** A label is `key:value`, both `[a-z][a-z0-9_.-]*` (a
-value may also hold `/`), at most one label per key on a record. A flag is
+**Labels and flags.** A label is `key:value`: the key `[a-z][a-z0-9_.-]*`, the
+value `[A-Za-z0-9][A-Za-z0-9_.-]*` (it may also hold `/`), so `repo:benchLith`
+and `tier:3` are labels and `Repo:x` and `3tier:x` are not; at most one label per key on a record. A flag is
 a word of the same alphabet, optionally with a `:qualifier` (`needs:lab`).
 The keys `effort` and `state` are refused as labels: effort links are
 records, and the state is a field. Labels are stored sorted. A task's
@@ -1768,3 +1769,5 @@ client alone is the dependency (above).
   also checks the counters against the ids in use; `Kind` gains `one_of`
   (`deps`, `holds`) and its `live` may name several fields (`changes`), as the
   table says (this PR)
+- 2026-10-31 proposed: label values allow capitals and a leading digit;
+  keys stay lowercase, as the user decided on 2026-10-31 (this PR)

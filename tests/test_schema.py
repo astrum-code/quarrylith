@@ -334,7 +334,9 @@ def test_json_is_plain_data():
         schema.validate("readings", sample("readings", value=deep))
 
 
-@pytest.mark.parametrize("bad", ["plan", "Role:x", "role:", ":x", "a:b:c", "1a:b"])
+@pytest.mark.parametrize(
+    "bad", ["plan", "Role:x", "role:", ":x", "a:b:c", "1a:b", "3tier:x", "Repo:x"]
+)
 def test_a_label_must_be_key_value(bad):
     """templet:3159 -- a label that is not key:value is refused."""
     with pytest.raises(SchemaError):
@@ -346,6 +348,13 @@ def test_label_grammar():
     an unsorted list and more than 64 are refused; the good ones pass."""
     assert schema.check_labels([]) == []
     assert schema.check_labels(["repo:widgets", "team:alpha", "x:a/b.c_d"])
+    for good in ("repo:WidgetShop", "repo:MixedCase", "tier:3", "risk:10"):
+        assert schema.check_labels([good]) == [good]
+    assert schema.check_labels(["repo:WidgetShop", "risk:10", "tier:3"])
+    with pytest.raises(SchemaError, match="sorted"):
+        schema.check_labels(["b:A", "a:B"])
+    with pytest.raises(SchemaError, match="one label per key"):
+        schema.check_labels(["repo:WidgetShop", "repo:MixedCase"])
     with pytest.raises(SchemaError, match="one label per key"):
         schema.check_labels(["team:a", "team:b"])
     for barred in ("effort:alpha", "state:ready"):

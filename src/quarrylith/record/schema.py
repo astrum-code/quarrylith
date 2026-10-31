@@ -39,7 +39,7 @@ LIMITS = {
 }
 
 #: `key:value`, both starting with a letter; a value may also hold `/`.
-LABEL_RE = re.compile(r"[a-z][a-z0-9_.-]*:[a-z][a-z0-9_./-]*")
+LABEL_RE = re.compile(r"[a-z][a-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_./-]*")
 #: A word of the label alphabet, optionally with a `:qualifier` (`needs:lab`).
 FLAG_RE = re.compile(r"[a-z][a-z0-9_.-]*(:[a-z][a-z0-9_./-]*)?")
 #: Effort links are records and the state is a field, so neither is a label.

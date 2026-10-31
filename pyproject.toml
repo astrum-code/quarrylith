@@ -1,0 +1,25 @@
+[project]
+name = "quarrylith"
+version = "0.1.0"
+description = "The queue's record: one contract over SQLite and Henge, its journal, its fold and the import of a legacy board"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11,<4.0"
+# No runtime dependencies: the declarations, the fold and the import are
+# standard library only.
+dependencies = []
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [{ include = "quarrylith", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+flake8 = ">=7.0.0"
+black = ">=24.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -5,9 +5,12 @@ description = "The queue's record: one contract over SQLite and Henge, its journ
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11,<4.0"
-# No runtime dependencies: the declarations, the fold and the import are
-# standard library only.
+# No runtime dependencies: the declarations, the fold, the import and the
+# SQLite backend are standard library only.
 dependencies = []
+
+[project.scripts]
+quarrylith = "quarrylith.cli:main"
 
 [build-system]
 requires = ["poetry-core>=2.0"]

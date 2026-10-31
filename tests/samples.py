@@ -12,7 +12,9 @@ def sample(kind, /, **over):
     k = RECORDS[kind]
     rec = {}
     for f in k.key + k.fields:
-        if f.type == schema.STR:
+        if (kind, f.name) in schema.VALUES:
+            value = schema.VALUES[(kind, f.name)][0]
+        elif f.type == schema.STR:
             value = "x"
         elif f.type == schema.INT:
             value = 1

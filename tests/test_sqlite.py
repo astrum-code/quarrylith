@@ -132,9 +132,21 @@ def test_a_delete_on_a_record_table_is_aborted(url, record):
     record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
     record.ack("follower", 1)
     conn = raw(url)
+    triggers = {
+        r[0]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+    }
+    held = []
     for kind in RECORDS:
-        with pytest.raises(sqlite3.IntegrityError, match="deleted"):
-            conn.execute(f'DELETE FROM "{kind}"')
+        # a row trigger fires on each row deleted: every table has one
+        assert f"{kind}_no_delete" in triggers
+        if conn.execute(f'SELECT 1 FROM "{kind}" LIMIT 1').fetchall():
+            held.append(kind)
+            with pytest.raises(sqlite3.IntegrityError, match="deleted"):
+                conn.execute(f'DELETE FROM "{kind}"')
+    assert {"meta", "efforts", "effort_links", "items", "item_text", "cursors"} <= set(
+        held
+    )
     for statement in ("DELETE FROM journal", "UPDATE journal SET actor = 'x'"):
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             conn.execute(statement)

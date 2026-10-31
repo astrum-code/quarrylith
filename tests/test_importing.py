@@ -291,7 +291,7 @@ def test_compose_keeps_every_record_it_was_given():
     assert importing.__doc__
 
 
-# -- build step 2 ---------------------------------------------------------------
+# -- build step 2 -------------------------------------------------------------
 
 
 def _old_canon(value):

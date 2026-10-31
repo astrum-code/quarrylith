@@ -170,7 +170,10 @@ rows in that order, as lists, never tuples.
 `match` names the fields `read()` may match on, `live` names the fields
 whose `None` means the record is still open (all of them: a change is open
 until it is merged or dropped), and `one_of` names the fields of which
-exactly one is set (`deps`, `holds`). **No record is ever deleted.**
+exactly one is set (`deps`, `holds`). `schema.VALUES` names the fields that
+take one of a few values (the lists in parentheses below; `ITEM_STATES` for an
+item's state) with those values, and `validate` refuses any other, so an
+operation, a load and an import refuse it alike. **No record is ever deleted.**
 A record ends by its end field (`lifted_at`, `released_at`, `merged_at`,
 ...), and a closed item stays.
 
@@ -289,7 +292,9 @@ class Event:
 ### `Record`: the contract
 
 `open_record(url, *, readonly=False, shared=False, allow_undurable=False,
-actor, via, authorize=None)` -> a `Record`. `url` is
+actor, via, authorize=None, **backend)` -> a `Record`; `backend` passes the
+backend's own settings, for tests only (SQLite's `synchronous` and
+`fullfsync`). `url` is
 `sqlite:///path/record.sqlite` or `henge:<folder>#<name>`. `BACKENDS =
 {"sqlite": SqliteRecord, "henge": HengeRecord}`. `authorize(actor, op,
 before, after) -> None | str` is the caller's policy: a string refuses the
@@ -322,7 +327,7 @@ name (one live lease per item, one open change per branch) is a `Refused`.
   its holder nor its role has a live hold. A task is eligible when its item
   (if it has one) is eligible or `claimed`, `not_before` has passed, and
   `attempts < loop.max_attempts`. Step 4 orders this set and does not widen
-  it.
+  it. It gives `{"items": [...], "tasks": [...]}`, each in key order.
 - `lease_view(number, *, now)` -> the live lease with `state` running,
   paused or expired (1423's three, the same rules), its expiry computed
   from `renewed_at`, the latest beat of the holder's live run, and
@@ -331,15 +336,16 @@ name (one live lease per item, one open change per branch) is a `Refused`.
   largest sum of live reservations overlapping any instant of the span.
 - `effective_labels(task_id)`.
 
-**Operations.** Each writes one event or nothing. Each takes one `now`, at
+**Operations.** Each writes one event or nothing. An edit that changes
+nothing writes nothing and returns False. Each takes one `now`, at
 its start, from the record's clock (`now_ms`, which the tests move). It
 calls `authorize` with the records before and after, refuses as below, and
 returns what it made (an id, a number, a fence).
 
 | group | operations, and what each refuses |
 |---|---|
-| efforts | `file_effort(id, slug, title, owner, parts, standing="proposed")`: an id taken. `edit_effort(id, **fields)`. `set_standing(id, standing, why)`: a concluded effort. `conclude(id, outcome, why)`: no outcome. `link(effort, kind, target)`, `unlink(...)` |
-| items | `file_item(kind, title, body, *, role, tier, risk, parent, labels, flags, effort=None, filed_by, machine=False, must_fix=False, number=None)`: `number` is refused except `via="import"`. An item filed with no effort link takes its parent's links. With no parent, it is linked to `unsorted`. A machine-filed item (`machine=True`) is filed `admitted=False` unless `must_fix`. `edit_item(n, **fields)`. `move(n, state, why, *, expect=None)`: a pair not in `MOVES`, or `expect` not the current state. `admit(n, by)` |
+| efforts | `file_effort(id, slug, title, owner, parts, standing="proposed")`: an id taken; `id=None` takes `next:efforts`, as four digits. `edit_effort(id, **fields)`. `set_standing(id, standing, why)`: a concluded effort. `conclude(id, outcome, why)`: no outcome. `link(effort, kind, target)`: a link already live. `unlink(...)`: an item's last effort link (invariant 10) |
+| items | `file_item(kind, title, body, *, role, tier, risk, parent, labels, flags, effort=None, filed_by, machine=False, must_fix=False, number=None)`: `number` is refused except `via="import"`. An item filed with no effort link takes its parent's links. With no parent, it is linked to `unsorted`, which the same event makes (`parked`) if the record has none. A machine-filed item (`machine=True`) is filed `admitted=False` unless `must_fix`. `edit_item(n, **fields)`. `move(n, state, why, *, expect=None)`: a pair not in `MOVES`, or `expect` not the current state. `admit(n, by)` |
 | deps | `add_dep(n, *, blocker|change|what, why)`: a cycle, or a dep already live. `lift_dep(id, by, why)` |
 | leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold, or `expect` not the state. `renew(n, holder, fence)`. `release(n, by, why)` |
 | tasks | `file_task(...)`, `edit_task(id, **fields)`, `end_task(id, state, why)` |
@@ -391,7 +397,8 @@ least once, latency under a second on one host, retention until read):
 - `events(cursor, *, limit=500, wait=0.0, subject=None)` -> the events
   after `cursor`, in seq order.
 - `head()` -> the highest seq, 0 when empty.
-- `cursor(consumer)`, `ack(consumer, seq)` (forward only).
+- `cursor(consumer)`, `ack(consumer, seq)` (forward only; a seq past
+  `head()` is refused).
 
 **The store's administration**: `init()`, `check()` -> findings (the
 replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
@@ -404,7 +411,11 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
   same record give the same `dump()` apart from `bookkeeping`.
 - `load(dump)` writes a dump into an empty record: every event with its
   seq, applied in order, and the bookkeeping. On SQLite it is one
-  transaction. On Henge it is resumable (below).
+  transaction. On Henge it is resumable (below). It is refused, writing
+  nothing, for a dump that is not whole: seqs not from 1 by one, records
+  that are not the fold of its journal, an entry past its limit, or an item
+  with no effort link. `check()` reports the last two, and a counter not past
+  its kind's highest id, on a record.
 - **A shared record is durable.** `open_record(..., shared=True)` is
   refused on a backend whose `durable` is false, unless it is given
   `allow_undurable=True` (tests and the bench only).
@@ -454,9 +465,12 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
   connection. A test may open the file with `synchronous=NORMAL` (a
   test-only argument), whose `durable` reads false. That is the stand-in
   for an undurable backend before Henge exists.
-- `schema_version` in `meta` (`RECORD_SCHEMA_VERSION = 1`). An open
-  refuses a newer version, and an older one names `quarrylith record
-  migrate`.
+- The schema version is the file's own `PRAGMA user_version`
+  (`RECORD_SCHEMA_VERSION = 1`), not a `meta` record: a `meta` row no event
+  wrote would break the replay and the equal dumps of invariant 4, as Henge's
+  `.state ["schema"]` stays apart from `meta`. An open refuses a newer
+  version, and an older one names `quarrylith record migrate`. `init()` makes
+  a table for every kind, so the version holds through step 4.
 
 ### The Henge backend
 
@@ -1772,3 +1786,12 @@ client alone is the dependency (above).
 - 2026-10-31 proposed: label values allow capitals and a leading digit;
   keys stay lowercase, as the user decided on 2026-10-31, and a flag is a
   word of the key's alphabet (this PR)
+- 2026-10-31 proposed: what building step 2 settled: `schema.VALUES` (the
+  enumerated fields, refused by `validate`); SQLite's schema version in
+  `PRAGMA user_version`, not a `meta` record; `open_record(**backend)` for
+  test-only settings; `file_effort(id=None)` from `next:efforts`;
+  `file_item` makes `unsorted` when it is absent; `unlink` refuses an item's
+  last effort link; an edit that changes nothing writes nothing; `ack`
+  refuses a seq past `head()`; `ready()` gives items and tasks; `load`
+  refuses a dump that is not whole, and `check()` reports items with no
+  link and counters behind (this PR)

@@ -595,7 +595,7 @@ def test_sort_keys_refuses_a_key_it_cannot_order():
     assert out == [[1], [2]] and all(isinstance(k, list) for k in out)
 
 
-# -- build step 2: the one encoding, and the enumerated values ---------------
+# -- build step 2: the one encoding, and the enumerated values ----------------
 
 
 def test_canonical_is_sorted_compact_utf8_json():

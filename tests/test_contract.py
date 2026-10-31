@@ -101,7 +101,7 @@ def replay(dump):
     return view.records()
 
 
-# -- the acceptance items ----------------------------------------------------
+# -- the acceptance items -----------------------------------------------------
 
 
 @over_backends
@@ -546,7 +546,7 @@ def test_an_entry_past_its_limit_is_refused_though_its_event_is_under(record, cl
     """templet:3159 -- an operation whose journal entry, the event and its
     priors by schema.size, passes 768 KiB is refused on every backend, though
     its event alone is under it."""
-    record.load(_long_links_dump(clock, 1100))
+    record.load(_long_links_dump(clock, 800))
     head, dump = record.head(), record.dump()
     with pytest.raises(Refused, match="journal entry") as refused:
         task(record, "child", parent=1)
@@ -561,7 +561,7 @@ def test_an_entry_past_its_limit_is_refused_though_its_event_is_under(record, cl
     assert task(record, "small") == 2
 
 
-# -- the operations, one by one ----------------------------------------------
+# -- the operations, one by one -----------------------------------------------
 
 
 @over_backends

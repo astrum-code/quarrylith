@@ -1777,15 +1777,18 @@ client alone is the dependency (above).
   two-writer test run once per row; no object ever deleted, `loading`
   cleared by a versioned null; and `ordered` in the store spec's words at
   f955dab (this PR)
-- 2026-10-30 proposed: the import document names the rows read per legacy
+- 2026-10-30 changed: the import document names the rows read per legacy
   table (`source.tables`) and marks a column's `left` row with `column`, so
   `check_import` can hold invariant 12 from the document alone; `check_import`
   also checks the counters against the ids in use; `Kind` gains `one_of`
   (`deps`, `holds`) and its `live` may name several fields (`changes`), as the
-  table says (this PR)
-- 2026-10-31 proposed: label values allow capitals and a leading digit;
+  table says (approved: the conformance review of quarrylith#3, round 1, and
+  the user's merge)
+- 2026-10-31 changed: label values allow capitals and a leading digit;
   keys stay lowercase, as the user decided on 2026-10-31, and a flag is a
-  word of the key's alphabet (this PR)
+  word of the key's alphabet (approved: the user's decision of 2026-10-31,
+  the conformance review of quarrylith#3, rounds 1 and 2, and the user's
+  merge)
 - 2026-10-31 proposed: what building step 2 settled: `schema.VALUES` (the
   enumerated fields, refused by `validate`); SQLite's schema version in
   `PRAGMA user_version`, not a `meta` record; `open_record(**backend)` for

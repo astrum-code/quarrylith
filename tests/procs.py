@@ -9,10 +9,15 @@
 - `killed URL`: files an item and is killed (SIGKILL) inside its transaction,
   after the journal row and the puts are written and before the commit;
 - `starter URL TAG GATE TASK...`: waits for the file GATE, then starts a run
-  of each task on node `n1`, holding every run it started; when a start finds
-  no room it finishes every run it holds, pauses a moment for the other
-  process, and tries again. It finishes the rest at the end, and prints how
-  many starts it made and how many found no room.
+  of each task on node `n1`, holding every run it started and pausing 5 ms
+  after each start; when a start finds no room it finishes only its oldest
+  run, pauses 5 ms, and tries again, so the two processes keep the node
+  full between them (at 2 ms, SQLite's busy wait, which backs off, now and
+  then let one process run its whole batch alone). It finishes the rest at
+  the end, and prints how many
+  starts it made, how many found no room, and how many of those it made
+  while it held fewer runs than the node's slots: the other process's
+  reservations were in the way.
 """
 
 import json
@@ -60,7 +65,8 @@ def starter(url, tag, gate, *tasks):
     record = contract.open_record(url, actor=tag, via="service")
     while not os.path.exists(gate):
         time.sleep(0.002)
-    held, started, refused = [], 0, 0
+    slots = record.get("capacity", ["n1", "slots"])["amount"]
+    held, started, refused, contended = [], 0, 0, 0
 
     def finish(run):
         record.finish_run(run, "done", "made room", footprint={}, cost={})
@@ -80,16 +86,22 @@ def starter(url, tag, gate, *tasks):
                 if "no room" not in str(e):
                     raise
                 refused += 1
-                while held:
+                if len(held) < slots:
+                    contended += 1
+                if held:
                     finish(held.pop(0))
-                time.sleep(0.02)
+                time.sleep(0.005)
                 continue
             held.append(run)
             started += 1
+            time.sleep(0.005)
             break
     for run in held:
         finish(run)
-    print(json.dumps({"started": started, "refused": refused}), flush=True)
+    print(
+        json.dumps({"started": started, "refused": refused, "contended": contended}),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

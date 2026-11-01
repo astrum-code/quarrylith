@@ -212,6 +212,16 @@ def test_a_lease_past_its_expiry_reads_expired_and_a_beat_moves_it(record, clock
     assert (view["state"], view["expiry"]) == ("expired", granted + contract.LEASE_MS)
     record.renew(n, "alpha", fence)
     assert record.lease_view(n, now=clock())["expiry"] == clock() + contract.LEASE_MS
+    # a run under an older fence, still live, does not keep a new lease of
+    # the same holder running: only the live lease's runs count
+    stale = start(record, agent_task(record, n), fence=fence)
+    record.release(n, "alpha", "for a fresh lease")
+    renewed = clock()
+    assert grant(record, n) == fence + 1
+    clock.step(contract.LEASE_MS)
+    record.beat(stale)
+    view = record.lease_view(n, now=clock())
+    assert (view["state"], view["expiry"]) == ("expired", renewed + contract.LEASE_MS)
     assert record.check() == []
 
 
@@ -232,6 +242,9 @@ def test_reserve_past_capacity_at_any_instant_is_refused_whole(record, clock):
     assert record.free("n1", "slots", from_at=t + 10_000, until_at=None) == 2
     assert record.free("n1", "memory", from_at=t, until_at=None) == 3072
     assert record.free("n1", "gpu", from_at=t, until_at=None) == 0
+    for until in (t, t - 1):  # an empty or reversed span, as reserve refuses
+        with pytest.raises(Refused, match="ends after it starts"):
+            record.free("n1", "slots", from_at=t, until_at=until)
     head, dump = record.head(), record.dump()
     for needs, span in [
         ({"memory": 1024, "slots": 1}, (t, t + 6_000)),  # slots full at t+5s
@@ -299,10 +312,12 @@ def test_two_processes_starting_runs_never_pass_a_nodes_capacity(
         dump = record.dump()
         assert_never_past_capacity(dump)
         assert sum(got[tag]["refused"] for tag in tasks) > 0
+        # each process was refused while it held fewer runs than the node's
+        # slots: it decided against the other process's reservations
+        assert all(got[tag]["contended"] >= 1 for tag in tasks), got
         starts = [e["actor"] for e in dump["journal"] if e["kind"] == "run.start"]
         assert len(starts) == 40
-        # the two processes' starts interleave: they ran at once, each one's
-        # refusals decided against the other's commits
+        # the two processes' starts interleave: they ran at once
         assert sum(a != b for a, b in zip(starts, starts[1:])) >= 4
         assert record.read("reservations", live=True) == []
         assert record.check() == []
@@ -456,6 +471,92 @@ def test_finish_run_releases_the_runs_reservations_in_its_own_event(record, cloc
 
 
 @over_backends
+def test_release_reservation_refuses_a_live_runs_reservation(record, clock):
+    """templet:3159 -- release_reservation refuses a reservation whose run
+    is live, since finish_run releases it: the run keeps its room, and
+    another start finds none. A standing holder's reservation, and a task's
+    own, release by id."""
+    admitted(record)
+    node(record, slots=1)
+    run = start(record, job(record))
+    other = job(record)
+    (r,) = record.read("reservations", live=True, run=run)
+    assert (r["resource"], r["amount"]) == ("slots", 1)
+    head, dump = record.head(), record.dump()
+    with pytest.raises(Refused, match="finish_run"):
+        record.release_reservation(r["id"], "make room")
+    with pytest.raises(Refused, match="no room"):
+        start(record, other, "beta")
+    assert record.head() == head and record.dump() == dump
+    # what no live run holds releases by id
+    (standing,) = record.reserve(
+        "n1", {"memory": 1024}, holder="cache", from_at=clock(), until_at=None
+    )
+    t = job(record)
+    (own,) = record.reserve(
+        "n1", {"memory": 512}, task=t, holder="alpha", from_at=clock(), until_at=None
+    )
+    record.release_reservation(standing, "the cache shrank")
+    record.release_reservation(own, "not needed")
+    finish(record, run)
+    assert record.read("reservations", live=True) == []
+    assert_never_past_capacity(record.dump())
+    assert record.check() == []
+
+
+@over_backends
+def test_a_reservation_is_held_only_while_something_holds_it(record, clock):
+    """templet:3159 -- reserve refuses a finished run and an ended task, and
+    end_task releases the task's own live reservations in its own event."""
+    admitted(record)
+    node(record)
+    t = job(record)
+    run = start(record, t)
+    # a live run, and an open task, may hold more
+    record.reserve(
+        "n1", {"memory": 256}, run=run, holder="alpha", from_at=clock(), until_at=None
+    )
+    finish(record, run)
+    assert record.read("reservations", live=True) == []
+    head, dump = record.head(), record.dump()
+    with pytest.raises(Refused, match="finished"):
+        record.reserve(
+            "n1", {"slots": 1}, run=run, holder="alpha", from_at=clock(), until_at=None
+        )
+    assert record.head() == head and record.dump() == dump
+    own = record.reserve(
+        "n1",
+        {"slots": 1, "memory": 512},
+        task=t,
+        holder="alpha",
+        from_at=clock(),
+        until_at=None,
+    )
+    (standing,) = record.reserve(
+        "n1", {"memory": 1024}, holder="cache", from_at=clock(), until_at=None
+    )
+    clock.step()
+    head = record.head()
+    record.end_task(t, "done", "finished")
+    (ended,) = record.events(head)
+    assert ended.kind == "task.end"
+    released = [v for k, _, v in ended.puts if k == "reservations"]
+    assert sorted(r["id"] for r in released) == sorted(own)
+    assert all(
+        (r["released_at"], r["why"]) == (clock(), "task ended") for r in released
+    )
+    assert [r["id"] for r in record.read("reservations", live=True)] == [standing]
+    head, dump = record.head(), record.dump()
+    with pytest.raises(Refused, match="ended"):
+        record.reserve(
+            "n1", {"slots": 1}, task=t, holder="alpha", from_at=clock(), until_at=None
+        )
+    assert record.head() == head and record.dump() == dump
+    assert_never_past_capacity(record.dump())
+    assert record.check() == []
+
+
+@over_backends
 def test_a_run_whose_lease_was_granted_again_frees_the_host_but_not_the_item(
     record, clock
 ):
@@ -467,7 +568,7 @@ def test_a_run_whose_lease_was_granted_again_frees_the_host_but_not_the_item(
     n = item(record)
     old = grant(record, n)
     run = start(record, agent_task(record, n), fence=old)
-    record.release(n, "coordinator", "stalled")
+    record.release(n, "gamma", "stalled")
     new = grant(record, n, "beta")
     assert new == old + 1
     head, dump = record.head(), record.dump()
@@ -568,11 +669,15 @@ def test_ready_gives_the_eligible_open_tasks(record, clock):
     blocked = item(record, "with a dep")
     record.add_dep(blocked, what="a decision", why="w")
     parked = item(record, "parked", effort="0002")
+    # claimed, but its one effort is parked: its task is not ready either
+    claimed_parked = item(record, "claimed, parked", effort="0002")
+    parked_fence = grant(record, claimed_parked)
     held = item(record, "held")
     record.hold(number=held, cause="quarantine", why="w")
     in_triage = record.file_item("task", "triage", "b", filed_by="a", effort="0001")
     t_ready = agent_task(record, ready_item)
     t_claimed = agent_task(record, claimed)
+    t_claimed_parked = agent_task(record, claimed_parked)
     for n in (blocked, parked, held, in_triage):
         agent_task(record, n)
     j = job(record)
@@ -590,6 +695,11 @@ def test_ready_gives_the_eligible_open_tasks(record, clock):
     assert [t["id"] for t in got["tasks"]] == [t_ready, t_claimed, j]
     got = record.ready(now=clock() + 1000)
     assert [t["id"] for t in got["tasks"]] == [t_ready, t_claimed, j, later]
+    head, dump = record.head(), record.dump()
+    with pytest.raises(Refused, match="admitted"):
+        start(record, t_claimed_parked, fence=parked_fence)
+    assert record.head() == head and record.dump() == dump
+    assert record.read("reservations", task=t_claimed_parked) == []
     # a held holder holds its item's tasks
     record.hold(who="alpha", cause="budget", why="over")
     assert [t["id"] for t in record.ready(now=clock())["tasks"]] == [j]
@@ -809,8 +919,8 @@ def test_events_wait_inside_reading_is_refused(record):
 
 
 def test_lease_ms_is_three_days():
-    """templet:3159 -- a lease runs three days past its renewal (1423's
-    default), and a node's drivers are a list with no repeat."""
+    """templet:3159 -- a lease runs three days past its renewal, and a
+    node's drivers are a list with no repeat."""
     assert contract.LEASE_MS == 3 * 24 * 3600 * 1000
     with pytest.raises(schema.SchemaError, match="nodes.drivers"):
         schema.validate(

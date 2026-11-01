@@ -294,15 +294,16 @@ def test_two_processes_starting_runs_never_pass_a_nodes_capacity(
         assert proc.returncode == 0, err
         got[tag] = json.loads(out.strip().splitlines()[-1])
     assert all(got[tag]["started"] == 20 for tag in tasks)
-    assert sum(got[tag]["refused"] for tag in tasks) > 0
     record = open_record(url, actor="alpha", via="cli")
     try:
         dump = record.dump()
         assert_never_past_capacity(dump)
+        assert sum(got[tag]["refused"] for tag in tasks) > 0
         starts = [e["actor"] for e in dump["journal"] if e["kind"] == "run.start"]
         assert len(starts) == 40
-        # the two processes' starts interleave: they ran at once
-        assert sum(a != b for a, b in zip(starts, starts[1:])) >= 2
+        # the two processes' starts interleave: they ran at once, each one's
+        # refusals decided against the other's commits
+        assert sum(a != b for a, b in zip(starts, starts[1:])) >= 4
         assert record.read("reservations", live=True) == []
         assert record.check() == []
     finally:
@@ -349,10 +350,10 @@ def test_concurrent_callers_of_one_record_never_pass_a_nodes_capacity(record):
     for thread in threads:
         thread.join(60)
     assert errors == []
-    assert refused
     dump = record.dump()
-    assert len([e for e in dump["journal"] if e["kind"] == "run.start"]) == 45
     assert_never_past_capacity(dump)
+    assert refused
+    assert len([e for e in dump["journal"] if e["kind"] == "run.start"]) == 45
     assert record.check() == []
 
 
@@ -689,6 +690,7 @@ def test_tasks_are_filed_edited_and_ended(record):
         dict(loop={"max_attempts": 0}),
         dict(loop={"tries": 3}),
         dict(supervision={"expect_s": -1}),
+        dict(not_before=-1),
         dict(labels=["state:open"]),
     ):
         kw = {"sandbox": "process", **bad}
@@ -705,6 +707,10 @@ def test_tasks_are_filed_edited_and_ended(record):
     run = start(record, t, fence=fence)
     with pytest.raises(Refused, match="live run"):
         record.end_task(t, "done", "early")
+    # the run holds reservations for the task's needs (invariant 7)
+    with pytest.raises(Refused, match="live run"):
+        record.edit_task(t, needs={"slots": 1})
+    assert record.edit_task(t, labels=["a:3"]) is True
     finish(record, run)
     with pytest.raises(Refused):
         record.end_task(t, "open", "not an end")

@@ -1,0 +1,2 @@
+bump: minor
+- Work in flight on the record: leases (`grant`, `renew`, `release`, `lease_view`), tasks (`file_task`, `edit_task`, `end_task`, `effective_labels`), nodes, capacity and reservations (`declare_node`, `retire_node`, `set_capacity`, `reserve`, `release_reservation`, `free`), runs started and finished as single events (`start_run`, `run_phase`, `finish_run`, `beat`), and `ready()` gives the ready tasks; `move` and `release` take a run's `fence`, and `events(wait=)` inside `reading()` is refused

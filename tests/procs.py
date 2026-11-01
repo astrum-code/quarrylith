@@ -10,8 +10,9 @@
   after the journal row and the puts are written and before the commit;
 - `starter URL TAG GATE TASK...`: waits for the file GATE, then starts a run
   of each task on node `n1`, holding every run it started; when a start finds
-  no room it finishes its oldest run and tries again. It finishes the rest at
-  the end, and prints how many starts it made and how many found no room.
+  no room it finishes every run it holds, pauses a moment for the other
+  process, and tries again. It finishes the rest at the end, and prints how
+  many starts it made and how many found no room.
 """
 
 import json
@@ -79,10 +80,9 @@ def starter(url, tag, gate, *tasks):
                 if "no room" not in str(e):
                     raise
                 refused += 1
-                if held:
+                while held:
                     finish(held.pop(0))
-                else:
-                    time.sleep(0.001)
+                time.sleep(0.02)
                 continue
             held.append(run)
             started += 1

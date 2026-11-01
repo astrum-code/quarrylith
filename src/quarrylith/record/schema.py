@@ -567,14 +567,15 @@ def check_flags(value):
 
 
 def check_names(value):
-    """`value` as a sorted list of names (a node's drivers), each a str."""
+    """`value` as a sorted list of names (a node's drivers), each a str, with
+    no repeat: strictly ascending."""
     if not isinstance(value, (list, tuple)):
         raise SchemaError(f"names are a list, not {type(value).__name__}")
     for name in value:
         if not isinstance(name, str):
             raise SchemaError(f"a name is a str, not {name!r}")
-    if list(value) != sorted(value):
-        raise SchemaError("names are stored sorted")
+    if any(a >= b for a, b in zip(value, value[1:])):
+        raise SchemaError("names are stored sorted, with no repeat")
     return list(value)
 
 

@@ -90,6 +90,24 @@ ITEM_EDITS = (
 )
 #: The kinds that carry a text record, read with `get(..., text=True)`.
 TEXTS = {"items": ("item_text", "body"), "changes": ("change_text", "body")}
+#: How long a lease runs past its last renewal while its item is claimed:
+#: 1423's default, three days. Expiry is a report, never a release.
+LEASE_MS = 3 * 24 * 3600 * 1000
+TASK_EDITS = (
+    "labels",
+    "flags",
+    "needs",
+    "sandbox",
+    "schedule",
+    "not_before",
+    "supervision",
+    "loop",
+)
+#: The states a task ends in.
+TASK_ENDS = ("done", "failed", "cancelled")
+#: A task's loop and supervision when it is filed without them.
+LOOP = {"max_attempts": 1, "interval_s": 0}
+SUPERVISION = {"expect_s": None, "beat_s": None}
 
 
 def wall_ms():
@@ -147,6 +165,153 @@ def _efforts_of(reader, item):
         parent = item["parent"]
         item = reader.get("items", [parent]) if parent is not None else None
     return []
+
+
+def _ineligible(reader, item):
+    """Why an item is not eligible, or None: it is admitted, an effort it is
+    linked to (its own links, else its parent chain's) is admitted, it has no
+    live dep and no live hold, and neither its holder nor its role has one."""
+    n = item["number"]
+    if not item["admitted"]:
+        return f"item {n} is not admitted"
+    if not any(
+        (reader.get("efforts", e) or {}).get("standing") == "admitted"
+        for e in _efforts_of(reader, item)
+    ):
+        return f"no effort item {n} is linked to is admitted"
+    if reader.read("deps", live=True, number=n):
+        return f"item {n} has a live dep"
+    if reader.read("holds", live=True, number=n):
+        return f"item {n} has a live hold"
+    whos = {lease["holder"] for lease in reader.read("leases", live=True, number=n)}
+    if item["role"] is not None:
+        whos.add(item["role"])
+    for who in sorted(whos):
+        if reader.read("holds", live=True, who=who):
+            return f"{who} has a live hold"
+    return None
+
+
+def _unready(reader, task, now):
+    """Why an open task is not ready at `now`, or None. Its item, when it has
+    one, is ready or claimed and eligible; with no item, its own effort is
+    admitted. Its `not_before` has passed and its attempts are under
+    `loop.max_attempts`."""
+    id = task["id"]
+    if task["state"] != "open":
+        return f"task {id} is {task['state']}, not open"
+    if task["not_before"] is not None and task["not_before"] > now:
+        return f"task {id} is not before {task['not_before']}"
+    most = task["loop"].get("max_attempts", LOOP["max_attempts"])
+    if task["attempts"] >= most:
+        return f"task {id} has had {task['attempts']} of its {most} attempts"
+    if task["number"] is not None:
+        item = reader.get("items", task["number"])
+        if item is None:
+            return f"task {id}'s item {task['number']} is not there"
+        if item["state"] not in ("ready", "claimed"):
+            return f"task {id}'s item {task['number']} is {item['state']}"
+        return _ineligible(reader, item)
+    effort = task["effort"]
+    if (
+        effort is None
+        or (reader.get("efforts", effort) or {}).get("standing") != "admitted"
+    ):
+        return f"task {id} has no item and no admitted effort"
+    return None
+
+
+def _peak(reservations, from_at, until_at):
+    """The largest sum of `reservations` covering any instant of the span
+    `[from_at, until_at)` (None: no end). A reservation covers `[its from_at,
+    its until_at)`, so the sum can only rise where one starts."""
+    over = [
+        r
+        for r in reservations
+        if (until_at is None or r["from_at"] < until_at)
+        and (r["until_at"] is None or r["until_at"] > from_at)
+    ]
+    points = {from_at} | {r["from_at"] for r in over if r["from_at"] > from_at}
+    return max(
+        sum(
+            r["amount"]
+            for r in over
+            if r["from_at"] <= t and (r["until_at"] is None or t < r["until_at"])
+        )
+        for t in points
+    )
+
+
+def _free(reader, node, resource, from_at, until_at):
+    """A node's capacity of `resource` (0 when none is declared) minus the
+    largest sum of its live reservations over the span."""
+    cap = reader.get("capacity", [node, resource])
+    live = [
+        r
+        for r in reader.read("reservations", live=True, node=node)
+        if r["resource"] == resource
+    ]
+    return (cap["amount"] if cap else 0) - _peak(live, from_at, until_at)
+
+
+def _expiry(now, paused_until):
+    """A running lease's expiry, renewed at `now`."""
+    return max(now, paused_until or 0) + LEASE_MS
+
+
+def _time(value, what):
+    if value is not None and (not schema.is_int(value) or value < 0):
+        raise Refused(f"{what} is a time in milliseconds, not {value!r}")
+    return value
+
+
+def _seconds(value, what):
+    """`value` seconds as milliseconds (None stays None)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise Refused(f"{what} is seconds, from 0, not {value!r}")
+    return int(value * 1000)
+
+
+def _needs(needs):
+    """`needs` as `{resource: amount}`, an amount an int from 1, by resource."""
+    if not isinstance(needs, dict):
+        raise Refused(f"needs are {{resource: amount}}, not {needs!r}")
+    for resource, amount in needs.items():
+        if not isinstance(resource, str) or not resource:
+            raise Refused(f"a resource is a non-empty str, not {resource!r}")
+        if not schema.is_int(amount) or amount < 1:
+            raise Refused(
+                f"needs {resource}: an amount is an int from 1, not {amount!r}"
+            )
+    return dict(sorted(needs.items()))
+
+
+def _settings(value, defaults, what, least):
+    """A task's `loop` or `supervision`: the defaults' keys only, each an int
+    from `least[key]` or, where the default is None, None."""
+    if value is None:
+        return dict(defaults)
+    if not isinstance(value, dict) or not set(value) <= set(defaults):
+        raise Refused(f"a task's {what} is {{{', '.join(defaults)}}}, not {value!r}")
+    out = {**defaults, **value}
+    for key, got in out.items():
+        if got is None and defaults[key] is None:
+            continue
+        if not schema.is_int(got) or got < least[key]:
+            raise Refused(f"a task's {what}.{key} is an int from {least[key]}: {got!r}")
+    return out
+
+
+def _loop(loop):
+    return _settings(loop, LOOP, "loop", {"max_attempts": 1, "interval_s": 0})
+
+
+def _supervision(supervision):
+    return _settings(
+        supervision, SUPERVISION, "supervision", {"expect_s": 0, "beat_s": 0}
+    )
 
 
 def unlinked_items(records):
@@ -523,7 +688,10 @@ class Record(abc.ABC):
 
     @contextlib.contextmanager
     def reading(self):
-        """Every read inside sees the record at one seq, which it yields."""
+        """Every read inside sees the record at one seq, which it yields. It
+        holds the record's lock: other threads' operations and reads wait
+        until the reading ends, so a reading must not wait on one (a join, a
+        queue) or it never ends."""
         with self._lock:
             self._usable()
             if self._reading_depth:
@@ -542,34 +710,77 @@ class Record(abc.ABC):
 
     def ready(self, *, now):
         """The ready read: the items in `ready` that are eligible, and the
-        open tasks that are (tasks come with their records, in a later step).
-        An item is eligible when it is admitted, an effort it is linked to
-        (its own links, else its parent chain's) is admitted, it has no live
-        dep and no live hold, and neither its holder nor its role has one."""
+        open tasks that are ready, each in key order. An item is eligible
+        when it is admitted, an effort it is linked to (its own links, else
+        its parent chain's) is admitted, it has no live dep and no live hold,
+        and neither its holder nor its role has one. A task is ready when its
+        item, if it has one, is ready or claimed and eligible (with no item,
+        its own effort is admitted), its `not_before` has passed and its
+        attempts are under `loop.max_attempts`."""
         if not schema.is_int(now):
             raise Refused(f"now is a time in milliseconds, not {now!r}")
         with self.reading():
-            items = [i for i in self.read("items", state="ready") if self._eligible(i)]
-        return {"items": items, "tasks": []}
+            items = [
+                i for i in self.read("items", state="ready") if not _ineligible(self, i)
+            ]
+            tasks = [
+                t
+                for t in self.read("tasks", state="open")
+                if not _unready(self, t, now)
+            ]
+        return {"items": items, "tasks": tasks}
 
-    def _eligible(self, item):
-        n = item["number"]
-        if not item["admitted"]:
-            return False
-        efforts = _efforts_of(self, item)
-        if not any(
-            (self.get("efforts", e) or {}).get("standing") == "admitted"
-            for e in efforts
-        ):
-            return False
-        if self.read("deps", live=True, number=n):
-            return False
-        if self.read("holds", live=True, number=n):
-            return False
-        whos = {lease["holder"] for lease in self.read("leases", live=True, number=n)}
-        if item["role"] is not None:
-            whos.add(item["role"])
-        return not any(self.read("holds", live=True, who=who) for who in whos)
+    def lease_view(self, number, *, now):
+        """The item's live lease, or None, with its `state` (running, paused
+        or expired) and its `expiry`: from `renewed_at`, `paused_until` and
+        the latest beat of the holder's live run on the item, plus
+        `LEASE_MS`. A lease is paused (no expiry) while its item is not
+        claimed. Expiry is a report: an expired lease still holds the item."""
+        _key("items", [number])
+        if not schema.is_int(now):
+            raise Refused(f"now is a time in milliseconds, not {now!r}")
+        with self.reading():
+            live = self.read("leases", live=True, number=number)
+            if not live:
+                return None
+            lease = live[0]
+            if lease["expires_at"] is None:
+                return {**lease, "state": "paused", "expiry": None}
+            since = max(lease["renewed_at"], lease["paused_until"] or 0)
+            for run in self.read("runs", live=True, holder=lease["holder"]):
+                task = self.get("tasks", run["task"])
+                beat = self.get("beats", run["id"])
+                if task and task["number"] == number and beat:
+                    since = max(since, beat["at"])
+        expiry = since + LEASE_MS
+        state = "running" if now < expiry else "expired"
+        return {**lease, "state": state, "expiry": expiry}
+
+    def free(self, node, resource, *, from_at, until_at):
+        """A node's capacity of `resource` minus the largest sum of its live
+        reservations covering any instant of `[from_at, until_at)` (None: no
+        end)."""
+        _key("capacity", [node, resource])
+        _time(from_at, "from_at")
+        _time(until_at, "until_at")
+        if from_at is None:
+            raise Refused("from_at is a time in milliseconds, not None")
+        with self.reading():
+            return _free(self, node, resource, from_at, until_at)
+
+    def effective_labels(self, task_id):
+        """A task's effective labels: its item's, then its own, merged by key
+        (the task's winning), sorted as labels are stored. Never stored."""
+        with self.reading():
+            task = self.get("tasks", task_id)
+            if task is None:
+                raise Refused(f"no task {task_id}")
+            number = task["number"]
+            item = self.get("items", number) if number is not None else None
+        merged = {}
+        for label in (item["labels"] if item else []) + task["labels"]:
+            merged[label.split(":", 1)[0]] = label
+        return sorted(merged.values())
 
     # -- the journal, delivered -----------------------------------------------
 
@@ -581,15 +792,22 @@ class Record(abc.ABC):
 
     def events(self, cursor, *, limit=500, wait=0.0, subject=None):
         """The events after `cursor`, in seq order, at most `limit`. With
-        `wait`, up to that many seconds for the first one. Inside
-        `reading()` a wait sees no other writer's commit: the snapshot pins
-        the read."""
+        `wait`, up to that many seconds for the first one. A wait inside
+        `reading()` is refused: the reading holds every other thread's
+        operation back and its snapshot pins the read, so it could only end
+        empty."""
         if not schema.is_int(cursor) or cursor < 0:
             raise Refused(f"a cursor is a seq, from 0, not {cursor!r}")
         if not schema.is_int(limit) or limit < 1:
             raise Refused(f"a limit is an int, from 1, not {limit!r}")
         if isinstance(wait, bool) or not isinstance(wait, (int, float)) or wait < 0:
             raise Refused(f"wait is seconds, from 0, not {wait!r}")
+        if wait > 0:
+            with self._lock:
+                # another thread's reading holds the lock, so a depth seen
+                # here is this thread's own
+                if self._reading_depth:
+                    raise Refused("events(wait=) does not wait inside reading()")
         end = time.monotonic() + wait
         while True:
             with self._lock:
@@ -632,6 +850,16 @@ class Record(abc.ABC):
                 self._bookkeep(
                     "cursors", {"consumer": consumer, "seq": seq, "at": self.now_ms()}
                 )
+
+    def beat(self, run):
+        """A run's liveness beat, at the record's clock (an earlier one leaves
+        the later). Bookkeeping: no event, and never refused by a rule."""
+        _key("beats", [run])
+        self._writable()
+        with self._lock:
+            self._not_reading()
+            with self._write():
+                self._bookkeep("beats", {"run": run, "at": self.now_ms()})
 
     # -- administration -------------------------------------------------------
 
@@ -1062,13 +1290,17 @@ class Record(abc.ABC):
             op.data = {"number": n, "fields": changed}
         return op.seq is not None
 
-    def move(self, n, state, why, *, expect=None):
-        """Move an item to `state`. Refused for a pair not in MOVES, and when
-        `expect` is not the current state. Done and dropped set `closed_at`;
-        a reopen clears it."""
+    def move(self, n, state, why, *, expect=None, fence=None):
+        """Move an item to `state`. Refused for a pair not in MOVES, when
+        `expect` is not the current state, and for a `fence` (a run's) that
+        is not the item's live lease. Done and dropped set `closed_at` and
+        release the live lease; a reopen clears `closed_at`. A move out of
+        `claimed` pauses the lease, and a move back restarts it."""
         with self._operation("move", "item.state", f"item:{n}") as op:
             item = op.need("items", [n], "item")
             now = item["state"]
+            if fence is not None:
+                self._live_lease(op, n, fence)
             if expect is not None and now != expect:
                 raise Refused(f"item {n} is {now}, not {expect}")
             if (now, state) not in MOVES:
@@ -1079,6 +1311,21 @@ class Record(abc.ABC):
             elif now in CLOSED_STATES:
                 after["closed_at"] = None
             op.put("items", after)
+            for lease in op.read("leases", live=True, number=n):
+                if state in CLOSED_STATES:
+                    lease.update(
+                        released_at=op.now, released_by=self.actor, why="closed"
+                    )
+                elif state == "claimed":
+                    lease.update(
+                        renewed_at=op.now,
+                        expires_at=_expiry(op.now, lease["paused_until"]),
+                    )
+                elif now == "claimed":
+                    lease.update(expires_at=None)
+                else:
+                    continue
+                op.put("leases", lease)
             op.data = {"number": n, "from": now, "to": state, "why": why}
 
     def admit(self, n, by):
@@ -1152,6 +1399,534 @@ class Record(abc.ABC):
                 raise Refused(f"dep {id} is lifted already")
             op.put("deps", {**dep, "lifted_at": op.now, "lifted_by": by})
             op.data = {"id": id, "number": dep["number"], "why": why}
+
+    # -- leases ---------------------------------------------------------------
+
+    @staticmethod
+    def _live_lease(op, n, fence=None):
+        """Item `n`'s live lease. Refused when it has none, and when `fence`
+        is given and is not the live lease's: a stale fence."""
+        live = op.read("leases", live=True, number=n)
+        if not live:
+            stale = f": fence {fence} is stale" if fence is not None else ""
+            raise Refused(f"item {n} has no live lease{stale}")
+        lease = live[0]
+        if fence is not None and lease["fence"] != fence:
+            raise Refused(
+                f"fence {fence} is stale: item {n}'s live lease has fence "
+                f"{lease['fence']}"
+            )
+        return lease
+
+    @staticmethod
+    def _not_held(op, n, *whos):
+        if op.read("holds", live=True, number=n):
+            raise Refused(f"item {n} has a live hold")
+        for who in whos:
+            if who is not None and op.read("holds", live=True, who=who):
+                raise Refused(f"{who} has a live hold")
+
+    def grant(self, n, holder, *, role=None, branch, machine, expect=None):
+        """Grant item `n` to `holder`, moving it to `claimed` (from a state
+        MOVES takes there). The holder's own second grant renews its live
+        lease and keeps its fence. Refused for a live lease held by another,
+        a live hold (on the item, the holder or the role), and `expect` not
+        the state. Returns the fence, from 1 per item."""
+        with self._operation("grant", "lease.grant", f"item:{n}") as op:
+            item = op.need("items", [n], "item")
+            state = item["state"]
+            if expect is not None and state != expect:
+                raise Refused(f"item {n} is {state}, not {expect}")
+            live = op.read("leases", live=True, number=n)
+            if live and live[0]["holder"] != holder:
+                lease = live[0]
+                raise Refused(
+                    f"item {n} is held by {lease['holder']} (fence {lease['fence']})"
+                )
+            self._not_held(op, n, holder, role if role is not None else item["role"])
+            if state != "claimed" and (state, "claimed") not in MOVES:
+                raise Refused(f"no move from {state} to claimed: item {n}")
+            expires_at = _expiry(op.now, live[0]["paused_until"] if live else None)
+            if live:
+                lease = {**live[0], "renewed_at": op.now, "expires_at": expires_at}
+            else:
+                fence = max(
+                    (lease["fence"] for lease in op.read("leases", number=n)),
+                    default=0,
+                )
+                lease = {
+                    "id": op.take("next:leases"),
+                    "number": n,
+                    "holder": holder,
+                    "role": role,
+                    "fence": fence + 1,
+                    "branch": branch,
+                    "machine": machine,
+                    "granted_at": op.now,
+                    "renewed_at": op.now,
+                    "paused_until": None,
+                    "expires_at": expires_at,
+                    "released_at": None,
+                    "released_by": None,
+                    "why": None,
+                }
+            op.put("leases", lease)
+            if state != "claimed":
+                op.put("items", {**item, "state": "claimed", "updated_at": op.now})
+            op.data = {
+                "number": n,
+                "holder": holder,
+                "fence": lease["fence"],
+                "from": state,
+            }
+        return lease["fence"]
+
+    def renew(self, n, holder, fence, *, paused_until=None):
+        """Renew the holder's live lease on item `n`; `paused_until` (a usage
+        limit's reset) holds its expiry back to then. Refused for a stale
+        fence, or a lease another holds."""
+        _time(paused_until, "paused_until")
+        with self._operation("renew", "lease.renew", f"item:{n}") as op:
+            lease = self._live_lease(op, n, fence)
+            if lease["holder"] != holder:
+                raise Refused(f"item {n}'s lease is held by {lease['holder']}")
+            item = op.need("items", [n], "item")
+            if paused_until is not None:
+                lease["paused_until"] = paused_until
+            lease["renewed_at"] = op.now
+            if item["state"] == "claimed":
+                lease["expires_at"] = _expiry(op.now, lease["paused_until"])
+            op.put("leases", lease)
+            op.data = {"number": n, "holder": holder, "fence": fence}
+
+    def release(self, n, by, why, *, fence=None):
+        """Release item `n`'s live lease, and move the item to `ready` when it
+        is `claimed` or `blocked`. Refused when it has none, or for a stale
+        `fence`."""
+        with self._operation("release", "lease.release", f"item:{n}") as op:
+            lease = self._live_lease(op, n, fence)
+            op.put(
+                "leases",
+                {**lease, "released_at": op.now, "released_by": by, "why": why},
+            )
+            item = op.need("items", [n], "item")
+            if item["state"] in ("claimed", "blocked"):
+                op.put("items", {**item, "state": "ready", "updated_at": op.now})
+            op.data = {"number": n, "holder": lease["holder"], "by": by, "why": why}
+
+    # -- tasks ----------------------------------------------------------------
+
+    def file_task(
+        self,
+        kind,
+        *,
+        number=None,
+        effort=None,
+        labels=(),
+        flags=(),
+        needs=None,
+        sandbox,
+        schedule=None,
+        not_before=None,
+        supervision=None,
+        loop=None,
+    ):
+        """File a task: of an item, or with none (a job), under `effort`.
+        `needs` is `{resource: amount}`, reserved by each run. Returns its
+        id."""
+        try:
+            labels, flags = sorted(labels), sorted(flags)
+        except TypeError:
+            raise Refused("labels and flags are lists of str") from None
+        needs = _needs({} if needs is None else needs)
+        loop, supervision = _loop(loop), _supervision(supervision)
+        _time(not_before, "not_before")
+        with self._operation("file_task", "task.file") as op:
+            if number is not None:
+                op.need("items", [number], "item")
+            if effort is not None:
+                op.need("efforts", [effort], "effort")
+            id = op.take("next:tasks")
+            op.subject = f"task:{id}"
+            op.put(
+                "tasks",
+                {
+                    "id": id,
+                    "number": number,
+                    "effort": effort,
+                    "kind": kind,
+                    "labels": labels,
+                    "flags": flags,
+                    "needs": needs,
+                    "sandbox": sandbox,
+                    "schedule": schedule,
+                    "not_before": not_before,
+                    "supervision": supervision,
+                    "loop": loop,
+                    "attempts": 0,
+                    "state": "open",
+                    "created_at": op.now,
+                    "ended_at": None,
+                },
+            )
+            op.data = {"id": id, "number": number, "effort": effort, "kind": kind}
+        return id
+
+    def edit_task(self, id, **fields):
+        """Edit a task's labels, flags, needs, sandbox, schedule, not_before,
+        supervision or loop. Refused for an ended task, and for its needs
+        while a run holds reservations for them. False when nothing changed
+        (and nothing is written)."""
+        for name in fields:
+            if name not in TASK_EDITS:
+                raise Refused(f"a task's {name} is not edited: {TASK_EDITS}")
+        if not fields:
+            raise Refused("an edit names a field")
+        checks = {"needs": _needs, "loop": _loop, "supervision": _supervision}
+        for name, check in checks.items():
+            if name in fields:
+                fields[name] = check(fields[name])
+        if "not_before" in fields:
+            _time(fields["not_before"], "not_before")
+        for name in ("labels", "flags"):
+            if name in fields and isinstance(fields[name], (list, tuple)):
+                try:
+                    fields[name] = sorted(fields[name])
+                except TypeError:
+                    raise Refused(f"{name} are a list of str") from None
+        with self._operation("edit_task", "task.edit", f"task:{id}") as op:
+            task = op.need("tasks", [id], "task")
+            if task["ended_at"] is not None:
+                raise Refused(f"task {id} has ended ({task['state']})")
+            after = {**task, **fields}
+            if after == task:
+                op.nothing()
+            if after["needs"] != task["needs"] and op.read("runs", live=True, task=id):
+                raise Refused(f"task {id} has a live run, which holds its needs")
+            op.put("tasks", after)
+            op.data = {
+                "id": id,
+                "fields": sorted(f for f in fields if after[f] != task[f]),
+            }
+        return op.seq is not None
+
+    def end_task(self, id, state, why):
+        """End a task: done, failed or cancelled. Refused for a task that has
+        ended, and for one with a live run (finish it first)."""
+        if state not in TASK_ENDS:
+            raise Refused(f"a task ends {', '.join(TASK_ENDS)}, not {state!r}")
+        with self._operation("end_task", "task.end", f"task:{id}") as op:
+            task = op.need("tasks", [id], "task")
+            if task["ended_at"] is not None:
+                raise Refused(f"task {id} has ended ({task['state']})")
+            if op.read("runs", live=True, task=id):
+                raise Refused(f"task {id} has a live run: finish it first")
+            op.put("tasks", {**task, "state": state, "ended_at": op.now})
+            op.data = {"id": id, "state": state, "why": why}
+
+    # -- allocation -----------------------------------------------------------
+
+    @staticmethod
+    def _live_node(op, name):
+        node = op.need("nodes", [name], "node")
+        if node["retired_at"] is not None:
+            raise Refused(f"node {name} is retired")
+        return node
+
+    def declare_node(self, name, drivers, labels):
+        """Declare a node, or a live node's drivers and labels anew. Refused
+        for a retired node. False when nothing changed (and nothing is
+        written)."""
+        try:
+            drivers, labels = sorted(drivers), sorted(labels)
+        except TypeError:
+            raise Refused("drivers and labels are lists of str") from None
+        with self._operation("declare_node", "node.declare", f"node:{name}") as op:
+            node = op.get("nodes", [name])
+            if node is not None and node["retired_at"] is not None:
+                raise Refused(f"node {name} is retired")
+            after = {
+                "name": name,
+                "drivers": drivers,
+                "labels": labels,
+                "declared_at": node["declared_at"] if node else op.now,
+                "retired_at": None,
+            }
+            if after == node:
+                op.nothing()
+            op.put("nodes", after)
+            op.data = {"name": name, "drivers": drivers, "labels": labels}
+        return op.seq is not None
+
+    def retire_node(self, name):
+        """Retire a node. Refused for one retired, or with live reservations."""
+        with self._operation("retire_node", "node.retire", f"node:{name}") as op:
+            node = self._live_node(op, name)
+            if op.read("reservations", live=True, node=name):
+                raise Refused(f"node {name} has live reservations")
+            op.put("nodes", {**node, "retired_at": op.now})
+            op.data = {"name": name}
+
+    def set_capacity(self, node, resource, amount, unit):
+        """Set a node's capacity of `resource`. Refused below what its live
+        reservations hold at any instant from now. False when nothing changed
+        (and nothing is written)."""
+        if not schema.is_int(amount) or amount < 0:
+            raise Refused(f"a capacity is an int from 0, not {amount!r}")
+        subject = f"node:{node}"
+        with self._operation("set_capacity", "capacity.set", subject) as op:
+            self._live_node(op, node)
+            reserved = _peak(
+                [
+                    r
+                    for r in op.read("reservations", live=True, node=node)
+                    if r["resource"] == resource
+                ],
+                op.now,
+                None,
+            )
+            if amount < reserved:
+                raise Refused(
+                    f"node {node} has {reserved} {resource} reserved from now: "
+                    f"{amount} is below it"
+                )
+            before = op.get("capacity", [node, resource])
+            if before and (before["amount"], before["unit"]) == (amount, unit):
+                op.nothing()
+            op.put(
+                "capacity",
+                {
+                    "node": node,
+                    "resource": resource,
+                    "amount": amount,
+                    "unit": unit,
+                    "declared_by": self.actor,
+                    "at": op.now,
+                },
+            )
+            op.data = {"node": node, "resource": resource, "amount": amount}
+        return op.seq is not None
+
+    def _reserve(self, op, node, needs, *, task, run, holder, from_at, until_at):
+        """Reserve each of `needs` on a live node over the span, or refuse
+        them all: the reservation invariant. Returns the ids, by resource."""
+        self._live_node(op, node)
+        short = []
+        for resource, amount in needs.items():
+            free = _free(op, node, resource, from_at, until_at)
+            if free < amount:
+                short.append(f"{resource} {amount} asked, {max(free, 0)} free")
+        if short:
+            raise Refused(f"no room on node {node}: {'; '.join(short)}")
+        ids = []
+        for resource, amount in needs.items():
+            ids.append(op.take("next:reservations"))
+            op.put(
+                "reservations",
+                {
+                    "id": ids[-1],
+                    "node": node,
+                    "resource": resource,
+                    "amount": amount,
+                    "task": task,
+                    "run": run,
+                    "holder": holder,
+                    "from_at": from_at,
+                    "until_at": until_at,
+                    "released_at": None,
+                    "why": None,
+                },
+            )
+        return ids
+
+    def reserve(self, node, needs, *, task=None, run=None, holder, from_at, until_at):
+        """Reserve `needs` (`{resource: amount}`) on a node over `[from_at,
+        until_at)` (None: no end), for a task, a run, or a standing consumer
+        named `holder`. Refused whole when any resource has no room at any
+        instant of the span. Returns the ids, by resource."""
+        needs = _needs(needs)
+        if not needs:
+            raise Refused("a reservation names a resource")
+        _time(from_at, "from_at")
+        _time(until_at, "until_at")
+        if from_at is None:
+            raise Refused("from_at is a time in milliseconds, not None")
+        if until_at is not None and until_at <= from_at:
+            raise Refused(f"a reservation ends after it starts: {from_at}, {until_at}")
+        with self._operation("reserve", "reserve", f"node:{node}") as op:
+            if task is not None:
+                op.need("tasks", [task], "task")
+            if run is not None:
+                op.need("runs", [run], "run")
+            ids = self._reserve(
+                op,
+                node,
+                needs,
+                task=task,
+                run=run,
+                holder=holder,
+                from_at=from_at,
+                until_at=until_at,
+            )
+            op.data = {"ids": ids, "node": node, "needs": needs, "holder": holder}
+        return ids
+
+    def release_reservation(self, id, why):
+        """Release a live reservation. Refused when it is released already."""
+        with self._operation("release_reservation", "reserve.release") as op:
+            r = op.need("reservations", [id], "reservation")
+            op.subject = f"node:{r['node']}"
+            if r["released_at"] is not None:
+                raise Refused(f"reservation {id} is released already")
+            op.put("reservations", {**r, "released_at": op.now, "why": why})
+            op.data = {"id": id, "node": r["node"], "why": why}
+
+    # -- runs -----------------------------------------------------------------
+
+    def start_run(
+        self,
+        task,
+        holder,
+        *,
+        node,
+        sandbox,
+        fence,
+        branch=None,
+        expect_s,
+        harness=None,
+    ):
+        """Start a run of a ready task, in one event: it checks the task is
+        ready, that `fence` is its item's live lease held by `holder` (a task
+        with no item has no fence) and that the node is live and runs
+        `sandbox`; then it reserves the task's needs on the node from now with
+        no end, raises `attempts`, marks the task running and starts the run.
+        Refused whole if any reservation has no room: never queued, never
+        part-reserved. Returns the run's id."""
+        expect_ms = _seconds(expect_s, "expect_s")
+        with self._operation("start_run", "run.start") as op:
+            t = op.need("tasks", [task], "task")
+            why = _unready(op, t, op.now)
+            if why:
+                raise Refused(why)
+            if t["number"] is not None:
+                if fence is None:
+                    raise Refused(
+                        f"task {task}'s item {t['number']} starts under its live "
+                        "lease's fence"
+                    )
+                lease = self._live_lease(op, t["number"], fence)
+                if lease["holder"] != holder:
+                    raise Refused(
+                        f"item {t['number']}'s lease is held by {lease['holder']}, "
+                        f"not {holder}"
+                    )
+            elif fence is not None:
+                raise Refused(f"task {task} has no item, so its run has no fence")
+            if sandbox not in self._live_node(op, node)["drivers"]:
+                raise Refused(f"node {node} does not run {sandbox}")
+            id = op.take("next:runs")
+            op.subject = f"run:{id}"
+            attempt = t["attempts"] + 1
+            op.put("tasks", {**t, "attempts": attempt, "state": "running"})
+            op.put(
+                "runs",
+                {
+                    "id": id,
+                    "task": task,
+                    "attempt": attempt,
+                    "holder": holder,
+                    "fence": fence,
+                    "node": node,
+                    "sandbox": sandbox,
+                    "branch": branch,
+                    "pgid": None,
+                    "phase": "started",
+                    "phase_at": op.now,
+                    "expect_until": None if expect_ms is None else op.now + expect_ms,
+                    "harness": {} if harness is None else harness,
+                    "footprint": {},
+                    "cost": {},
+                    "outcome": None,
+                    "reason": None,
+                    "started_at": op.now,
+                    "finished_at": None,
+                },
+            )
+            ids = self._reserve(
+                op,
+                node,
+                t["needs"],
+                task=task,
+                run=id,
+                holder=holder,
+                from_at=op.now,
+                until_at=None,
+            )
+            op.data = {
+                "run": id,
+                "task": task,
+                "attempt": attempt,
+                "holder": holder,
+                "node": node,
+                "fence": fence,
+                "reservations": ids,
+            }
+        return id
+
+    def run_phase(self, id, phase, *, expect_s=None):
+        """A live run's phase, and when it expects the next (None: no
+        expectation). Refused for a finished run."""
+        expect_ms = _seconds(expect_s, "expect_s")
+        with self._operation("run_phase", "run.phase", f"run:{id}") as op:
+            run = op.need("runs", [id], "run")
+            if run["finished_at"] is not None:
+                raise Refused(f"run {id} is finished")
+            op.put(
+                "runs",
+                {
+                    **run,
+                    "phase": phase,
+                    "phase_at": op.now,
+                    "expect_until": None if expect_ms is None else op.now + expect_ms,
+                },
+            )
+            op.data = {"run": id, "task": run["task"], "phase": phase}
+
+    def finish_run(self, id, outcome, reason, *, footprint, cost, result=None):
+        """Finish a run with its outcome, and release its reservations in the
+        same event; its task, running, is open again. Never refused for a
+        stale fence: it touches nothing of the item. Refused for a run that
+        is finished."""
+        with self._operation("finish_run", "run.finish", f"run:{id}") as op:
+            run = op.need("runs", [id], "run")
+            if run["finished_at"] is not None:
+                raise Refused(f"run {id} is finished")
+            op.put(
+                "runs",
+                {
+                    **run,
+                    "outcome": outcome,
+                    "reason": reason,
+                    "footprint": footprint,
+                    "cost": cost,
+                    "finished_at": op.now,
+                },
+            )
+            if result is not None:
+                op.put("run_text", {"run": id, "result": result})
+            released = []
+            for r in op.read("reservations", live=True, run=id):
+                op.put("reservations", {**r, "released_at": op.now, "why": "finished"})
+                released.append(r["id"])
+            task = op.get("tasks", [run["task"]])
+            if task is not None and task["state"] == "running":
+                op.put("tasks", {**task, "state": "open"})
+            op.data = {
+                "run": id,
+                "task": run["task"],
+                "outcome": outcome,
+                "released": released,
+            }
 
     # -- text -----------------------------------------------------------------
 

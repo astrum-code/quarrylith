@@ -91,7 +91,7 @@ ITEM_EDITS = (
 #: The kinds that carry a text record, read with `get(..., text=True)`.
 TEXTS = {"items": ("item_text", "body"), "changes": ("change_text", "body")}
 #: How long a lease runs past its last renewal while its item is claimed:
-#: 1423's default, three days. Expiry is a report, never a release.
+#: three days. Expiry is a report, never a release.
 LEASE_MS = 3 * 24 * 3600 * 1000
 TASK_EDITS = (
     "labels",
@@ -733,9 +733,10 @@ class Record(abc.ABC):
     def lease_view(self, number, *, now):
         """The item's live lease, or None, with its `state` (running, paused
         or expired) and its `expiry`: from `renewed_at`, `paused_until` and
-        the latest beat of the holder's live run on the item, plus
-        `LEASE_MS`. A lease is paused (no expiry) while its item is not
-        claimed. Expiry is a report: an expired lease still holds the item."""
+        the latest beat of the holder's live run on the item under the
+        lease's fence, plus `LEASE_MS`. A lease is paused (no expiry) while
+        its item is not claimed. Expiry is a report: an expired lease still
+        holds the item."""
         _key("items", [number])
         if not schema.is_int(now):
             raise Refused(f"now is a time in milliseconds, not {now!r}")
@@ -750,7 +751,12 @@ class Record(abc.ABC):
             for run in self.read("runs", live=True, holder=lease["holder"]):
                 task = self.get("tasks", run["task"])
                 beat = self.get("beats", run["id"])
-                if task and task["number"] == number and beat:
+                if (
+                    run["fence"] == lease["fence"]
+                    and task
+                    and task["number"] == number
+                    and beat
+                ):
                     since = max(since, beat["at"])
         expiry = since + LEASE_MS
         state = "running" if now < expiry else "expired"
@@ -765,6 +771,8 @@ class Record(abc.ABC):
         _time(until_at, "until_at")
         if from_at is None:
             raise Refused("from_at is a time in milliseconds, not None")
+        if until_at is not None and until_at <= from_at:
+            raise Refused(f"a span ends after it starts: {from_at}, {until_at}")
         with self.reading():
             return _free(self, node, resource, from_at, until_at)
 
@@ -1611,8 +1619,10 @@ class Record(abc.ABC):
         return op.seq is not None
 
     def end_task(self, id, state, why):
-        """End a task: done, failed or cancelled. Refused for a task that has
-        ended, and for one with a live run (finish it first)."""
+        """End a task: done, failed or cancelled, releasing its own live
+        reservations (the task's, with no run) in the same event. Refused for
+        a task that has ended, and for one with a live run (finish it
+        first)."""
         if state not in TASK_ENDS:
             raise Refused(f"a task ends {', '.join(TASK_ENDS)}, not {state!r}")
         with self._operation("end_task", "task.end", f"task:{id}") as op:
@@ -1622,7 +1632,15 @@ class Record(abc.ABC):
             if op.read("runs", live=True, task=id):
                 raise Refused(f"task {id} has a live run: finish it first")
             op.put("tasks", {**task, "state": state, "ended_at": op.now})
-            op.data = {"id": id, "state": state, "why": why}
+            released = []
+            for r in op.read("reservations", live=True, task=id):
+                if r["run"] is None:
+                    op.put(
+                        "reservations",
+                        {**r, "released_at": op.now, "why": "task ended"},
+                    )
+                    released.append(r["id"])
+            op.data = {"id": id, "state": state, "why": why, "released": released}
 
     # -- allocation -----------------------------------------------------------
 
@@ -1743,7 +1761,8 @@ class Record(abc.ABC):
         """Reserve `needs` (`{resource: amount}`) on a node over `[from_at,
         until_at)` (None: no end), for a task, a run, or a standing consumer
         named `holder`. Refused whole when any resource has no room at any
-        instant of the span. Returns the ids, by resource."""
+        instant of the span, and for a task that has ended or a run that is
+        finished. Returns the ids, by resource."""
         needs = _needs(needs)
         if not needs:
             raise Refused("a reservation names a resource")
@@ -1755,9 +1774,12 @@ class Record(abc.ABC):
             raise Refused(f"a reservation ends after it starts: {from_at}, {until_at}")
         with self._operation("reserve", "reserve", f"node:{node}") as op:
             if task is not None:
-                op.need("tasks", [task], "task")
+                t = op.need("tasks", [task], "task")
+                if t["ended_at"] is not None:
+                    raise Refused(f"task {task} has ended ({t['state']})")
             if run is not None:
-                op.need("runs", [run], "run")
+                if op.need("runs", [run], "run")["finished_at"] is not None:
+                    raise Refused(f"run {run} is finished")
             ids = self._reserve(
                 op,
                 node,
@@ -1772,12 +1794,21 @@ class Record(abc.ABC):
         return ids
 
     def release_reservation(self, id, why):
-        """Release a live reservation. Refused when it is released already."""
+        """Release a live reservation. Refused when it is released already,
+        and when its run is live: `finish_run` releases it, so a running run
+        keeps the room it holds (invariant 7)."""
         with self._operation("release_reservation", "reserve.release") as op:
             r = op.need("reservations", [id], "reservation")
             op.subject = f"node:{r['node']}"
             if r["released_at"] is not None:
                 raise Refused(f"reservation {id} is released already")
+            if r["run"] is not None:
+                run = op.get("runs", [r["run"]])
+                if run is not None and run["finished_at"] is None:
+                    raise Refused(
+                        f"reservation {id} is held by live run {r['run']}: "
+                        "finish_run releases it"
+                    )
             op.put("reservations", {**r, "released_at": op.now, "why": why})
             op.data = {"id": id, "node": r["node"], "why": why}
 
@@ -1961,7 +1992,8 @@ class Record(abc.ABC):
     def state(
         self, type, text, *, effort=None, number=None, where=None, supersedes=None
     ):
-        """A statement (#1228's types), on an effort or an item or neither.
+        """A statement (of a type in `schema.VALUES`), on an effort or an item,
+        or neither.
         Returns its id."""
         subject = (
             f"effort:{effort}"

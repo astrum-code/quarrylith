@@ -21,7 +21,6 @@ records in `RECORDS` order, then `pulled` and `left`, then the counters.
 """
 
 import copy
-import json
 
 from . import events as ev
 from . import schema
@@ -48,10 +47,6 @@ class ImportRefused(ValueError):
     def __init__(self, problems):
         self.problems = list(problems)
         super().__init__("import document refused: " + "; ".join(self.problems))
-
-
-def _canon(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _count(value):
@@ -171,7 +166,7 @@ def _legacy_ref(row):
         return f"column:{row['column']}"
     if row["legacy_key"] is None:
         return "*"
-    return _canon(row["legacy_key"])
+    return schema.canonical(row["legacy_key"])
 
 
 def _pulled(doc, tables, keys, counters, at, problems):
@@ -210,10 +205,12 @@ def _pulled(doc, tables, keys, counters, at, problems):
                 and isinstance(rkey[0], str)
                 and rkey[0] in counters
             )
-        elif kind in keys and isinstance(rkey, list):
+        elif kind in keys:
+            # a key of its kind first: True and 1.0 equal 1, and are no key
             try:
+                rkey = schema.check_key(kind, rkey)
                 found = tuple(rkey) in keys[kind]
-            except TypeError:  # a part that is not hashable is no key
+            except SchemaError:
                 found = False
         else:
             found = False
@@ -412,15 +409,54 @@ def check_import(doc):
         raise ImportRefused(problems)
 
 
-def _groups(kind, rows):
-    """The rows of one kind as the groups that go into one event each."""
-    return [rows]
+def _shell(kind, count, at):
+    """The journal entry of an import event of `count` rows of `kind`, with
+    no puts and no priors yet, at the largest seq: what every entry costs
+    before its rows."""
+    event = ev.Event(
+        seq=schema.INT_MAX,
+        at=at,
+        actor=ACTOR,
+        via="import",
+        kind="import",
+        subject="import:1",
+        data={"kind": kind, "count": count},
+        puts=(),
+    )
+    return {"event": event.to_dict(), "priors": []}
+
+
+def _groups(kind, rows, at):
+    """The rows of one kind as the groups that go into one event each. A load
+    goes into an empty record, so each put's prior is `[kind, key, null]`, and
+    each group's journal entry, the event and its priors by `schema.size`,
+    stays within the entry's limit."""
+    limit = schema.LIMITS["entry_bytes"]
+    base = schema.size(_shell(kind, len(rows), at))
+    groups, group, used = [], [], base
+    for row in rows:
+        key = schema.key_of(kind, row)
+        # the put, its prior, and a comma in each list
+        cost = schema.size([kind, key, row]) + schema.size([kind, key, None]) + 2
+        if base + cost > limit:
+            raise ImportRefused(
+                [f"records.{kind} {key}: past the journal entry's limit on its own"]
+            )
+        if group and used + cost > limit:
+            groups.append(group)
+            group, used = [], base
+        group.append(row)
+        used += cost
+    if group:
+        groups.append(group)
+    return groups
 
 
 def compose(doc):
     """The dump an import document makes: pure, so one document gives one
     dump. The `imports` record, then the records in `RECORDS` order, then
-    `pulled` and `left`, then the counters as `meta.set`, each an event `via`
+    `pulled` and `left`, each kind in events split to keep every journal entry
+    within its limit, then the counters as `meta.set`; each event `via`
     "import" at the source's `read_at`. The beats go to the bookkeeping."""
     problems, parsed = _parse(doc)
     if problems:
@@ -445,7 +481,7 @@ def compose(doc):
         )
 
     def carry(kind, rows):
-        for group in _groups(kind, rows):
+        for group in _groups(kind, rows, at):
             data = {"kind": kind, "count": len(group)}
             add("import", "import:1", data, [(kind, r) for r in group])
 

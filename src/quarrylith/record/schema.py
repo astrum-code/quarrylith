@@ -2,14 +2,17 @@
 """The record's declarations: every kind of record, once, and what a record
 may hold.
 
-A kind is `Kind(name, key, fields, match, live, journaled=True, one_of=())`; a
-field is
-`Field(name, type, null=False, default=None)` of one of four types: `str`,
-`int`, `bool` and `json` (plain data: dicts with `str` keys, lists, `str`,
-`int`, `float`, `bool` and None). Nothing else exists, so a record fits
+A kind is `Kind(name, key, fields, match, live, journaled=True, one_of=())`;
+a field is `Field(name, type, null=False, default=None)` of one of four types:
+`str`, `int`, `bool` and `json` (plain data: dicts with `str` keys, lists,
+`str`, `int`, `float`, `bool` and None). Nothing else exists, so a record fits
 SQLite's affinities and Henge's msgpack values alike, and the schema refuses
 what the two would take differently: a float that is NaN or infinite, an int
-outside signed 64 bits and a `str` that is not valid UTF-8.
+outside signed 64 bits and a `str` that is not valid UTF-8. `VALUES` names the
+fields that take one of a few values, and those values.
+
+`canonical(value)` is the one encoding of plain data, and `size(value)` the one
+measure of it, on both backends.
 
 Times are `int` milliseconds since the epoch, UTC. No record is ever deleted:
 a record ends by its end fields, the kind's `live`, which may name several (a
@@ -26,10 +29,9 @@ TYPES = (STR, INT, BOOL, JSON)
 
 INT_MIN, INT_MAX = -(2**63), 2**63 - 1
 
-#: One set of limits on both backends. A `str` and a `json` field are measured
-#: encoded (UTF-8 bytes; JSON, sorted keys, no spaces), a key and a `match`
-#: field in UTF-8 bytes, and a journal entry (the event and its priors
-#: together) by `schema.size`, which lands with the contract.
+#: One set of limits on both backends. A `str`, a key and a `match` field are
+#: measured in UTF-8 bytes; a `json` field and a journal entry (the event and
+#: its priors together) by `size`.
 LIMITS = {
     "str_bytes": 256 * 1024,
     "json_bytes": 256 * 1024,
@@ -54,6 +56,47 @@ BARRED_LABEL_KEYS = ("effort", "state")
 LABEL_FIELDS = {"items": "labels", "tasks": "labels", "nodes": "labels"}
 FLAG_FIELDS = {"items": "flags", "tasks": "flags"}
 NAME_FIELDS = {"nodes": "drivers"}
+
+#: An item's states, the legacy board's nine.
+ITEM_STATES = (
+    "triage",
+    "ready",
+    "claimed",
+    "blocked",
+    "in-review",
+    "reviewed",
+    "merge-ready",
+    "done",
+    "dropped",
+)
+
+#: The fields that take one of a few values, and those values (the page's
+#: table of records). `validate` refuses any other; a null stays null where
+#: the field may be null.
+VALUES = {
+    ("efforts", "standing"): ("proposed", "admitted", "parked", "concluded"),
+    ("efforts", "outcome"): ("complete", "incomplete", "disproved"),
+    ("effort_links", "kind"): ("plan", "item", "effort"),
+    ("items", "kind"): ("task", "plan", "review", "mission", "ask", "finding", "batch"),
+    ("items", "state"): ITEM_STATES,
+    ("items", "source"): ("local", "legacy"),
+    ("tasks", "kind"): ("agent", "gate", "review", "cell", "sweep", "job"),
+    ("tasks", "state"): ("open", "running", "done", "failed", "cancelled"),
+    ("changes", "relation"): ("closes", "part"),
+    ("checks", "state"): ("green", "red", "skipped", "pending"),
+    ("reviews", "kind"): ("pool", "second", "templet", "conformance", "user"),
+    ("reviews", "verdict"): ("approve", "changes"),
+    ("questions", "kind"): ("blocked", "pr"),
+    ("statements", "type"): (
+        "observation",
+        "inference",
+        "proposal",
+        "decision",
+        "action",
+        "outcome",
+        "correction",
+    ),
+}
 
 
 class SchemaError(ValueError):
@@ -417,21 +460,58 @@ def check_plain(value, where="value"):
         raise SchemaError(f"{where}: nested too deep") from None
 
 
-def _json_bytes(value):
-    """The encoded length of plain data: JSON, sorted keys, no spaces, UTF-8."""
-    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return len(text.encode("utf-8"))
+def canonical(value):
+    """The one encoding of plain data: JSON with sorted keys, no spaces, UTF-8
+    text (nothing escaped that need not be), tuples as lists. Two values that
+    are equal as plain data encode the same, on either backend."""
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except RecursionError:
+        raise SchemaError("nested too deep to encode") from None
+    except (TypeError, ValueError) as e:
+        raise SchemaError(f"not plain data: {e}") from None
+
+
+def _floats(value):
+    """(how many floats, their JSON text's length) in `value`."""
+    count = chars = 0
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, float):
+            count += 1
+            chars += len(float.__repr__(v))
+        elif isinstance(v, dict):
+            stack.extend(v.values())
+        elif isinstance(v, (list, tuple)):
+            stack.extend(v)
+    return count, chars
+
+
+def size(value):
+    """The one measure of plain data on both backends: the UTF-8 length of
+    `canonical(value)`, with each float counted as 9 bytes (its msgpack size),
+    so it gives the value's msgpack size within a small margin."""
+    count, chars = _floats(value)
+    return len(canonical(value).encode("utf-8")) - chars + 9 * count
 
 
 def _json(value, where):
     plain = check_plain(value, where)
     try:
-        size = _json_bytes(plain)
-    except RecursionError:
-        raise SchemaError(f"{where}: nested too deep") from None
-    if size > LIMITS["json_bytes"]:
+        encoded = size(plain)
+    except SchemaError as e:
+        raise SchemaError(f"{where}: {e}") from None
+    if encoded > LIMITS["json_bytes"]:
         raise SchemaError(
-            f"{where}: {size} bytes encoded, past the limit of {LIMITS['json_bytes']}"
+            f"{where}: {encoded} bytes encoded, past the limit of "
+            f"{LIMITS['json_bytes']}"
         )
     return plain
 
@@ -578,7 +658,8 @@ def _field(kind, f, value):
 def validate(kind, record):
     """`record` as a record of `kind`: a copy with every declared field (a
     default or a null filling a missing one), tuples as lists. Refuses an
-    undeclared field, a missing one, a wrong type and every limit."""
+    undeclared field, a missing one, a wrong type, a value outside `VALUES`
+    and every limit."""
     k = kind_of(kind)
     if not isinstance(record, dict):
         raise SchemaError(f"{kind}: a record is a dict, not {type(record).__name__}")
@@ -597,6 +678,12 @@ def validate(kind, record):
         else:
             raise SchemaError(f"{kind}.{f.name}: missing")
         out[f.name] = _field(k, f, value)
+    for f in k.all_fields:
+        values = VALUES.get((kind, f.name))
+        if values and out[f.name] is not None and out[f.name] not in values:
+            raise SchemaError(
+                f"{kind}.{f.name}: {out[f.name]!r} is not one of {', '.join(values)}"
+            )
     if k.one_of and sum(out[n] is not None for n in k.one_of) != 1:
         raise SchemaError(f"{kind}: exactly one of {', '.join(k.one_of)} is set")
     for table, check in (

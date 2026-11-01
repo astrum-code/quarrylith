@@ -187,7 +187,7 @@ A record ends by its end field (`lifted_at`, `released_at`, `merged_at`,
 | `deps` | `id` | `number`; exactly one of `blocker` int, `change` int, `what` str; `added_at`, `added_by`, `lifted_at`, `lifted_by`, `why` | `number`, `blocker`, `change` | `lifted_at` |
 | `leases` | `id` | `number`, `holder`, `role` null, `fence` int, `branch`, `machine`, `granted_at`, `renewed_at`, `paused_until` null, `expires_at` null (null while paused), `released_at`, `released_by`, `why` | `number`, `holder` | `released_at` |
 | `tasks` | `id` | `number` null (a job has no item), `effort` null, `kind` (agent, gate, review, cell, sweep, job), `labels`, `flags`, `needs` json (`{resource: amount}`), `sandbox` str (a driver class: `process`, `harness`, `podman`, `vm`), `schedule` str null, `not_before` null, `supervision` json (`{"expect_s", "beat_s"}`), `loop` json (`{"max_attempts", "interval_s"}`), `attempts` int, `state` (open, running, done, failed, cancelled), `created_at`, `ended_at` | `number`, `state`, `kind`, `effort` | `ended_at` |
-| `nodes` | `name` | `drivers` json (sorted list), `labels` json, `declared_at`, `retired_at` | -- | `retired_at` |
+| `nodes` | `name` | `drivers` json (sorted list, no repeat), `labels` json, `declared_at`, `retired_at` | -- | `retired_at` |
 | `capacity` | `(node, resource)` | `amount` int, `unit`, `declared_by`, `at` | `node` | -- |
 | `reservations` | `id` | `node`, `resource`, `amount` int, `task` null, `run` null, `holder` str (a standing consumer's name when `task` is null), `from_at`, `until_at` null (open-ended), `released_at`, `why` | `node`, `task`, `run` | `released_at` |
 | `runs` | `id` | `task`, `attempt` int, `holder`, `fence` null, `node`, `sandbox`, `branch` null, `pgid` null, `phase`, `phase_at`, `expect_until` null, `harness` json (class, model, effort, folder), `footprint` json, `cost` json, `outcome` null, `reason` null, `started_at`, `finished_at` | `task`, `holder`, `node` | `finished_at` |
@@ -319,21 +319,26 @@ name (one live lease per item, one open change per branch) is a `Refused`.
   whose `match` fields equal the values given, in key order. A match on a
   field that is not in the kind's `match` is refused.
 - `reading()`: a context manager inside which every read sees the record
-  at one seq, which it yields.
+  at one seq, which it yields. It holds other threads' operations back
+  until it ends, so `events(wait=)` inside it is refused.
 - `ready(*, now)` -> **the ready read**: the open tasks and the items in
   `ready` that are eligible. An item is eligible when it is `admitted`, at
   least one effort it is linked to (directly, else through its parent
   chain) is `admitted`, it has no live dep and no live hold, and neither
   its holder nor its role has a live hold. A task is eligible when its item
-  (if it has one) is eligible or `claimed`, `not_before` has passed, and
+  (if it has one) is `ready` or `claimed` and passes those rules (with no
+  item, its own `effort` is `admitted`), `not_before` has passed, and
   `attempts < loop.max_attempts`. Step 4 orders this set and does not widen
   it. It gives `{"items": [...], "tasks": [...]}`, each in key order.
 - `lease_view(number, *, now)` -> the live lease with `state` running,
-  paused or expired (1423's three, the same rules), its expiry computed
-  from `renewed_at`, the latest beat of the holder's live run, and
-  `paused_until`.
+  paused or expired (1423's three, the same rules) and its `expiry`,
+  computed from `renewed_at`, the latest beat of the holder's live run, and
+  `paused_until`, plus `LEASE_MS` (three days, 1423's default). A lease is
+  paused, with no expiry, while its item is not `claimed`.
 - `free(node, resource, *, from_at, until_at)` -> `capacity` minus the
-  largest sum of live reservations overlapping any instant of the span.
+  largest sum of live reservations overlapping any instant of the span. A
+  span, and a reservation, is `[from_at, until_at)`; a null `until_at` has
+  no end.
 - `effective_labels(task_id)`.
 
 **Operations.** Each writes one event or nothing. An edit that changes
@@ -345,12 +350,12 @@ returns what it made (an id, a number, a fence).
 | group | operations, and what each refuses |
 |---|---|
 | efforts | `file_effort(id, slug, title, owner, parts, standing="proposed")`: an id taken; `id=None` takes `next:efforts`, as four digits. `edit_effort(id, **fields)`. `set_standing(id, standing, why)`: a concluded effort. `conclude(id, outcome, why)`: no outcome. `link(effort, kind, target)`: a link already live. `unlink(...)`: an item's last effort link (invariant 10) |
-| items | `file_item(kind, title, body, *, role, tier, risk, parent, labels, flags, effort=None, filed_by, machine=False, must_fix=False, number=None)`: `number` is refused except `via="import"`. An item filed with no effort link takes its parent's links. With no parent, it is linked to `unsorted`, which the same event makes (`parked`) if the record has none. A machine-filed item (`machine=True`) is filed `admitted=False` unless `must_fix`. `edit_item(n, **fields)`. `move(n, state, why, *, expect=None)`: a pair not in `MOVES`, or `expect` not the current state. `admit(n, by)` |
+| items | `file_item(kind, title, body, *, role, tier, risk, parent, labels, flags, effort=None, filed_by, machine=False, must_fix=False, number=None)`: `number` is refused except `via="import"`. An item filed with no effort link takes its parent's links. With no parent, it is linked to `unsorted`, which the same event makes (`parked`) if the record has none. A machine-filed item (`machine=True`) is filed `admitted=False` unless `must_fix`. `edit_item(n, **fields)`. `move(n, state, why, *, expect=None, fence=None)`: a pair not in `MOVES`, `expect` not the current state, or a run's `fence` not the live lease's. `admit(n, by)` |
 | deps | `add_dep(n, *, blocker|change|what, why)`: a cycle, or a dep already live. `lift_dep(id, by, why)` |
-| leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold, or `expect` not the state. `renew(n, holder, fence)`. `release(n, by, why)` |
-| tasks | `file_task(...)`, `edit_task(id, **fields)`, `end_task(id, state, why)` |
-| allocation | `declare_node(name, drivers, labels)`, `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**). `release_reservation(id, why)` |
-| runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s)` -> run id: in **one event**, it checks the task is eligible or claimed by `holder`, that `fence` is the item's live lease (when it has an item), and that `attempts < max_attempts`, then reserves `needs` on `node` from now with no end, raises `attempts` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `beat(id)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, and is **never refused for a stale fence** (below) |
+| leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold (on the item, the holder or the role), `expect` not the state, or a state `MOVES` does not take to `claimed`. It moves the item to `claimed`; the holder's own second grant renews its lease and keeps its fence. `renew(n, holder, fence, *, paused_until=None)` (`paused_until`: a usage limit's reset): a stale fence, or a lease another holds. `release(n, by, why, *, fence=None)`: no live lease, or a stale fence; it moves a `claimed` or `blocked` item to `ready` |
+| tasks | `file_task(kind, *, number=None, effort=None, labels=(), flags=(), needs=None, sandbox, schedule=None, not_before=None, supervision=None, loop=None)` -> id: an item or effort not there, `needs` not `{resource: amount}` (an amount from 1); `loop` defaults to `{"max_attempts": 1, "interval_s": 0}` and `supervision` to `{"expect_s": null, "beat_s": null}`. `edit_task(id, **fields)`: an ended task, or its `needs` while a run is live. `end_task(id, state, why)` (done, failed, cancelled): an ended task, or one with a live run |
+| allocation | `declare_node(name, drivers, labels)`: a retired node (a live one is declared anew; False when nothing changes). `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**). `release_reservation(id, why)` |
+| runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `beat(id)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
 | changes | `open_or_update_change(repo, branch, head, *, title, body, number, relation, base, position, draft, url, by)`: a second open change on a branch. `drop_change(id, by, why)`. `record_check(change, head, name, state, detail)` |
 | reviews | `file_review(target, round, kind, *, item, author, heads, pages, filed_by)`: `heads` is written once and never edited. `record_verdict(id, reviewer, verdict, findings)`: a review that already has one. `review_read(id)` |
 | merges | `record_merge(change, sha, by, rule, *, commit=None)`: a change not open, or `sha` not its head. It sets `merged_at` in the same event |
@@ -385,9 +390,9 @@ condition such as "an open change" or "merged" is the caller's to check.
 | any open state (`ITEM_STATES` but done and dropped) | done, dropped |
 | done, dropped | ready, triage (a reopen) |
 
-A move to done or dropped sets `closed_at`, and a reopen clears it. A move
-out of `claimed` pauses the lease, and a move back restarts it, as 1423
-says. Narrowing this set would change the item states' contract, which is
+A move to done or dropped sets `closed_at` and releases the live lease,
+and a reopen clears `closed_at`. A move out of `claimed` pauses the lease,
+and a move back restarts it, as 1423 says. Narrowing this set would change the item states' contract, which is
 the user's to decide.
 
 **The journal, delivered**, to callers in the record's process, with 1423's
@@ -1789,7 +1794,7 @@ client alone is the dependency (above).
   word of the key's alphabet (approved: the user's decision of 2026-10-31,
   the conformance review of quarrylith#3, rounds 1 and 2, and the user's
   merge)
-- 2026-10-31 proposed: what building step 2 settled: `schema.VALUES` (the
+- 2026-10-31 changed: what building step 2 settled: `schema.VALUES` (the
   enumerated fields, refused by `validate`); SQLite's schema version in
   `PRAGMA user_version`, not a `meta` record; `open_record(**backend)` for
   test-only settings; `file_effort(id=None)` from `next:efforts`;
@@ -1797,4 +1802,21 @@ client alone is the dependency (above).
   last effort link; an edit that changes nothing writes nothing; `ack`
   refuses a seq past `head()`; `ready()` gives items and tasks; `load`
   refuses a dump that is not whole, and `check()` reports an entry past its
-  limit, items with no link and counters behind (this PR)
+  limit, items with no link and counters behind (approved: the conformance
+  review of quarrylith#4, rounds 1 and 2, and the user's merge)
+- 2026-11-01 proposed: what building step 3 settled: `grant` moves the item
+  to `claimed` by `MOVES`, and the holder's own second grant renews its
+  lease and keeps its fence; `renew(..., paused_until=None)` for a usage
+  limit; `move` and `release` take a run's `fence`; `release` moves a
+  `claimed` or `blocked` item to `ready`, and a move to done or dropped
+  releases the live lease (1423's rules); `LEASE_MS`, three days;
+  `lease_view` gives `state` and `expiry`; a span is `[from_at, until_at)`;
+  a task is ready when its item is `ready` or `claimed` and passes the item
+  rules, or, with no item, its own effort is admitted; `file_task`'s
+  signature and defaults; `edit_task` refuses an ended task and its needs
+  while a run is live; `end_task` refuses a live run; `declare_node`
+  declares a live node anew and refuses a retired one; a node's drivers have
+  no repeat; `start_run(..., harness=None)`, its holder the lease's, no
+  fence for a task with no item, the node live and running the sandbox, the
+  task `running` until `finish_run`; `events(wait=)` inside `reading()` is
+  refused (this PR)

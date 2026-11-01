@@ -1796,5 +1796,5 @@ client alone is the dependency (above).
   `file_item` makes `unsorted` when it is absent; `unlink` refuses an item's
   last effort link; an edit that changes nothing writes nothing; `ack`
   refuses a seq past `head()`; `ready()` gives items and tasks; `load`
-  refuses a dump that is not whole, and `check()` reports items with no
-  link and counters behind (this PR)
+  refuses a dump that is not whole, and `check()` reports an entry past its
+  limit, items with no link and counters behind (this PR)

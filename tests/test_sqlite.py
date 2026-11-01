@@ -12,14 +12,32 @@ from pathlib import Path
 
 import pytest
 from backends import PARTS, admitted
+from samples import sample
 
 from quarrylith.record import contract, schema
 from quarrylith.record.contract import Refused, Unavailable, Unknown, open_record
 from quarrylith.record.schema import RECORDS
-from quarrylith.record.sqlite import RECORD_SCHEMA_VERSION, SqliteRecord
+from quarrylith.record.sqlite import RECORD_SCHEMA_VERSION, STATEMENTS, SqliteRecord
 
 PROCS = Path(__file__).resolve().parent / "procs.py"
 MACOS = sys.platform == "darwin"
+
+
+class Failing:
+    """A connection whose statements starting with any of `words` fail."""
+
+    def __init__(self, conn, *words):
+        self.conn = conn
+        self.words = words
+
+    def execute(self, sql, *args):
+        for word in self.words:
+            if sql.lstrip().upper().startswith(word):
+                raise sqlite3.OperationalError(f"disk I/O error at {word}")
+        return self.conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
 
 
 @pytest.fixture
@@ -98,6 +116,17 @@ def test_every_connection_reads_back_the_power_safe_pragmas(url, opener):
         flushless = opener(fullfsync=False)
         assert flushless.pragmas()["fullfsync"] == 0
         assert flushless.durable is False
+    for record in (first, second, reader, normal):
+        record.close()
+    if MACOS:
+        flushless.close()
+    # a record whose WAL did not take (its journal mode set back by hand)
+    conn = raw(url)
+    assert conn.execute("PRAGMA journal_mode = DELETE").fetchone()[0] == "delete"
+    conn.close()
+    unwal = opener(readonly=True)
+    assert unwal.pragmas()["journal_mode"] == "delete"
+    assert unwal.durable is False
 
 
 def test_open_refuses_a_newer_schema_and_names_migrate_for_an_older(url, record):
@@ -136,17 +165,18 @@ def test_a_delete_on_a_record_table_is_aborted(url, record):
         r[0]
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
     }
-    held = []
+    # a row trigger fires on each row deleted: give every table a row, in a
+    # transaction rolled back after, and fire each one
+    conn.execute("BEGIN")
     for kind in RECORDS:
-        # a row trigger fires on each row deleted: every table has one
+        sql = STATEMENTS[kind]
+        conn.execute(sql.upsert, sql.values(schema.validate(kind, sample(kind))))
+    for kind in RECORDS:
         assert f"{kind}_no_delete" in triggers
-        if conn.execute(f'SELECT 1 FROM "{kind}" LIMIT 1').fetchall():
-            held.append(kind)
-            with pytest.raises(sqlite3.IntegrityError, match="deleted"):
-                conn.execute(f'DELETE FROM "{kind}"')
-    assert {"meta", "efforts", "effort_links", "items", "item_text", "cursors"} <= set(
-        held
-    )
+        assert conn.execute(f'SELECT 1 FROM "{kind}" LIMIT 1').fetchall()
+        with pytest.raises(sqlite3.IntegrityError, match="deleted"):
+            conn.execute(f'DELETE FROM "{kind}"')
+    conn.execute("ROLLBACK")
     for statement in ("DELETE FROM journal", "UPDATE journal SET actor = 'x'"):
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             conn.execute(statement)
@@ -205,28 +235,15 @@ def test_an_error_before_the_commit_is_unavailable_and_at_it_unknown(record):
     backend's own error, and a uniqueness the records name is Refused."""
     admitted(record)
     conn = record._conn
-
-    class Failing:
-        def __init__(self, word):
-            self.word = word
-
-        def execute(self, sql, *args):
-            if sql.lstrip().upper().startswith(self.word):
-                raise sqlite3.OperationalError(f"disk I/O error at {self.word}")
-            return conn.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(conn, name)
-
     head, dump = record.head(), record.dump()
-    record._conn = Failing('INSERT INTO "ITEMS"')
+    record._conn = Failing(conn, 'INSERT INTO "ITEMS"')
     with pytest.raises(Unavailable) as failed:
         record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
     assert not isinstance(failed.value, Unknown)
     assert isinstance(failed.value.__cause__, sqlite3.OperationalError)
     record._conn = conn
     assert record.head() == head and record.dump() == dump
-    record._conn = Failing("COMMIT")
+    record._conn = Failing(conn, "COMMIT")
     with pytest.raises(Unknown) as unknown:
         record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
     assert isinstance(unknown.value, Unavailable)
@@ -235,6 +252,95 @@ def test_an_error_before_the_commit_is_unavailable_and_at_it_unknown(record):
     assert record.check() == []
     n = record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
     assert record.get("items", n)["title"] == "t"
+
+
+def test_a_failed_read_leaves_the_connection_out_of_a_transaction(record):
+    """A snapshot whose first read fails, or whose closing COMMIT fails, rolls
+    back: the connection is out of a transaction, and the next operation
+    succeeds."""
+    admitted(record)
+    conn = record._conn
+    head, dump = record.head(), record.dump()
+    record._conn = Failing(conn, "SELECT 1 FROM JOURNAL")
+    with pytest.raises(Unavailable) as failed:
+        record.dump()
+    assert not isinstance(failed.value, Unknown)
+    assert isinstance(failed.value.__cause__, sqlite3.OperationalError)
+    assert conn.in_transaction is False
+    record._conn = conn
+    n = record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
+    assert record.head() == head + 1
+    record._conn = Failing(conn, "COMMIT")
+    assert record.get("items", n)["title"] == "t"
+    with record.reading() as seq:
+        assert seq == head + 1
+    assert conn.in_transaction is False
+    record._conn = conn
+    record.file_item("task", "u", "b", filed_by="alpha", effort="0001")
+    assert record.head() == head + 2
+    assert record.dump()["records"]["efforts"] == dump["records"]["efforts"]
+    assert record.check() == []
+
+
+@pytest.mark.parametrize(
+    "where, raised",
+    [
+        ('INSERT INTO "ITEMS"', Unavailable),
+        ("COMMIT", Unknown),
+        ("SELECT 1 FROM JOURNAL", Unavailable),
+    ],
+)
+def test_a_failed_rollback_is_an_error_never_silent(record, where, raised):
+    """When even the ROLLBACK fails and the connection is left inside a
+    transaction, the error says so: it is Unavailable (Unknown at the
+    COMMIT), never swallowed."""
+    admitted(record)
+    conn = record._conn
+    record._conn = Failing(conn, where, "ROLLBACK")
+    with pytest.raises(raised, match="in a transaction"):
+        if where.startswith("SELECT"):
+            record.dump()
+        else:
+            record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
+    assert conn.in_transaction is True
+    conn.execute("ROLLBACK")
+    record._conn = conn
+    record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
+    assert record.check() == []
+
+
+def test_check_reports_an_item_with_no_effort_link(url, record):
+    """check() reports an item whose effort link was ended behind the
+    journal's back, beside the replay's finding; and file_item refuses a child
+    of it, which would have no link either."""
+    admitted(record)
+    n = record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
+    conn = raw(url)
+    conn.execute("UPDATE effort_links SET unlinked_at = 5 WHERE target = ?", (str(n),))
+    conn.close()
+    assert record.check() == [
+        f"effort_links: not the replay of the journal at ['0001', 'item', '{n}']",
+        f"item {n}: no effort link",
+    ]
+    head = record.head()
+    with pytest.raises(Refused, match=f"parent item {n} has no effort link"):
+        record.file_item("task", "child", "b", filed_by="alpha", parent=n)
+    assert record.head() == head
+
+
+def test_check_reports_a_counter_not_past_its_highest_id(url, record):
+    """check() reports a counter lowered behind the journal's back, beside
+    the replay's finding."""
+    admitted(record)
+    for title in ("a", "b", "c"):
+        record.file_item("task", title, "b", filed_by="alpha", effort="0001")
+    conn = raw(url)
+    conn.execute("UPDATE meta SET value = 3 WHERE key = 'next:items'")
+    conn.close()
+    assert record.check() == [
+        "meta: not the replay of the journal at ['next:items']",
+        "meta: next:items is not past 3, the highest items id",
+    ]
 
 
 def test_two_writers_in_separate_processes_never_share_a_number(url, record, tmp_path):

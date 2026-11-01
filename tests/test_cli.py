@@ -92,6 +92,20 @@ def test_check_exits_one_with_findings_and_load_refuses_a_bad_dump(tmp_path, cap
     assert code == 1 and "items" in out
 
 
+def test_load_exits_two_for_a_dump_it_cannot_read(tmp_path, capsys):
+    """A dump file that is not there, or is not JSON, is refused: exit 2 with
+    one line, no traceback, and no record made."""
+    url = f"sqlite:///{tmp_path / 'record.sqlite'}"
+    garbled = tmp_path / "garbled.json"
+    garbled.write_text("{not json")
+    for source in (tmp_path / "missing.json", garbled):
+        code, out, err = run(capsys, "record", "load", url, str(source))
+        assert code == 2 and out == ""
+        assert err.startswith(f"refused: cannot read the dump {source}: ")
+        assert len(err.splitlines()) == 1
+    assert not (tmp_path / "record.sqlite").exists()
+
+
 def test_the_module_runs_as_a_command(tmp_path):
     """templet:3159 -- `python -m quarrylith record init URL` works."""
     url = f"sqlite:///{tmp_path / 'record.sqlite'}"

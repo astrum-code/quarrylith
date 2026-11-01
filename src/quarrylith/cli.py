@@ -74,11 +74,14 @@ def _dump(args):
 
 
 def _load(args):
-    if args.file == "-":
-        dump = json.load(sys.stdin)
-    else:
-        with open(args.file, encoding="utf-8") as source:
-            dump = json.load(source)
+    try:
+        if args.file == "-":
+            dump = json.load(sys.stdin)
+        else:
+            with open(args.file, encoding="utf-8") as source:
+                dump = json.load(source)
+    except (OSError, ValueError) as e:
+        raise contract.Refused(f"cannot read the dump {args.file}: {e}") from None
     record = _open(args, via="load")
     try:
         if not record.initialised:

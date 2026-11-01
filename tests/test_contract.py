@@ -335,6 +335,10 @@ def test_an_item_is_linked_to_unsorted_or_takes_its_parents_links(record):
     # every item keeps an effort link (invariant 10)
     with pytest.raises(Refused, match="effort"):
         record.unlink("unsorted", "item", str(loose))
+    # a target the readers would never find as the item's number
+    for target in ("001", f"0{loose}", f"+{loose}"):
+        with pytest.raises(Refused, match="number"):
+            record.link("0001", "item", target)
     record.link("0001", "item", str(loose))
     record.unlink("unsorted", "item", str(loose))
     assert efforts_of(record, loose) == ["0001"]
@@ -644,6 +648,13 @@ def test_items_are_filed_and_edited(record, clock):
     with pytest.raises(Refused):
         record.get("items", "one")
     assert record.get("items", 999) is None
+    # validated before it is compared: 1.0 and True equal 1, and are refused
+    assert record.edit_item(n, tier=1) is True
+    head = record.head()
+    for bad in (1.0, True):
+        with pytest.raises(Refused, match="tier"):
+            record.edit_item(n, tier=bad)
+    assert record.head() == head and record.get("items", n)["tier"] == 1
 
 
 @over_backends
@@ -715,6 +726,68 @@ def test_comments_statements_holds_and_notes(record):
 
 
 @over_backends
+def test_an_event_the_declarations_refuse_is_refused(record):
+    """An event whose data is not plain data, or whose subject is not a str,
+    is Refused (not a raw SchemaError) and writes nothing."""
+    admitted(record)
+    n = task(record, effort="0001", role="alpha")
+    head, dump = record.head(), record.dump()
+    for refuse in (
+        lambda: record.note("k", "s", x=float("nan")),
+        lambda: record.note("k", "s", x=object()),
+        lambda: record.note("k", 12),
+        lambda: record.set_standing("0001", "parked", object()),
+        lambda: record.move(n, "blocked", {1: "a key that is not a str"}),
+        lambda: record.lift_dep(
+            record.add_dep(n, what="w", why="w"), "alpha", float("inf")
+        ),
+    ):
+        with pytest.raises(Refused):
+            refuse()
+    # the dep the last one added is the one event written
+    assert record.head() == head + 1
+    assert record.dump()["records"]["efforts"] == dump["records"]["efforts"]
+    assert record.get("items", n)["state"] == "ready"
+    assert record.check() == []
+
+
+@over_backends
+def test_check_reports_an_entry_past_its_limit(backend, record, tmp_path, monkeypatch):
+    """templet:3159 -- check() measures each event's entry as load does, its
+    priors from the replay before it, and reports one past its limit: what
+    load would refuse."""
+    admitted(record)
+    n = task(record, effort="0001", title="large")
+    before = {"items": record.get("items", n), "item_text": record.get("item_text", n)}
+    record.edit_item(n, body="b" * 5000)
+    assert record.check() == []
+    dump = record.dump()
+    (edit,) = record.events(record.head() - 1)
+    # the edit's priors: the item and its text as they were; the rest: none
+    edit_priors = [
+        [k, list(key), {f: before[k][f] for f in RECORDS[k].match}]
+        for k, key, _ in edit.puts
+    ]
+    edit_size = contract.entry_size(edit, edit_priors)
+    for other in record.events(0, limit=edit.seq - 1):
+        priors = [[k, list(key), None] for k, key, _ in other.puts]
+        assert contract.entry_size(other, priors) < 1000
+    assert edit_size > 1000
+    monkeypatch.setitem(schema.LIMITS, "entry_bytes", 1000)
+    assert record.check() == [
+        f"journal: event {edit.seq}'s entry is {edit_size} bytes, past the limit "
+        "of 1000"
+    ]
+    fresh = open_record(url_for(backend, tmp_path / "fresh"), actor="l", via="load")
+    try:
+        fresh.init()
+        with pytest.raises(Refused, match=f"a journal entry of {edit_size} bytes"):
+            fresh.load(dump)
+    finally:
+        fresh.close()
+
+
+@over_backends
 def test_reading_sees_one_seq(record):
     """templet:3159 -- inside reading() every read sees the record at the
     seq it yields, and no operation runs inside it."""
@@ -727,6 +800,57 @@ def test_reading_sees_one_seq(record):
         assert len(record.read("items")) == 1
     task(record, effort="0001")
     assert record.head() == 3
+
+
+@over_backends
+def test_another_threads_reading_holds_an_operation_back_not_refuses_it(record):
+    """An operation in one thread waits while another thread is inside
+    reading(), and succeeds once the reading ends; only an operation in the
+    reading's own thread is refused."""
+    admitted(record)
+    inside, release = threading.Event(), threading.Event()
+    got = {}
+
+    def reader():
+        with record.reading() as seq:
+            got["seq"] = seq
+            try:
+                task(record, "same thread", effort="0001")
+            except Refused as e:
+                got["own"] = e
+            try:
+                record.ack("follower", 1)
+            except Refused as e:
+                got["own_ack"] = e
+            inside.set()
+            release.wait(10)
+
+    def writer():
+        try:
+            got["number"] = task(record, "other thread", effort="0001")
+            record.ack("follower", 1)
+        except Exception as e:  # reported below
+            got["error"] = e
+        got["done"] = time.monotonic()
+
+    held = threading.Thread(target=reader)
+    held.start()
+    assert inside.wait(10)
+    waiting = threading.Thread(target=writer)
+    waiting.start()
+    time.sleep(0.3)
+    assert "done" not in got  # it waits for the reading
+    released = time.monotonic()
+    release.set()
+    held.join(10)
+    waiting.join(10)
+    assert "error" not in got, got.get("error")
+    assert "inside reading()" in str(got["own"])
+    assert "inside reading()" in str(got["own_ack"])
+    assert got["number"] == 1 and got["done"] >= released
+    assert record.head() == got["seq"] + 1 == 2
+    assert record.cursor("follower") == 1
+    assert record.check() == []
 
 
 @over_backends

@@ -285,6 +285,19 @@ def entry_size(event, priors):
     return schema.size({"event": event.to_dict(), "priors": priors})
 
 
+def _priors(get, event):
+    """An event's priors from what `get(kind, key)` holds before it: for each
+    put, the values its `match` fields held (null for a new record)."""
+    out = []
+    for kind, key, _ in event.puts:
+        before = get(kind, list(key))
+        held = None
+        if before is not None:
+            held = {f: before[f] for f in RECORDS[kind].match}
+        out.append([kind, list(key), held])
+    return out
+
+
 class Record(abc.ABC):
     """The record behind one contract. A backend implements the store's
     primitives (the abstract methods); the operations, the reads and the
@@ -387,7 +400,8 @@ class Record(abc.ABC):
 
     @property
     def shared(self):
-        """Was the record opened as the one a yard runs on?"""
+        """Was the record opened as the record a deployment runs on, which
+        must be durable?"""
         return self._shared
 
     def now_ms(self):
@@ -404,6 +418,11 @@ class Record(abc.ABC):
         if self.readonly:
             raise Refused("the record is open read-only")
         self._usable()
+
+    def _not_reading(self):
+        """Under the lock: another thread's reading() holds the lock, so a
+        depth seen here is this thread's own, and a write inside it is
+        refused (another thread's write waits for the reading to end)."""
         if self._reading_depth:
             raise Refused("no operation runs inside reading()")
 
@@ -420,6 +439,7 @@ class Record(abc.ABC):
         self._writable()
         op = None
         with self._lock:
+            self._not_reading()
             try:
                 with self._write():
                     op = _Op(self, name, kind, subject, self.now_ms())
@@ -437,7 +457,11 @@ class Record(abc.ABC):
             reason = self.authorize(self.actor, op.name, before, after)
             if reason is not None:
                 raise Refused(reason)
-        event = op.event(self._head() + 1, self.actor, self.via)
+        try:
+            event = op.event(self._head() + 1, self.actor, self.via)
+            ev.check_event(event)
+        except SchemaError as e:
+            raise Refused(str(e)) from None
         priors = op.priors()
         self._check_entry(event, priors)
         self._store(event, priors)
@@ -557,7 +581,9 @@ class Record(abc.ABC):
 
     def events(self, cursor, *, limit=500, wait=0.0, subject=None):
         """The events after `cursor`, in seq order, at most `limit`. With
-        `wait`, up to that many seconds for the first one."""
+        `wait`, up to that many seconds for the first one. Inside
+        `reading()` a wait sees no other writer's commit: the snapshot pins
+        the read."""
         if not schema.is_int(cursor) or cursor < 0:
             raise Refused(f"a cursor is a seq, from 0, not {cursor!r}")
         if not schema.is_int(limit) or limit < 1:
@@ -599,6 +625,7 @@ class Record(abc.ABC):
         if not schema.is_int(seq) or seq < 0:
             raise Refused(f"a seq is an int, from 0, not {seq!r}")
         with self._lock:
+            self._not_reading()
             with self._write():
                 if seq > self._head():
                     raise Refused(f"seq {seq} is past the journal's head")
@@ -633,8 +660,9 @@ class Record(abc.ABC):
 
     def check(self):
         """The findings, a list of str: the replay of the journal against the
-        records, the seqs, the items with no effort link, the counters behind
-        their ids, then the backend's own. Empty when the record is whole."""
+        records, the seqs, each entry against its limit, the items with no
+        effort link, the counters behind their ids, then the backend's own.
+        Empty when the record is whole."""
         with self.reading():
             dump = self.dump()
             findings = _findings(dump)
@@ -678,17 +706,12 @@ class Record(abc.ABC):
             if event.seq != i:
                 raise Refused(f"a dump's seqs run from 1 by one: {event.seq} at {i}")
         with self._lock:
+            self._not_reading()
             with self._write():
                 if not self._empty():
                     raise Refused("a load goes into an empty record")
                 for event in journal:
-                    priors = []
-                    for kind, key, _ in event.puts:
-                        before = self._get(kind, list(key))
-                        held = None
-                        if before is not None:
-                            held = {f: before[f] for f in RECORDS[kind].match}
-                        priors.append([kind, list(key), held])
+                    priors = _priors(self._get, event)
                     self._check_entry(event, priors)
                     self._store(event, priors)
                 for kind in sorted(kept):
@@ -837,7 +860,9 @@ class Record(abc.ABC):
     @staticmethod
     def _target(op, effort, kind, target):
         if kind == "item":
-            if not (target.isascii() and target.isdigit()):
+            if not (target.isascii() and target.isdigit()) or (
+                str(int(target)) != target
+            ):
                 raise Refused(f"an item link's target is its number, not {target!r}")
             op.need("items", [int(target)], "item")
         elif kind == "effort":
@@ -948,6 +973,11 @@ class Record(abc.ABC):
                 efforts = [effort]
             elif parent is not None:
                 efforts = _efforts_of(op, op.need("items", [parent], "parent item"))
+                if not efforts:
+                    raise Refused(
+                        f"parent item {parent} has no effort link: file the item "
+                        "with an effort"
+                    )
             else:
                 efforts = [UNSORTED]
             if parent is not None:
@@ -1007,6 +1037,10 @@ class Record(abc.ABC):
                         raise Refused(f"{name} are a list of str") from None
                 if name != "body":
                     after[name] = value
+            try:
+                after = schema.validate("items", after)
+            except SchemaError as e:
+                raise Refused(str(e)) from None
             changed = sorted(f for f in fields if f != "body" and after[f] != item[f])
             if "body" in fields and (text or {}).get("body") != fields["body"]:
                 changed.append("body")
@@ -1242,10 +1276,19 @@ def _findings(dump):
     seqs = [e["seq"] for e in dump["journal"]]
     if seqs != list(range(1, len(seqs) + 1)):
         findings.append("journal: the seqs do not run from 1 by one")
+    limit = schema.LIMITS["entry_bytes"]
     view = ev.MemoryView()
     try:
         for raw in dump["journal"]:
-            ev.apply(view, ev.Event.from_dict(raw))
+            event = ev.Event.from_dict(raw)
+            # measured as load measures it: the priors from before the event
+            size = entry_size(event, _priors(view.get, event))
+            if size > limit:
+                findings.append(
+                    f"journal: event {event.seq}'s entry is {size} bytes, past "
+                    f"the limit of {limit}"
+                )
+            ev.apply(view, event)
     except SchemaError as e:
         findings.append(f"journal: an event the declarations refuse: {e}")
     replayed = view.records()
@@ -1285,7 +1328,7 @@ def open_record(
     **backend,
 ):
     """Open the record at `url` (`sqlite:///path/record.sqlite`). `shared`
-    opens the record a yard runs on, which must be durable unless
+    opens the record a deployment runs on, which must be durable unless
     `allow_undurable` (tests and the bench). `backend` passes settings the
     backend takes (tests only: SQLite's `synchronous`, `fullfsync`)."""
     if not isinstance(url, str) or ":" not in url:

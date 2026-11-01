@@ -5,7 +5,10 @@ journal, written by many processes.
 An operation is one `BEGIN IMMEDIATE` transaction: it reads, decides the event,
 inserts the journal row (its seq is the row's) and writes each put, then
 commits. An error from the `COMMIT` itself is `Unknown`; every earlier error
-rolls back and is `Unavailable`. The file runs in WAL with `synchronous =
+from the store rolls back and is `Unavailable` (a uniqueness the records name
+is `Refused`), and an event the declarations refuse is `Refused` before
+anything is stored. A connection is never left inside a transaction without
+an error that says so. The file runs in WAL with `synchronous =
 FULL`, and on macOS `fullfsync` and `checkpoint_fullfsync` too, so a commit is
 power-safe when the caller hears of it.
 
@@ -243,6 +246,7 @@ class SqliteRecord(Record):
                 conn.execute(f"PRAGMA fullfsync = {flag}")
                 conn.execute(f"PRAGMA checkpoint_fullfsync = {flag}")
             if not readonly:
+                # it returns the mode it got, which `durable` reads back
                 conn.execute("PRAGMA journal_mode = WAL")
         except sqlite3.Error as e:
             raise Unavailable(f"cannot open {path}: {e}") from e
@@ -323,6 +327,8 @@ class SqliteRecord(Record):
     @property
     def durable(self):
         got = self.pragmas()
+        if got["journal_mode"] != "wal":
+            return False
         if got["synchronous"] < 2:  # FULL is 2, EXTRA 3
             return False
         if MACOS:
@@ -408,6 +414,17 @@ class SqliteRecord(Record):
     def _head(self):
         return self._run("SELECT IFNULL(MAX(seq), 0) FROM journal")[0][0]
 
+    def _rollback(self):
+        """Roll back. "" when the connection is out of a transaction after
+        it; else what to add to the error, which a caller always raises."""
+        try:
+            self._conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        if self._conn.in_transaction:
+            return "; the rollback failed and the connection is in a transaction"
+        return ""
+
     @contextlib.contextmanager
     def _write(self):
         try:
@@ -417,10 +434,9 @@ class SqliteRecord(Record):
         try:
             yield
         except BaseException as e:
-            try:
-                self._conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
+            stuck = self._rollback()
+            if stuck:
+                raise Unavailable(f"{self.path}: {e}{stuck}") from e
             if isinstance(e, sqlite3.IntegrityError):
                 raise Refused(f"the store refused it: {e}") from e
             if isinstance(e, sqlite3.Error):
@@ -429,11 +445,8 @@ class SqliteRecord(Record):
         try:
             self._conn.execute("COMMIT")
         except sqlite3.Error as e:
-            try:
-                self._conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise Unknown(f"{self.path}: the commit failed: {e}") from e
+            stuck = self._rollback()
+            raise Unknown(f"{self.path}: the commit failed: {e}{stuck}") from e
 
     def _store(self, event, priors):
         if event.seq != self._head() + 1:
@@ -503,16 +516,23 @@ class SqliteRecord(Record):
     def _snapshot(self):
         try:
             self._conn.execute("BEGIN")
-            self._conn.execute("SELECT 1 FROM journal LIMIT 1").fetchall()
         except sqlite3.Error as e:
             raise Unavailable(f"{self.path}: {e}") from e
+        try:
+            # the first read pins the snapshot
+            self._conn.execute("SELECT 1 FROM journal LIMIT 1").fetchall()
+        except sqlite3.Error as e:
+            raise Unavailable(f"{self.path}: {e}{self._rollback()}") from e
         try:
             yield
         finally:
             try:
                 self._conn.execute("COMMIT")
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                # the reads are done; only a connection left inside is an error
+                stuck = self._rollback()
+                if stuck:
+                    raise Unavailable(f"{self.path}: {e}{stuck}") from e
 
     def _empty(self):
         for kind in RECORDS:

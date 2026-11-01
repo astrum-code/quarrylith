@@ -822,6 +822,10 @@ def test_another_threads_reading_holds_an_operation_back_not_refuses_it(record):
                 record.ack("follower", 1)
             except Refused as e:
                 got["own_ack"] = e
+            try:
+                record.events(0, wait=1.0)
+            except Refused as e:
+                got["own_wait"] = e
             inside.set()
             release.wait(10)
 
@@ -833,20 +837,34 @@ def test_another_threads_reading_holds_an_operation_back_not_refuses_it(record):
             got["error"] = e
         got["done"] = time.monotonic()
 
+    def follower():
+        # another thread's wait is held back too, then waits for real
+        try:
+            got["followed"] = record.events(1, wait=5)
+        except Exception as e:  # reported below
+            got["follow_error"] = e
+
     held = threading.Thread(target=reader)
     held.start()
     assert inside.wait(10)
     waiting = threading.Thread(target=writer)
+    following = threading.Thread(target=follower)
+    following.start()
     waiting.start()
     time.sleep(0.3)
     assert "done" not in got  # it waits for the reading
+    assert "followed" not in got
     released = time.monotonic()
     release.set()
     held.join(10)
     waiting.join(10)
+    following.join(10)
     assert "error" not in got, got.get("error")
+    assert "follow_error" not in got, got.get("follow_error")
     assert "inside reading()" in str(got["own"])
     assert "inside reading()" in str(got["own_ack"])
+    assert "inside reading()" in str(got["own_wait"])
+    assert [e.seq for e in got["followed"]] == [2]
     assert got["number"] == 1 and got["done"] >= released
     assert record.head() == got["seq"] + 1 == 2
     assert record.cursor("follower") == 1

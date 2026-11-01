@@ -7,7 +7,11 @@
 - `waiter URL CURSOR WAIT`: prints `waiting`, then waits for events after
   CURSOR, and prints their seqs and the wall time it returned;
 - `killed URL`: files an item and is killed (SIGKILL) inside its transaction,
-  after the journal row and the puts are written and before the commit.
+  after the journal row and the puts are written and before the commit;
+- `starter URL TAG GATE TASK...`: waits for the file GATE, then starts a run
+  of each task on node `n1`, holding every run it started; when a start finds
+  no room it finishes its oldest run and tries again. It finishes the rest at
+  the end, and prints how many starts it made and how many found no room.
 """
 
 import json
@@ -17,6 +21,7 @@ import sys
 import time
 
 from quarrylith.record import contract, sqlite
+from quarrylith.record.contract import Refused
 
 
 def writer(url, tag, count, gate):
@@ -50,5 +55,44 @@ def killed(url):
     record.file_item("task", "never", "b", filed_by="doomed", effort="0001")
 
 
+def starter(url, tag, gate, *tasks):
+    record = contract.open_record(url, actor=tag, via="service")
+    while not os.path.exists(gate):
+        time.sleep(0.002)
+    held, started, refused = [], 0, 0
+
+    def finish(run):
+        record.finish_run(run, "done", "made room", footprint={}, cost={})
+
+    for task in tasks:
+        while True:
+            try:
+                run = record.start_run(
+                    int(task),
+                    tag,
+                    node="n1",
+                    sandbox="process",
+                    fence=None,
+                    expect_s=60,
+                )
+            except Refused as e:
+                if "no room" not in str(e):
+                    raise
+                refused += 1
+                if held:
+                    finish(held.pop(0))
+                else:
+                    time.sleep(0.001)
+                continue
+            held.append(run)
+            started += 1
+            break
+    for run in held:
+        finish(run)
+    print(json.dumps({"started": started, "refused": refused}), flush=True)
+
+
 if __name__ == "__main__":
-    {"writer": writer, "waiter": waiter, "killed": killed}[sys.argv[1]](*sys.argv[2:])
+    {"writer": writer, "waiter": waiter, "killed": killed, "starter": starter}[
+        sys.argv[1]
+    ](*sys.argv[2:])

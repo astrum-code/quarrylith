@@ -140,7 +140,7 @@ store (Rationale). Its modules:
 | `quarrylith.record.sqlite` | `SqliteRecord` |
 | `quarrylith.record.henge` | `HengeRecord(store, name)`; `open_henge(folder, name)` (step 6) |
 | `quarrylith.record.importing` | `IMPORT_FORMAT`, `check_import(doc)`, `compose(doc) -> dump` |
-| `quarrylith.gauges` | `Gauge`, `GAUGES` |
+| `quarrylith.gauges` | `Gauge`, `GAUGES`, `measure(record, *, now, window_ms)`, `by_name(name)` |
 | `quarrylith.cli` | `quarrylith record init|check|dump|load|import|events|gauges` |
 
 `quarrylith.record` imports nothing of a yard, a harness, a role or a repo
@@ -219,6 +219,14 @@ inside the operation that writes the record. A change's `n` comes from
 their legacy numbers, and `next:items` starts past the legacy board's
 `next_number`. Imported changes keep their `n`, and each
 `next:change:<repo>` starts past the legacy `next_change:<repo>`.
+
+**`unsorted`** is the record's own effort, the same wherever it is made:
+`schema.unsorted_effort(at)`, from `schema.UNSORTED_EFFORT`. Its id and slug
+are `unsorted`, its title `Unsorted`, standing `parked`, owner `record`,
+statement "Items filed with no effort", the five other parts `{}` and the
+default order, made at `at`. `file_item` makes it so when an item first needs
+it, whoever files, and the import makes the same. `check_import` refuses a
+document whose `unsorted` differs in any field but `created_at`.
 
 **Labels and flags.** A label is `key:value`: the key `[a-z][a-z0-9_.-]*`, the
 value `[A-Za-z0-9][A-Za-z0-9_.-]*` (it may also hold `/`), so `repo:benchLith`
@@ -352,18 +360,18 @@ returns what it made (an id, a number, a fence).
 | group | operations, and what each refuses |
 |---|---|
 | efforts | `file_effort(id, slug, title, owner, parts, standing="proposed")`: an id taken; `id=None` takes `next:efforts`, as four digits. `edit_effort(id, **fields)`. `set_standing(id, standing, why)`: a concluded effort. `conclude(id, outcome, why)`: no outcome. `link(effort, kind, target)`: a link already live. `unlink(...)`: an item's last effort link (invariant 10) |
-| items | `file_item(kind, title, body, *, role, tier, risk, parent, labels, flags, effort=None, filed_by, machine=False, must_fix=False, number=None)`: `number` is refused except `via="import"`. An item filed with no effort link takes its parent's links. With no parent, it is linked to `unsorted`, which the same event makes (`parked`) if the record has none. A machine-filed item (`machine=True`) is filed `admitted=False` unless `must_fix`. `edit_item(n, **fields)`. `move(n, state, why, *, expect=None, fence=None)`: a pair not in `MOVES`, `expect` not the current state, or a run's `fence` not the live lease's. `admit(n, by)` |
+| items | `file_item(kind, title, body, *, role, tier, risk, parent, labels, flags, effort=None, filed_by, machine=False, must_fix=False, number=None)`: `number` is refused except `via="import"`. An item filed with no effort link takes its parent's links. With no parent, it is linked to `unsorted`, which the same event makes if the record has none, as `schema.unsorted_effort` gives it (below). A machine-filed item (`machine=True`) is filed `admitted=False` unless `must_fix`. `edit_item(n, **fields)`. `move(n, state, why, *, expect=None, fence=None)`: a pair not in `MOVES`, `expect` not the current state, or a run's `fence` not the live lease's. `admit(n, by)` |
 | deps | `add_dep(n, *, blocker|change|what, why)`: a cycle, or a dep already live. `lift_dep(id, by, why)` |
 | leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold (on the item, the holder or the role), `expect` not the state, or a state `MOVES` does not take to `claimed`. It moves the item to `claimed`; the holder's own second grant renews its lease and keeps its fence. `renew(n, holder, fence, *, paused_until=None)` (`paused_until`: a usage limit's reset): a stale fence, or a lease another holds. `release(n, by, why, *, fence=None)`: no live lease, or a stale fence; it moves a `claimed` or `blocked` item to `ready` |
 | tasks | `file_task(kind, *, number=None, effort=None, labels=(), flags=(), needs=None, sandbox, schedule=None, not_before=None, supervision=None, loop=None)` -> id: an item or effort not there, `needs` not `{resource: amount}` (an amount from 1); `loop` defaults to `{"max_attempts": 1, "interval_s": 0}` and `supervision` to `{"expect_s": null, "beat_s": null}`. `edit_task(id, **fields)`: an ended task, or its `needs` while a run is live. `end_task(id, state, why)` (done, failed, cancelled): an ended task, or one with a live run; it releases the task's own live reservations (the task's, with no run) in the same event |
 | allocation | `declare_node(name, drivers, labels)`: a retired node (a live one is declared anew; False when nothing changes). `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**), a task that has ended, or a run that is finished. `release_reservation(id, why)`: a reservation released already, or one whose run is live (`finish_run` releases it) |
 | runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `beat(run)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
-| changes | `open_or_update_change(repo, branch, head, *, title, body, number, relation, base, position, draft, url, by)`: a second open change on a branch. `drop_change(id, by, why)`. `record_check(change, head, name, state, detail)` |
-| reviews | `file_review(target, round, kind, *, item, author, heads, pages, filed_by)`: `heads` is written once and never edited. `record_verdict(id, reviewer, verdict, findings)`: a review that already has one. `review_read(id)` |
+| changes | `open_or_update_change(repo, branch, head, *, title, body, number, relation, base, position, draft, url, by)` -> id: a second open change on a branch, one whose `number` is not the open change's. With no open change on the branch it opens one (`change.open`), with the repo's next `n`, and a `title`; else it updates the open one (`change.edit`). A field not given keeps its value on an update and takes its default on an open (`body` "", `relation` part, `draft` false, the rest null). `pushed_at` moves when the head does, and an update that changes nothing writes nothing. `drop_change(id, by, why)`: a change not open. `record_check(change, head, name, state, detail=None)`, by the actor: False when the check reads so already |
+| reviews | `file_review(target, round, kind, *, item=None, author, heads=None, pages=None, filed_by=None)` -> id: `heads` keyed by the ids of changes the record holds, each a non-empty sha. `heads` is written once and never edited. `record_verdict(id, reviewer, verdict, findings)`: a review that already has one. `review_read(id)`: False when it was read already |
 | merges | `record_merge(change, sha, by, rule, *, commit=None)`: a change not open, or `sha` not its head. It sets `merged_at` in the same event |
-| text | `comment(...)`, `ask(...)`, `answer(question, comment)`, `state(type, text, *, effort, number, where, supersedes)` |
+| text | `comment(...)`, `ask(number, text, *, kind, run=None, who=None)` -> id, `answer(question, comment)`: a question answered already, or a comment not on its item (the comment's author answers), `state(type, text, *, effort, number, where, supersedes)` |
 | holds | `hold(*, number|who, cause, why)`, `lift_hold(id, by)` |
-| readings | `record_reading(source, kind, value)` |
+| readings | `record_reading(source, kind, value)` -> id |
 | journal | `note(kind, subject, **data)`: only `note` itself, for what stands for no record |
 
 **A stale fence.** A run's writes that touch its item (`move`, `renew`, any
@@ -423,6 +431,17 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
   that are not the fold of its journal, an entry past its limit, or an item
   with no effort link. `check()` reports the last two, and a counter not past
   its kind's highest id, on a record.
+  - `contract.check_dump(dump)` makes those checks with no store, so
+    `quarrylith record load` and `quarrylith record import` refuse a dump
+    before they open the record, and a refused one writes nothing and
+    leaves no file.
+  - `check()` also reports invariants 6 and 7 broken: a node and resource
+    whose live reservations sum past its capacity at an instant from the
+    capacity's `at` (`set_capacity` is checked from its own time on), a
+    running run started in the record (first written by a `run.start`) that
+    holds less than its task's needs on its node, and a live reservation of
+    a finished run. A dump made by hand can carry either, since `load` checks
+    the fold and not the rules.
 - **A shared record is durable.** `open_record(..., shared=True)` is
   refused on a backend whose `durable` is false, unless it is given
   `allow_undurable=True` (tests and the bench only).
@@ -934,28 +953,68 @@ never reads the legacy file, and bin/lith never imports quarrylith.
   stops the export.
 - **The report**: `quarrylith record import` ends with the pulled and left
   counts per legacy table, and the dropped columns. They are the same
-  numbers `imports.counts` holds.
+  numbers `imports.counts` holds. It prints one line per table, `<table>
+  <read> <pulled> <left>` under a header, then `dropped <table>.<column>
+  <count>` per column. A document it cannot read, or one `check_import`
+  refuses (every fault on its own line), exits 2 before the record is
+  opened.
+- **The sample document**, `tests/import-sample.json` in quarrylith, with the
+  effort document it was read from beside it (`import-sample-effort.md`). It
+  is synthetic: ten items under neutral roles and repos, every kind the
+  import takes, every legacy table of the mapping, two of them left (`mains`
+  empty, and `scratch`, an unknown table). Step 5's fixture board is built to
+  export a copy of it. Where the mapping above leaves a choice, the sample
+  makes it, and step 5 follows:
+  - an effort part from the effort document (`inputs`, `tools`, `budget`,
+    `evidence`, `gates`) is `{"lines": [...]}`, its section's list items,
+    and the statement its paragraph;
+  - its Decisions and Log lines are statements of `effort` `0001` by its
+    owner, `at` the line's date (midnight UTC), the text after the date;
+  - a task made per (item, legacy run kind) is labelled
+    `legacy-run:<kind>`, with `loop.max_attempts` its runs' count, `attempts`
+    the same, and state `done` (`ended_at` the item's `closed_at`) for a
+    closed item, `running` with a live run, else `open`;
+  - a reading of `budget` takes the legacy `kind` (the window, `five_hour`)
+    as its `kind`; the legacy `source` (event or limit) is a dropped column;
+  - a review's `findings` is `[]`, which the legacy board did not keep;
+  - the figures observation's `text` is the figures as canonical JSON, with
+    `where` `board figures`.
 
 ### Gauges
 
 `Gauge(name, unit, labels, help, compute)`, where `compute(record, *, now,
-window_ms) -> [(labels, value)]` reads only through the contract. `GAUGES`
-is the one list the dashboard (step 7) and a node's report to its peers
-read. Each is computed from the records named, and none is stored:
+window_ms) -> [(labels, value)]` reads only through the contract (`get`,
+`read`, `reading`, `free`, `effective_labels`, and `contract.efforts_of` over
+them). `labels` is a dict of the gauge's labels, and the series are sorted by
+them. `GAUGES` is the one list the dashboard (step 7) and a node's report to
+its peers read, and `measure(record, *, now, window_ms)` computes every gauge
+inside one `reading()`. Each is computed from the records named, and none is
+stored. `quarrylith record gauges URL [--now MS] [--window-h H] [--json]`
+prints them, as `name{label="value",...} value` lines under `# HELP` and
+`# UNIT`, or as one JSON object.
 
 | gauge | unit | labels | from |
 |---|---|---|---|
-| `capacity`, `reserved`, `free` | the resource's | node, resource | `capacity`, `reservations` |
-| `queue_depth` | items, tasks | state, effort, label key:value | `items`, `tasks`, `effort_links` |
+| `capacity`, `reserved`, `free` | the resource's | node, resource | `capacity`, `reservations`; a live node's, `free` as `free(node, resource, from_at=now, until_at=None)` and `reserved` the capacity less it |
+| `queue_depth` | items, tasks | of (items, tasks), state, effort, label key:value | `items`, `tasks`, `effort_links`: the open ones; label `*` counts every one, and each other a record that carries it (a task's effective labels) |
 | `runs_active` | runs | phase, node | `runs` |
 | `run_age` | s | run | `runs` (`now - started_at`) |
-| `filed_to_start`, `start_to_done` | s (p50, p90 over the window) | kind, effort | `items`, `tasks`, `runs` |
-| `outcomes` | runs | task kind, outcome | `runs` |
+| `filed_to_start`, `start_to_done` | s | kind (the task's), effort, stat (p50, p90 over the window) | `items`, `tasks`, `runs`: a first attempt started in the window, from its item's `created_at` (a task's own with no item); a run finished in the window, from its start |
+| `outcomes` | runs | task kind, outcome | `runs` finished in the window |
 | `unmerged_changes` | changes | repo | `changes` |
-| `review_rounds` | rounds (median, worst) | effort | `reviews` |
-| `budget_pace` | %/h | provider | `readings` (`source="budget"`) |
-| `footprint` | the resource's | task kind, resource | `runs.footprint` |
-| `stalls` | runs | node | `runs`, `beats`: alive with no phase change past `expect_until` + 5 min, or 10 min with no expectation (AGENTS.md's stall margins) |
+| `review_rounds` | rounds | effort, stat (median, worst) | `reviews`: per item with a review filed in the window, the rounds its reviews were filed in |
+| `budget_pace` | %/h | provider, window | `readings` (`source="budget"`): per `value.provider` (`""` without one) and the reading's `kind`, the rise of `value.utilization` (0 to 1) per hour, in percent, across the window's readings of the latest period (`value.resets_at`) |
+| `footprint` | the resource's | task kind, resource | `runs.footprint`: the largest number a run finished in the window reported |
+| `stalls` | runs | node | `runs`, `beats`: alive with no phase change past `expect_until` + 5 min, or 10 min with no expectation (AGENTS.md's stall margins); one series per node with a live run |
+
+- **The window** is `[now - window_ms, now]`. Durations are seconds, and
+  `p50`, `p90` and `median` are by nearest rank, so each is a value the
+  window holds.
+- **A series' effort** is a task's own effort, else its item's efforts (its
+  own links, else its parent chain's), one series each, and `""` with none.
+- **Alive** is beating: a live run whose latest beat is within two of its
+  task's `supervision.beat_s`, or within 10 minutes when the task sets none.
+  A run with no beat is not known alive, so it is no stall.
 
 ## Reuse
 
@@ -1806,24 +1865,44 @@ client alone is the dependency (above).
   refuses a dump that is not whole, and `check()` reports an entry past its
   limit, items with no link and counters behind (approved: the conformance
   review of quarrylith#4, rounds 1 and 2, and the user's merge)
-- 2026-11-01 proposed: what building step 3 settled: `grant` moves the item
-  to `claimed` by `MOVES`, and the holder's own second grant renews its
-  lease and keeps its fence; `renew(..., paused_until=None)` for a usage
-  limit; `move` and `release` take a run's `fence`; `release` moves a
-  `claimed` or `blocked` item to `ready`, and a move to done or dropped
-  releases the live lease (1423's rules); `LEASE_MS`, three days;
-  `lease_view` gives `state` and `expiry`; a span is `[from_at, until_at)`;
-  a task is ready when its item is `ready` or `claimed` and passes the item
-  rules, or, with no item, its own effort is admitted; `file_task`'s
-  signature and defaults; `edit_task` refuses an ended task and its needs
-  while a run is live; `end_task` refuses a live run; `declare_node`
-  declares a live node anew and refuses a retired one; a node's drivers have
-  no repeat; `start_run(..., harness=None)`, its holder the lease's, no
-  fence for a task with no item, the node live and running the sandbox, the
-  task `running` until `finish_run`; `events(wait=)` inside `reading()` is
-  refused; and, new in round 2: `release_reservation` refuses a reservation
-  whose run is live; `reserve` refuses an ended task and a finished run, and
-  `end_task` releases the task's own live reservations in its event;
-  `lease_view` counts only the beats of runs under the live lease's fence;
-  `free()` refuses an empty or reversed span; `beat(run)`, as the code names
-  it; the four driver classes are today's and the list is open (this PR)
+- 2026-11-01 changed: what building step 3 settled: `grant` moves the item to
+  `claimed` by `MOVES`, and the holder's own second grant renews its lease and
+  keeps its fence; `renew(..., paused_until=None)` for a usage limit; `move`
+  and `release` take a run's `fence`; `release` moves a `claimed` or `blocked`
+  item to `ready`, and a move to done or dropped releases the live lease
+  (1423's rules); `LEASE_MS`, three days; `lease_view` gives `state` and
+  `expiry`; a span is `[from_at, until_at)`; a task is ready when its item is
+  `ready` or `claimed` and passes the item rules, or, with no item, its own
+  effort is admitted; `file_task`'s signature and defaults; `edit_task`
+  refuses an ended task and its needs while a run is live; `end_task` refuses
+  a live run; `declare_node` declares a live node anew and refuses a retired
+  one; a node's drivers have no repeat; `start_run(..., harness=None)`, its
+  holder the lease's, no fence for a task with no item, the node live and
+  running the sandbox, the task `running` until `finish_run`; `events(wait=)`
+  inside `reading()` is refused; and, new in round 2: `release_reservation`
+  refuses a reservation whose run is live; `reserve` refuses an ended task and
+  a finished run, and `end_task` releases the task's own live reservations in
+  its event; `lease_view` counts only the beats of runs under the live lease's
+  fence; `free()` refuses an empty or reversed span; `beat(run)`, as the code
+  names it; the four driver classes are today's and the list is open
+  (approved: the conformance review of quarrylith#5, rounds 1 and 2, and the
+  user's merge)
+- 2026-11-01 proposed: what building step 4 settled: `unsorted` named once,
+  `schema.unsorted_effort` (owner `record`), made the same by `file_item`
+  whoever files and by the import, and `check_import` refuses another;
+  `contract.check_dump`, so `load` and `import` refuse a dump before they open
+  the record and a refused one leaves no file; `check()` reports invariants 6
+  and 7 (a node past its capacity from the capacity's `at`, a running run
+  started in the record without its task's needs reserved, a finished run's
+  live reservation); `open_or_update_change` opens (`change.open`) or updates
+  (`change.edit`), a field not given kept on an update and defaulted on an
+  open, `pushed_at` with the head, and a second open change is one of another
+  `number`; `record_check` and `review_read` give False when nothing changes;
+  `file_review`'s heads name changes the record holds; `ask` and `answer`'s
+  signatures, the answer a comment on the question's item and its author the
+  answerer; `measure` and `by_name` in `quarrylith.gauges`, and the gauges'
+  conventions: the window, a series' effort, the `of` and `stat` labels,
+  `budget_pace` by `provider` and `window`, `footprint` the largest,
+  `reserved` the capacity less `free`, a run alive while it beats; the
+  import's report and the `gauges` command; and the sample document's choices
+  where the mapping leaves one (this PR)

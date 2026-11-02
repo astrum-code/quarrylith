@@ -1964,9 +1964,11 @@ class Record(abc.ABC):
         next `n`; or update the open change on that branch, with `head`. A
         field not given keeps its value on an update and takes its default on
         an open (`CHANGE_FIELDS`); an open gives the `title`. `pushed_at`
-        moves when the head does. Refused for a second open change on a
-        branch: a `number` that is not the open change's. Returns the
-        change's id; an update that changes nothing writes nothing."""
+        moves when the head does. An open change with no `number` takes one by
+        an update; one with a number keeps it, so another `number`, or none,
+        is a second open change on the branch, and refused. Returns the
+        change's id, an update that changes nothing too, and writes nothing
+        then."""
         given = {
             name: value
             for name, value in (
@@ -1989,10 +1991,11 @@ class Record(abc.ABC):
                 change = live[0]
                 id = change["id"]
                 op.kind = "change.edit"
-                if "number" in given and given["number"] != change["number"]:
+                number = change["number"]
+                if number is not None and given.get("number", number) != number:
                     raise Refused(
                         f"{repo} has an open change on {branch} already: change "
-                        f"{id}, of item {change['number']}"
+                        f"{id}, of item {number}"
                     )
                 fields = {k: v for k, v in given.items() if k != "body"}
                 after = {**change, **fields, "head": head}

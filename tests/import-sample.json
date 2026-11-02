@@ -9,7 +9,7 @@
   "tables": {
    "budget": 3,
    "changes": 3,
-   "claims": 4,
+   "claims": 5,
    "comments": 6,
    "cursors": 2,
    "deps": 3,
@@ -27,7 +27,7 @@
    "ranks": 2,
    "reviews": 3,
    "rounds": 5,
-   "runs": 4,
+   "runs": 5,
    "scratch": 1
   }
  },
@@ -218,7 +218,7 @@
     "review_round": 0,
     "overruled_at": null,
     "created_at": 1793018708596,
-    "updated_at": 1793018708596,
+    "updated_at": 1793196308596,
     "closed_at": null,
     "source": "legacy",
     "source_ref": null
@@ -563,6 +563,22 @@
     "released_at": null,
     "released_by": null,
     "why": null
+   },
+   {
+    "id": 5,
+    "number": 10,
+    "holder": "alpha",
+    "role": "alpha",
+    "fence": 1,
+    "branch": "feat/10-plan",
+    "machine": "host-a",
+    "granted_at": 1793195048596,
+    "renewed_at": 1793195048596,
+    "paused_until": null,
+    "expires_at": null,
+    "released_at": 1793196308596,
+    "released_by": "alpha",
+    "why": "failed"
    }
   ],
   "tasks": [
@@ -643,6 +659,32 @@
     "state": "done",
     "created_at": 1793159108596,
     "ended_at": 1793169908596
+   },
+   {
+    "id": 4,
+    "number": 10,
+    "effort": null,
+    "kind": "agent",
+    "labels": [
+     "legacy-run:task"
+    ],
+    "flags": [],
+    "needs": {},
+    "sandbox": "harness",
+    "schedule": null,
+    "not_before": null,
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    },
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "attempts": 1,
+    "state": "open",
+    "created_at": 1793195108596,
+    "ended_at": null
    }
   ],
   "nodes": [
@@ -760,6 +802,32 @@
     "reason": null,
     "started_at": 1793159108596,
     "finished_at": 1793166308596
+   },
+   {
+    "id": 5,
+    "task": 4,
+    "attempt": 1,
+    "holder": "alpha",
+    "fence": 1,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": "feat/10-plan",
+    "pgid": null,
+    "phase": "starting",
+    "phase_at": 1793195108596,
+    "expect_until": null,
+    "harness": {
+     "class": "standard",
+     "effort": "high",
+     "folder": "work/alpha/runs/5",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": "failed",
+    "reason": "the suite would not start",
+    "started_at": 1793195108596,
+    "finished_at": 1793196308596
    }
   ],
   "run_text": [
@@ -774,6 +842,10 @@
    {
     "run": 4,
     "result": "outcome: review\nreviews: #12\n\nverdict: changes"
+   },
+   {
+    "run": 5,
+    "result": "outcome: failed\n\nthe suite would not start"
    }
   ],
   "changes": [
@@ -1187,6 +1259,10 @@
    {
     "run": 3,
     "at": 1793367908596
+   },
+   {
+    "run": 5,
+    "at": 1793195408596
    }
   ]
  },
@@ -1199,14 +1275,14 @@
   "next:efforts": 2,
   "next:holds": 3,
   "next:items": 19,
-  "next:leases": 5,
+  "next:leases": 6,
   "next:merges": 2,
   "next:questions": 3,
   "next:readings": 4,
   "next:reviews": 4,
-  "next:runs": 5,
+  "next:runs": 6,
   "next:statements": 7,
-  "next:tasks": 4
+  "next:tasks": 5
  },
  "pulled": [
   {
@@ -1517,6 +1593,16 @@
    ]
   },
   {
+   "table": "claims",
+   "legacy_key": [
+    5
+   ],
+   "record": "leases",
+   "record_key": [
+    5
+   ]
+  },
+  {
    "table": "deps",
    "legacy_key": [
     1
@@ -1584,6 +1670,16 @@
    "record": "runs",
    "record_key": [
     4
+   ]
+  },
+  {
+   "table": "runs",
+   "legacy_key": [
+    5
+   ],
+   "record": "runs",
+   "record_key": [
+    5
    ]
   },
   {
@@ -1834,7 +1930,7 @@
    "table": "runs",
    "legacy_key": null,
    "column": "pid",
-   "count": 3,
+   "count": 4,
    "why": "a process of the old host"
   },
   {

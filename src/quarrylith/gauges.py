@@ -18,6 +18,10 @@ gauge at one seq.
   `supervision.beat_s`, or within 10 minutes when the task sets none. A live
   run **stalls** when it is alive and has made no phase change past its
   `expect_until` plus 5 minutes, or past 10 minutes with no expectation.
+- A record's `json` field (a run's `footprint`, a task's `supervision`, a
+  reading's `value`) may hold any JSON, an import's above all: a gauge reads
+  one only as a dict, and a figure in it only as a number, so a `beat_s` that
+  is not a positive number is none. What it cannot read it skips.
 """
 
 import math
@@ -51,6 +55,12 @@ def _in(t, now, window_ms):
 
 def _number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _dict(value):
+    """`value` when it is a dict, else `{}`: a record's `json` field may hold
+    any JSON, and a gauge reads only the dicts."""
+    return value if isinstance(value, dict) else {}
 
 
 def _quantile(values, q):
@@ -154,10 +164,13 @@ def runs_active(record, *, now, window_ms):
 
 
 def run_age(record, *, now, window_ms):
-    return [
-        ({"run": str(run["id"])}, (now - run["started_at"]) / 1000)
-        for run in record.read("runs", live=True)
-    ]
+    return _series(
+        ("run",),
+        {
+            (str(run["id"]),): (now - run["started_at"]) / 1000
+            for run in record.read("runs", live=True)
+        },
+    )
 
 
 def _runs_by(record, keep, measure):
@@ -237,7 +250,7 @@ def budget_pace(record, *, now, window_ms):
     `resets_at`) in the window."""
     by = {}
     for reading in record.read("readings", source="budget"):
-        value = reading["value"] if isinstance(reading["value"], dict) else {}
+        value = _dict(reading["value"])
         used = value.get("utilization")
         if not _in(reading["at"], now, window_ms) or not _number(used):
             continue
@@ -262,7 +275,7 @@ def footprint(record, *, now, window_ms):
         if not _in(run["finished_at"], now, window_ms):
             continue
         kind = record.get("tasks", run["task"])["kind"]
-        for resource, amount in run["footprint"].items():
+        for resource, amount in _dict(run["footprint"]).items():
             if _number(amount):
                 key = (kind, resource)
                 peaks[key] = max(peaks.get(key, amount), amount)
@@ -274,8 +287,11 @@ def _stalled(record, run, now):
     if beat is None:
         return False
     task = record.get("tasks", run["task"])
-    beat_s = (task["supervision"] if task else {}).get("beat_s")
-    alive_ms = BEAT_MISSES * beat_s * 1000 if beat_s else QUIET_MS
+    beat_s = _dict(task["supervision"] if task else None).get("beat_s")
+    if _number(beat_s) and beat_s > 0:
+        alive_ms = BEAT_MISSES * beat_s * 1000
+    else:
+        alive_ms = QUIET_MS
     if now - beat["at"] > alive_ms:
         return False
     if run["expect_until"] is not None:

@@ -1,5 +1,7 @@
 # Effort 0001: Sort the widgets
 
+Owner: lead
+
 ## Statement
 
 Widgets are listed sorted, by size and by colour, on every page that lists

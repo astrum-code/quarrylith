@@ -13,6 +13,7 @@ from quarrylith.record.schema import RECORDS
 #: it, with every kind an import takes. `import-sample-effort.md` is the
 #: effort document its effort `0001` was read from.
 SAMPLE = Path(__file__).resolve().parent / "import-sample.json"
+SAMPLE_EFFORT = SAMPLE.with_name("import-sample-effort.md")
 
 
 def load_sample():

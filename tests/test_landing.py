@@ -217,6 +217,30 @@ def test_changes_are_opened_updated_and_dropped(record, clock):
 
 
 @over_backends
+def test_an_unnumbered_change_takes_its_number_by_an_update(record, clock):
+    """An open change with no `number` takes one by an update (`change.edit`),
+    as any field; a number once set stays, so another, or none, is a second
+    open change and refused."""
+    admitted(record)
+    a, b = item(record, "a"), item(record, "b")
+    c = record.open_or_update_change("widgets", "feat/early", "h1", title="t", by="a")
+    assert record.get("changes", c)["number"] is None
+    head = record.head()
+    assert change(record, a, branch="feat/early", head="h1") == c
+    assert record.get("changes", c)["number"] == a
+    (event,) = record.events(head)
+    assert event.kind == "change.edit" and event.data["number"] == a
+    for number in (b, None):
+        before = unchanged(record)
+        with pytest.raises(Refused, match="open change"):
+            record.open_or_update_change(
+                "widgets", "feat/early", "h1", number=number, by="a"
+            )
+        assert unchanged(record) == before
+    assert record.check() == []
+
+
+@over_backends
 def test_checks_are_kept_per_change_head_and_name(record, clock):
     """A check is recorded per (change, head, name), by the actor; recording
     the same state and detail again writes nothing."""

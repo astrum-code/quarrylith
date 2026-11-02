@@ -3,12 +3,18 @@
 each computed from a fixture record through the contract alone, and `stalls`
 at its margins."""
 
+import ast
+import json
+import sys
+from pathlib import Path
+
 import pytest
-from backends import admitted, over_backends
+from backends import admitted, over_backends, url_for
 from samples import load_sample
 
-from quarrylith import gauges
+from quarrylith import cli, gauges
 from quarrylith.gauges import GAUGES, Gauge
+from quarrylith.record import contract
 from quarrylith.record.importing import compose
 
 MIN = 60_000
@@ -45,17 +51,31 @@ READS = (
 )
 
 
-class ContractOnly:
-    """The record, with only the contract's reads: any other attribute, a
+#: The gauges' module, whose source the AST check reads.
+GAUGES_PY = Path(gauges.__file__)
+#: What `quarrylith.gauges` may import: of the standard library, these; of
+#: quarrylith, `.record.contract` alone, and of it only `efforts_of`.
+STDLIB = {"math", "dataclasses"}
+CONTRACT_NAMES = {"efforts_of"}
+#: Calls that reach an attribute, or code, by a name in a string.
+BY_NAME = {"getattr", "vars", "eval", "exec", "compile", "__import__"}
+
+
+def contract_only(record):
+    """The record's contract reads, and nothing else: the reads are bound
+    here, and the object a gauge gets holds no record. Any other attribute, a
     private one or an operation, fails the test."""
+    reads = {name: getattr(record, name) for name in READS}
 
-    def __init__(self, record):
-        self._record = record
+    class ContractOnly:
+        __slots__ = ()
 
-    def __getattr__(self, name):
-        if name not in READS:
-            raise AssertionError(f"a gauge read {name!r}, outside the contract")
-        return getattr(self._record, name)
+        def __getattr__(self, name):
+            if name not in reads:
+                raise AssertionError(f"a gauge read {name!r}, outside the contract")
+            return reads[name]
+
+    return ContractOnly()
 
 
 def at(t0, minutes):
@@ -163,7 +183,7 @@ def fixture(record, clock):
 
 
 def values(gauge, record, now, window_ms=DAY):
-    got = gauge.compute(ContractOnly(record), now=now, window_ms=window_ms)
+    got = gauge.compute(contract_only(record), now=now, window_ms=window_ms)
     return {tuple(sorted(labels.items())): value for labels, value in got}
 
 
@@ -268,7 +288,7 @@ def test_every_gauge_computes_from_a_fixture_through_the_contract(record, clock)
         series(kind="job", effort="0001", stat="p90"): 1800,
     }
     # the whole set, in one reading, as the command gives it
-    every = gauges.measure(ContractOnly(record), now=now, window_ms=DAY)
+    every = gauges.measure(contract_only(record), now=now, window_ms=DAY)
     assert list(every) == list(PAGE)
     for name, rows in every.items():
         got = {tuple(sorted(lab.items())): v for lab, v in rows}
@@ -340,13 +360,14 @@ def test_the_gauges_compute_over_the_sample_import(record):
     doc = load_sample()
     record.load(compose(doc))
     now = doc["source"]["read_at"]
-    every = gauges.measure(ContractOnly(record), now=now, window_ms=30 * DAY)
+    every = gauges.measure(contract_only(record), now=now, window_ms=30 * DAY)
     assert list(every) == list(PAGE)
     assert every["capacity"] == []
     # its live run stopped beating an hour before the export
     assert every["stalls"] == [({"node": "legacy"}, 0)]
     assert every["unmerged_changes"] == [({"repo": "widgets"}, 1)]
     assert every["outcomes"] == [
+        ({"kind": "agent", "outcome": "failed"}, 1),
         ({"kind": "agent", "outcome": "limited"}, 1),
         ({"kind": "agent", "outcome": "pr"}, 1),
         ({"kind": "agent", "outcome": "review"}, 1),
@@ -355,3 +376,153 @@ def test_the_gauges_compute_over_the_sample_import(record):
     assert every["budget_pace"] == [
         ({"provider": "", "window": "five_hour"}, pytest.approx(15.5))
     ]
+
+
+def test_the_gauges_reach_the_record_only_by_the_contract():
+    """templet:3159 -- `quarrylith.gauges`, read as source: it imports only
+    `math` and `dataclasses` of the standard library (never `sqlite3`) and
+    `.record.contract` of quarrylith, takes only `efforts_of` off the
+    contract, reads no `_`-prefixed attribute (so nothing private off a
+    gauge's `record`), and reaches nothing by a name in a string."""
+    tree = ast.parse(GAUGES_PY.read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in STDLIB:
+                    found.append(f"{line}: imports {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            names = {a.name for a in node.names}
+            if node.level == 0 and node.module in STDLIB:
+                continue
+            if not (node.level == 1 and node.module == "record"):
+                found.append(f"{line}: imports from {node.module}")
+            elif names != {"contract"}:
+                found.append(f"{line}: imports {names} from .record")
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                found.append(f"{line}: reads {node.attr}")
+            base = node.value
+            if isinstance(base, ast.Name) and base.id == "contract":
+                if node.attr not in CONTRACT_NAMES:
+                    found.append(f"{line}: takes contract.{node.attr}")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in BY_NAME:
+                found.append(f"{line}: calls {node.func.id}")
+    assert found == []
+    assert "sqlite3" in sys.stdlib_module_names and "sqlite3" not in STDLIB
+
+
+@over_backends
+def test_run_age_lists_its_series_sorted_by_their_labels(record, clock):
+    """`run_age`'s series are sorted by their labels, as every gauge's are:
+    run `"10"` before run `"9"`."""
+    admitted(record)
+    record.declare_node("n1", ["process"], [])
+    record.set_capacity("n1", "slots", 20, "slots")
+    runs = []
+    for _ in range(11):
+        task = record.file_task(
+            "job", effort="0001", needs={"slots": 1}, sandbox="process"
+        )
+        runs.append(
+            record.start_run(
+                task, "alpha", node="n1", sandbox="process", fence=None, expect_s=None
+            )
+        )
+        clock.step()
+    got = gauges.by_name("run_age").compute(
+        contract_only(record), now=clock(), window_ms=DAY
+    )
+    labels = [lab["run"] for lab, _ in got]
+    assert labels == sorted(str(r) for r in runs)
+    assert labels[:3] == ["1", "10", "11"]
+
+
+@over_backends
+def test_a_footprint_or_supervision_that_is_not_a_dict_breaks_no_gauge(record, clock):
+    """A run's `footprint` is any JSON, so `finish_run` takes one that is not
+    a dict: `footprint` skips it, and every gauge still computes."""
+    admitted(record)
+    record.declare_node("n1", ["process"], [])
+    record.set_capacity("n1", "slots", 9, "slots")
+
+    def finished(footprint):
+        task = record.file_task(
+            "job", effort="0001", needs={"slots": 1}, sandbox="process"
+        )
+        run = record.start_run(
+            task, "alpha", node="n1", sandbox="process", fence=None, expect_s=None
+        )
+        clock.step()
+        record.finish_run(run, "done", "", footprint=footprint, cost={})
+
+    for footprint in ([1, 2], "lots", 7, False, {"memory": 5}):
+        finished(footprint)
+    every = gauges.measure(contract_only(record), now=clock(), window_ms=DAY)
+    assert list(every) == list(PAGE)
+    assert every["footprint"] == [({"kind": "job", "resource": "memory"}, 5)]
+    assert every["outcomes"] == [({"kind": "job", "outcome": "done"}, 5)]
+
+
+#: An imported task's `supervision`, which the record holds as any JSON: none
+#: of these is a positive `beat_s`, so each run beats by the 10 minutes.
+SUPERVISIONS = (
+    [1],
+    7,
+    "every minute",
+    {"beat_s": "soon"},
+    {"beat_s": -30},
+    {"beat_s": True},
+    {"beat_s": 0},
+    {"beat_s": [30]},
+)
+
+
+@over_backends
+def test_an_import_with_a_footprint_or_supervision_not_a_dict_breaks_no_gauge(
+    backend, tmp_path, capsys
+):
+    """An import carries a run's `footprint` and a task's `supervision` as any
+    JSON: a footprint that is not a dict reports nothing, a `beat_s` that is
+    not a positive number is none (the run alive within 10 minutes of a
+    beat), and `measure` and `quarrylith record gauges` compute every
+    gauge."""
+    for i, supervision in enumerate(SUPERVISIONS):
+        doc = load_sample()
+        runs = {r["id"]: r for r in doc["records"]["runs"]}
+        runs[1]["footprint"] = [1]
+        runs[2]["footprint"] = "much"
+        runs[4]["footprint"] = {"memory": 64}
+        live = next(r for r in runs.values() if r["finished_at"] is None)
+        for task in doc["records"]["tasks"]:
+            if task["id"] == live["task"]:
+                task["supervision"] = supervision
+        beat = next(b for b in doc["records"]["beats"] if b["run"] == live["id"])
+        # five minutes past the live run's last beat: alive by the 10 minutes
+        now = beat["at"] + 5 * MIN
+        path = tmp_path / f"doc-{i}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        url = url_for(backend, tmp_path / f"record-{i}")
+        code, _, err = run_cli(capsys, "record", "import", str(path), "--into", url)
+        assert code == 0, err
+        record = contract.open_record(url, actor="alpha", via="cli", readonly=True)
+        try:
+            every = gauges.measure(contract_only(record), now=now, window_ms=30 * DAY)
+        finally:
+            record.close()
+        assert list(every) == list(PAGE), supervision
+        assert every["stalls"] == [({"node": "legacy"}, 1)], supervision
+        assert every["footprint"] == [
+            ({"kind": "agent", "resource": "memory"}, 64)
+        ], supervision
+        code, out, err = run_cli(capsys, "record", "gauges", url, "--now", str(now))
+        assert code == 0, err
+        assert 'stalls{node="legacy"} 1' in out.splitlines(), supervision
+
+
+def run_cli(capsys, *argv):
+    code = cli.main(list(argv))
+    out, err = capsys.readouterr()
+    return code, out, err

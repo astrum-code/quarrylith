@@ -340,13 +340,18 @@ def test_the_gauges_compute_over_the_sample_import(record):
     doc = load_sample()
     record.load(compose(doc))
     now = doc["source"]["read_at"]
-    every = gauges.measure(record, now=now, window_ms=30 * DAY)
+    every = gauges.measure(ContractOnly(record), now=now, window_ms=30 * DAY)
     assert list(every) == list(PAGE)
-    assert every["capacity"] == [] and every["stalls"] == []
-    assert dict(every["unmerged_changes"]) == {} or every["unmerged_changes"] == [
-        ({"repo": "widgets"}, 1)
+    assert every["capacity"] == []
+    # its live run stopped beating an hour before the export
+    assert every["stalls"] == [({"node": "legacy"}, 0)]
+    assert every["unmerged_changes"] == [({"repo": "widgets"}, 1)]
+    assert every["outcomes"] == [
+        ({"kind": "agent", "outcome": "limited"}, 1),
+        ({"kind": "agent", "outcome": "pr"}, 1),
+        ({"kind": "agent", "outcome": "review"}, 1),
     ]
-    assert every["outcomes"]
+    # utilization from 0.2 to 0.82 of the period over four hours
     assert every["budget_pace"] == [
-        ({"provider": "", "window": "five_hour"}, pytest.approx((0.82 - 0.2) * 100 / 4))
+        ({"provider": "", "window": "five_hour"}, pytest.approx(15.5))
     ]

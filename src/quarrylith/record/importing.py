@@ -15,7 +15,8 @@ import document, plain JSON (`IMPORT_FORMAT`):
 
 Every table of the older board is named in `pulled` or `left`, and per table
 the pulled rows plus the left rows' counts equal the rows read: nothing
-vanishes unreported. `compose` turns a checked document into a dump, pure: the
+vanishes unreported. An `unsorted` effort in the document is the record's own,
+`schema.unsorted_effort`. `compose` turns a checked document into a dump, pure: the
 same document gives the same dump, the `imports` record first, then the
 records in `RECORDS` order, then `pulled` and `left`, then the counters.
 """
@@ -109,6 +110,15 @@ def _records(doc, problems):
         keys = schema.sort_keys(schema.key_of(kind, r) for r in good)
         by_key = {tuple(schema.key_of(kind, r)): r for r in good}
         out[kind] = [by_key[tuple(k)] for k in keys]
+    # `unsorted` is the record's own effort, the same wherever it is made
+    for effort in out.get("efforts", ()):
+        if effort["id"] == schema.UNSORTED:
+            own = schema.unsorted_effort(effort["created_at"])
+            for name in sorted(n for n in own if effort[n] != own[n]):
+                problems.append(
+                    f"records.efforts {schema.UNSORTED}: its {name} is "
+                    f"{effort[name]!r}, not {own[name]!r} (schema.UNSORTED_EFFORT)"
+                )
     return out
 
 

@@ -14,10 +14,9 @@
   run, pauses 5 ms, and tries again, so the two processes keep the node
   full between them (at 2 ms, SQLite's busy wait, which backs off, now and
   then let one process run its whole batch alone). It finishes the rest at
-  the end, and prints how many
-  starts it made, how many found no room, and how many of those it made
-  while it held fewer runs than the node's slots: the other process's
-  reservations were in the way.
+  the end, and prints how many starts it made, how many found no room, and
+  how many of those it made while it held fewer runs than the node's slots:
+  the other process's reservations were in the way.
 """
 
 import json

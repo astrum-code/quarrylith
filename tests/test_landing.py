@@ -470,9 +470,13 @@ def test_check_finds_a_running_run_with_no_live_reservation(backend, record, tmp
 @over_backends
 def test_check_takes_imported_runs_as_holding_nothing(record):
     """Runs an import brings sit on the retired node `legacy` and hold no
-    reservation (invariant 7's exception): a live one is no finding."""
+    reservation (invariant 7's exception): a live one is no finding, even
+    when its task names needs."""
     doc = load_sample()
-    assert [r for r in doc["records"]["runs"] if r["finished_at"] is None]
+    (live,) = [r for r in doc["records"]["runs"] if r["finished_at"] is None]
+    for task in doc["records"]["tasks"]:
+        if task["id"] == live["task"]:
+            task["needs"] = {"slots": 1}
     record.load(compose(doc))
     assert record.check() == []
 

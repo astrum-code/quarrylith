@@ -51,8 +51,8 @@ def _pairs(froms, tos):
     return {(f, t) for f in froms for t in tos}
 
 
-#: Every state pair an item may move by: the legacy board's moves, without
-#: their who and when, which are the caller's `authorize`.
+#: Every state pair an item may move by, without who may move it or when:
+#: that is the caller's `authorize`.
 MOVES = frozenset().union(
     _pairs(["triage"], ["ready"]),
     _pairs(["ready", "blocked"], ["claimed"]),
@@ -68,8 +68,9 @@ MOVES = frozenset().union(
     _pairs(CLOSED_STATES, ["ready", "triage"]),
 )
 
-#: The effort an item filed with no effort and no parent is linked to.
-UNSORTED = "unsorted"
+#: The effort an item filed with no effort and no parent is linked to
+#: (`schema.unsorted_effort` gives it).
+UNSORTED = schema.UNSORTED
 #: The six parts of an effort.
 EFFORT_PARTS = ("statement", "inputs", "tools", "budget", "evidence", "gates")
 EFFORT_EDITS = ("slug", "title", "owner", "order") + EFFORT_PARTS
@@ -108,6 +109,28 @@ TASK_ENDS = ("done", "failed", "cancelled")
 #: A task's loop and supervision when it is filed without them.
 LOOP = {"max_attempts": 1, "interval_s": 0}
 SUPERVISION = {"expect_s": None, "beat_s": None}
+
+
+class _Keep:
+    """A field not given: an update keeps its value, an open takes its
+    default."""
+
+    def __repr__(self):
+        return "KEEP"
+
+
+KEEP = _Keep()
+#: A change's fields an open or an update may give, and their defaults.
+CHANGE_FIELDS = {
+    "title": None,
+    "body": "",
+    "number": None,
+    "relation": "part",
+    "base": None,
+    "position": None,
+    "draft": False,
+    "url": None,
+}
 
 
 def wall_ms():
@@ -154,8 +177,9 @@ def _linked(reader, number):
     )
 
 
-def _efforts_of(reader, item):
-    """The efforts an item is linked to: its own, else its parent's chain's."""
+def efforts_of(reader, item):
+    """The efforts an item is linked to: its own, else its parent's chain's.
+    `reader` is anything with the contract's `read` and `get`."""
     seen = set()
     while item is not None and item["number"] not in seen:
         seen.add(item["number"])
@@ -176,7 +200,7 @@ def _ineligible(reader, item):
         return f"item {n} is not admitted"
     if not any(
         (reader.get("efforts", e) or {}).get("standing") == "admitted"
-        for e in _efforts_of(reader, item)
+        for e in efforts_of(reader, item)
     ):
         return f"no effort item {n} is linked to is admitted"
     if reader.read("deps", live=True, number=n):
@@ -897,7 +921,9 @@ class Record(abc.ABC):
     def check(self):
         """The findings, a list of str: the replay of the journal against the
         records, the seqs, each entry against its limit, the items with no
-        effort link, the counters behind their ids, then the backend's own.
+        effort link, the counters behind their ids, a node booked past its
+        capacity (invariant 6), a running run without its reservations or a
+        finished one holding some (invariant 7), then the backend's own.
         Empty when the record is whole."""
         with self.reading():
             dump = self.dump()
@@ -907,40 +933,12 @@ class Record(abc.ABC):
 
     def load(self, dump):
         """Write a dump into an empty record: every event with its seq,
-        applied in order, then the bookkeeping, in one write step. Refused
-        when the record is not empty, or the dump is not whole: its seqs not
-        from 1 by one, its records not the fold of its journal, an entry past
-        the limit, an item with no effort link."""
+        applied in order, then the bookkeeping, in one write step. Refused,
+        before anything is written, when the dump is not whole (`check_dump`),
+        and when the record is not empty."""
         self._writable()
-        if not isinstance(dump, dict) or set(dump) != {
-            "format",
-            "records",
-            "journal",
-            "bookkeeping",
-        }:
-            raise Refused("a dump is {format, records, journal, bookkeeping}")
-        if dump["format"] != 1:
-            raise Refused(f"a dump of format {dump['format']!r}: this reads 1")
-        journaled = {k for k, v in RECORDS.items() if v.journaled}
-        if not isinstance(dump["records"], dict) or not set(dump["records"]) <= (
-            journaled
-        ):
-            raise Refused("a dump's records are by journaled kind")
+        journal = check_dump(dump)
         kept = {k for k, v in RECORDS.items() if not v.journaled}
-        if (
-            not isinstance(dump["bookkeeping"], dict)
-            or not set(dump["bookkeeping"]) <= kept
-        ):
-            raise Refused("a dump's bookkeeping is beats and cursors")
-        try:
-            journal = [ev.Event.from_dict(raw) for raw in dump["journal"]]
-            for event in journal:
-                ev.check_event(event)
-        except (SchemaError, KeyError, TypeError, ValueError) as e:
-            raise Refused(f"a dump's journal: {e}") from None
-        for i, event in enumerate(journal, 1):
-            if event.seq != i:
-                raise Refused(f"a dump's seqs run from 1 by one: {event.seq} at {i}")
         with self._lock:
             self._not_reading()
             with self._write():
@@ -952,27 +950,16 @@ class Record(abc.ABC):
                     self._store(event, priors)
                 for kind in sorted(kept):
                     for row in dump["bookkeeping"].get(kind, []):
-                        try:
-                            row = schema.validate(kind, row)
-                        except SchemaError as e:
-                            raise Refused(f"a dump's {kind}: {e}") from None
-                        if kind == "cursors" and row["seq"] > len(journal):
-                            raise Refused(f"a cursor past the journal: {row}")
-                        self._bookkeep(kind, row)
-                records = {}
-                for kind in sorted(journaled):
-                    records[kind] = self._read(kind, {}, None, False, None)
-                    if records[kind] != dump["records"].get(kind, []):
+                        self._bookkeep(kind, schema.validate(kind, row))
+                # the store's fold against the dump's, a backstop to
+                # check_dump's in memory
+                for kind, v in RECORDS.items():
+                    if v.journaled and self._read(kind, {}, None, False, None) != dump[
+                        "records"
+                    ].get(kind, []):
                         raise Refused(
                             f"a dump's {kind} are not the fold of its journal"
                         )
-                missing = unlinked_items(records)
-                if missing:
-                    raise Refused(
-                        "every item has an effort link: "
-                        + ", ".join(f"item {n}" for n in missing)
-                        + " has none"
-                    )
         self._wake()
 
     # -- efforts --------------------------------------------------------------
@@ -1132,7 +1119,7 @@ class Record(abc.ABC):
             if item is None:
                 continue
             if n == number or not _linked(op, n):
-                if not _efforts_of(op, item):
+                if not efforts_of(op, item):
                     raise Refused(
                         f"item {n} would have no effort link: link it to another "
                         "effort first"
@@ -1208,7 +1195,7 @@ class Record(abc.ABC):
                 op.need("efforts", [effort], "effort")
                 efforts = [effort]
             elif parent is not None:
-                efforts = _efforts_of(op, op.need("items", [parent], "parent item"))
+                efforts = efforts_of(op, op.need("items", [parent], "parent item"))
                 if not efforts:
                     raise Refused(
                         f"parent item {parent} has no effort link: file the item "
@@ -1219,19 +1206,7 @@ class Record(abc.ABC):
             if parent is not None:
                 op.need("items", [parent], "parent item")
             if UNSORTED in efforts and op.get("efforts", [UNSORTED]) is None:
-                op.put(
-                    "efforts",
-                    {
-                        "id": UNSORTED,
-                        "slug": UNSORTED,
-                        "title": "Unsorted",
-                        "standing": "parked",
-                        "owner": self.actor,
-                        "created_at": op.now,
-                        "statement": "Items filed with no effort",
-                        **{part: {} for part in EFFORT_PARTS[1:]},
-                    },
-                )
+                op.put("efforts", schema.unsorted_effort(op.now))
             for e in efforts:
                 op.put(
                     "effort_links",
@@ -1959,6 +1934,261 @@ class Record(abc.ABC):
                 "released": released,
             }
 
+    # -- changes, checks, reviews and merges ---------------------------------
+
+    @staticmethod
+    def _open_change(op, id):
+        change = op.need("changes", [id], "change")
+        for field, what in (("merged_at", "merged"), ("dropped_at", "dropped")):
+            if change[field] is not None:
+                raise Refused(f"change {id} is {what}, not open")
+        return change
+
+    def open_or_update_change(
+        self,
+        repo,
+        branch,
+        head,
+        *,
+        title=KEEP,
+        body=KEEP,
+        number=KEEP,
+        relation=KEEP,
+        base=KEEP,
+        position=KEEP,
+        draft=KEEP,
+        url=KEEP,
+        by,
+    ):
+        """Open a change, a branch of a repo offered to merge, with the repo's
+        next `n`; or update the open change on that branch, with `head`. A
+        field not given keeps its value on an update and takes its default on
+        an open (`CHANGE_FIELDS`); an open gives the `title`. `pushed_at`
+        moves when the head does. Refused for a second open change on a
+        branch: a `number` that is not the open change's. Returns the
+        change's id; an update that changes nothing writes nothing."""
+        given = {
+            name: value
+            for name, value in (
+                ("title", title),
+                ("body", body),
+                ("number", number),
+                ("relation", relation),
+                ("base", base),
+                ("position", position),
+                ("draft", draft),
+                ("url", url),
+            )
+            if value is not KEEP
+        }
+        with self._operation("open_or_update_change", "change.open") as op:
+            if given.get("number") is not None:
+                op.need("items", [given["number"]], "item")
+            live = op.read("changes", live=True, repo=repo, branch=branch)
+            if live:
+                change = live[0]
+                id = change["id"]
+                op.kind = "change.edit"
+                if "number" in given and given["number"] != change["number"]:
+                    raise Refused(
+                        f"{repo} has an open change on {branch} already: change "
+                        f"{id}, of item {change['number']}"
+                    )
+                fields = {k: v for k, v in given.items() if k != "body"}
+                after = {**change, **fields, "head": head}
+                if head != change["head"]:
+                    after["pushed_at"] = op.now
+                if after != change:
+                    op.put("changes", after)
+                text = op.get("change_text", [id])
+                if "body" in given and (text or {}).get("body") != given["body"]:
+                    op.put("change_text", {"change": id, "body": given["body"]})
+                if not op._puts:
+                    op.nothing()
+            else:
+                if "title" not in given:
+                    raise Refused(f"a change is opened with its title: {repo} {branch}")
+                after = {**CHANGE_FIELDS, **given}
+                body = after.pop("body")
+                id = op.take("next:changes")
+                after.update(
+                    id=id,
+                    repo=repo,
+                    n=op.take(f"next:change:{repo}"),
+                    branch=branch,
+                    head=head,
+                    opened_at=op.now,
+                    opened_by=by,
+                    pushed_at=op.now,
+                    merged_at=None,
+                    dropped_at=None,
+                    dropped_by=None,
+                )
+                op.put("changes", after)
+                op.put("change_text", {"change": id, "body": body})
+            op.subject = f"change:{id}"
+            op.data = {
+                "change": id,
+                "repo": repo,
+                "n": after["n"],
+                "branch": branch,
+                "head": head,
+                "number": after["number"],
+            }
+        return id
+
+    def drop_change(self, id, by, why):
+        """Drop an open change. Refused for one merged or dropped."""
+        with self._operation("drop_change", "change.drop", f"change:{id}") as op:
+            change = self._open_change(op, id)
+            op.put("changes", {**change, "dropped_at": op.now, "dropped_by": by})
+            op.data = {"change": id, "by": by, "why": why}
+
+    def record_check(self, change, head, name, state, detail=None):
+        """A change's check `name` at `head` (green, red, skipped, pending),
+        by the actor. False when it already reads so (and nothing is
+        written)."""
+        with self._operation("record_check", "check.record", f"change:{change}") as op:
+            op.need("changes", [change], "change")
+            before = op.get("checks", [change, head, name])
+            if before and (before["state"], before["detail"]) == (state, detail):
+                op.nothing()
+            op.put(
+                "checks",
+                {
+                    "change": change,
+                    "head": head,
+                    "name": name,
+                    "state": state,
+                    "detail": detail,
+                    "at": op.now,
+                    "by": self.actor,
+                },
+            )
+            op.data = {"change": change, "head": head, "name": name, "state": state}
+        return op.seq is not None
+
+    def file_review(
+        self,
+        target,
+        round,
+        kind,
+        *,
+        item=None,
+        author,
+        heads=None,
+        pages=None,
+        filed_by=None,
+    ):
+        """File a review of item `target`'s work in `round`, as item `item`
+        when it has one. `heads` (`{change id: sha}`, each a change the record
+        holds) is what the review judges: written here, once, and never
+        edited. Returns its id."""
+        heads = {} if heads is None else heads
+        if not isinstance(heads, dict):
+            raise Refused(f"a review's heads are {{change id: sha}}, not {heads!r}")
+        with self._operation("file_review", "review.file", f"item:{target}") as op:
+            op.need("items", [target], "item")
+            if item is not None:
+                op.need("items", [item], "review item")
+            for change, sha in heads.items():
+                if not (
+                    isinstance(change, str)
+                    and change.isascii()
+                    and change.isdigit()
+                    and str(int(change)) == change
+                ):
+                    raise Refused(
+                        f"a review's heads key a change by its id: {change!r}"
+                    )
+                if not isinstance(sha, str) or not sha:
+                    raise Refused(f"change {change}'s head is a sha, not {sha!r}")
+                op.need("changes", [int(change)], "change")
+            id = op.take("next:reviews")
+            op.put(
+                "reviews",
+                {
+                    "id": id,
+                    "target": target,
+                    "round": round,
+                    "kind": kind,
+                    "item": item,
+                    "author": author,
+                    "heads": dict(sorted(heads.items())),
+                    "pages": [] if pages is None else pages,
+                    "filed_by": filed_by,
+                    "reviewer": None,
+                    "verdict": None,
+                    "findings": [],
+                    "filed_at": op.now,
+                    "verdict_at": None,
+                    "read_at": None,
+                },
+            )
+            op.data = {"review": id, "target": target, "round": round, "kind": kind}
+        return id
+
+    def record_verdict(self, id, reviewer, verdict, findings):
+        """A review's verdict (approve, changes) and findings. Refused for a
+        review that has one."""
+        if verdict not in schema.VALUES[("reviews", "verdict")]:
+            raise Refused(f"a verdict is approve or changes, not {verdict!r}")
+        with self._operation("record_verdict", "review.verdict") as op:
+            review = op.need("reviews", [id], "review")
+            op.subject = f"item:{review['target']}"
+            if review["verdict"] is not None:
+                raise Refused(
+                    f"review {id} has its verdict already: {review['verdict']}"
+                )
+            op.put(
+                "reviews",
+                {
+                    **review,
+                    "reviewer": reviewer,
+                    "verdict": verdict,
+                    "findings": findings,
+                    "verdict_at": op.now,
+                },
+            )
+            op.data = {"review": id, "target": review["target"], "verdict": verdict}
+
+    def review_read(self, id):
+        """Mark a review read by its author's work. False when it was read
+        already (and nothing is written)."""
+        with self._operation("review_read", "review.read") as op:
+            review = op.need("reviews", [id], "review")
+            op.subject = f"item:{review['target']}"
+            if review["read_at"] is not None:
+                op.nothing()
+            op.put("reviews", {**review, "read_at": op.now})
+            op.data = {"review": id, "target": review["target"]}
+        return op.seq is not None
+
+    def record_merge(self, change, sha, by, rule, *, commit=None):
+        """A change merged at `sha`, its head, by `rule` (what allowed it),
+        and `merged_at` in the same event. Refused for a change not open, and
+        a `sha` that is not its head. Returns the merge's id."""
+        with self._operation("record_merge", "merge", f"change:{change}") as op:
+            found = self._open_change(op, change)
+            if sha != found["head"]:
+                raise Refused(f"change {change}'s head is {found['head']}, not {sha!r}")
+            id = op.take("next:merges")
+            op.put("changes", {**found, "merged_at": op.now})
+            op.put(
+                "merges",
+                {
+                    "id": id,
+                    "change": change,
+                    "sha": sha,
+                    "commit": commit,
+                    "by": by,
+                    "rule": rule,
+                    "at": op.now,
+                },
+            )
+            op.data = {"merge": id, "change": change, "sha": sha, "by": by}
+        return id
+
     # -- text -----------------------------------------------------------------
 
     def comment(self, number, body, *, change=None, who=None, mark=None, ref=None):
@@ -1989,12 +2219,59 @@ class Record(abc.ABC):
             op.data = {"id": id, "number": number, "change": change, "mark": mark}
         return id
 
+    def ask(self, number, text, *, kind, run=None, who=None):
+        """A question on an item (blocked, pr), from a run when given. Returns
+        its id."""
+        with self._operation("ask", "question.ask", f"item:{number}") as op:
+            op.need("items", [number], "item")
+            if run is not None:
+                op.need("runs", [run], "run")
+            id = op.take("next:questions")
+            op.put(
+                "questions",
+                {
+                    "id": id,
+                    "number": number,
+                    "run": run,
+                    "who": who or self.actor,
+                    "kind": kind,
+                    "text": text,
+                    "asked_at": op.now,
+                    "answered_at": None,
+                    "answered_by": None,
+                    "answer": None,
+                },
+            )
+            op.data = {"question": id, "number": number, "kind": kind}
+        return id
+
+    def answer(self, question, comment):
+        """Answer a question by a comment on its item, the comment's author
+        answering. Refused for a question answered already."""
+        with self._operation("answer", "question.answer") as op:
+            q = op.need("questions", [question], "question")
+            op.subject = f"item:{q['number']}"
+            if q["answered_at"] is not None:
+                raise Refused(f"question {question} is answered already")
+            reply = op.need("comments", [comment], "comment")
+            if reply["number"] != q["number"]:
+                raise Refused(f"comment {comment} is not on item {q['number']}")
+            op.put(
+                "questions",
+                {
+                    **q,
+                    "answered_at": op.now,
+                    "answered_by": reply["who"],
+                    "answer": comment,
+                },
+            )
+            op.data = {"question": question, "number": q["number"], "answer": comment}
+
     def state(
         self, type, text, *, effort=None, number=None, where=None, supersedes=None
     ):
-        """A statement (of a type in `schema.VALUES`), on an effort or an item,
-        or neither.
-        Returns its id."""
+        """A statement (of a type in `schema.VALUES`), on an effort, an item
+        or neither. Returns its id."""
         subject = (
             f"effort:{effort}"
             if effort is not None
@@ -2066,6 +2343,26 @@ class Record(abc.ABC):
             op.put("holds", {**hold, "lifted_at": op.now, "lifted_by": by})
             op.data = {"id": id}
 
+    # -- readings -------------------------------------------------------------
+
+    def record_reading(self, source, kind, value):
+        """A reading: `source`'s value of `kind` (a budget's use, say), at
+        the record's clock. Returns its id."""
+        with self._operation("record_reading", "reading", f"reading:{source}") as op:
+            id = op.take("next:readings")
+            op.put(
+                "readings",
+                {
+                    "id": id,
+                    "source": source,
+                    "kind": kind,
+                    "value": value,
+                    "at": op.now,
+                },
+            )
+            op.data = {"reading": id, "source": source, "kind": kind}
+        return id
+
     # -- the journal itself ---------------------------------------------------
 
     def note(self, kind, subject, **data):
@@ -2075,6 +2372,146 @@ class Record(abc.ABC):
             op.empty_ok = True
             op.data = {"kind": kind, **data}
         return op.seq
+
+
+def check_dump(dump):
+    """The events of a whole dump, or Refused, writing nothing: a dump is
+    `{format, records, journal, bookkeeping}`, its seqs run from 1 by one,
+    each journal entry is within its limit, its records are the fold of its
+    journal, every item has an effort link, and its bookkeeping is valid (no
+    cursor past the journal)."""
+    if not isinstance(dump, dict) or set(dump) != {
+        "format",
+        "records",
+        "journal",
+        "bookkeeping",
+    }:
+        raise Refused("a dump is {format, records, journal, bookkeeping}")
+    if dump["format"] != 1:
+        raise Refused(f"a dump of format {dump['format']!r}: this reads 1")
+    journaled = {k for k, v in RECORDS.items() if v.journaled}
+    if not isinstance(dump["records"], dict) or not set(dump["records"]) <= (journaled):
+        raise Refused("a dump's records are by journaled kind")
+    kept = {k for k, v in RECORDS.items() if not v.journaled}
+    if not isinstance(dump["bookkeeping"], dict) or not set(dump["bookkeeping"]) <= (
+        kept
+    ):
+        raise Refused("a dump's bookkeeping is beats and cursors")
+    try:
+        journal = [ev.Event.from_dict(raw) for raw in dump["journal"]]
+        for event in journal:
+            ev.check_event(event)
+    except (SchemaError, KeyError, TypeError, ValueError) as e:
+        raise Refused(f"a dump's journal: {e}") from None
+    limit = schema.LIMITS["entry_bytes"]
+    view = ev.MemoryView()
+    for i, event in enumerate(journal, 1):
+        if event.seq != i:
+            raise Refused(f"a dump's seqs run from 1 by one: {event.seq} at {i}")
+        size = entry_size(event, _priors(view.get, event))
+        if size > limit:
+            raise Refused(
+                f"a journal entry of {size} bytes (event {event.seq}), past the "
+                f"limit of {limit}"
+            )
+        ev.apply(view, event)
+    records = view.records()
+    for kind in sorted(journaled):
+        if records[kind] != dump["records"].get(kind, []):
+            raise Refused(f"a dump's {kind} are not the fold of its journal")
+    missing = unlinked_items(records)
+    if missing:
+        raise Refused(
+            "every item has an effort link: "
+            + ", ".join(f"item {n}" for n in missing)
+            + " has none"
+        )
+    for kind in sorted(kept):
+        rows = dump["bookkeeping"].get(kind, [])
+        if not isinstance(rows, list):
+            raise Refused(f"a dump's {kind} are a list")
+        for row in rows:
+            try:
+                row = schema.validate(kind, row)
+            except SchemaError as e:
+                raise Refused(f"a dump's {kind}: {e}") from None
+            if kind == "cursors" and row["seq"] > len(journal):
+                raise Refused(f"a cursor past the journal: {row}")
+    return journal
+
+
+def _capacity_findings(records):
+    """Invariant 6: for each node and resource, the live reservations never
+    sum past its capacity at any instant from when the capacity was set
+    (`set_capacity` is checked from its own time on)."""
+    findings = []
+    caps = {(c["node"], c["resource"]): c for c in records.get("capacity", ())}
+    held = {}
+    for r in records.get("reservations", ()):
+        if r["released_at"] is None:
+            held.setdefault((r["node"], r["resource"]), []).append(r)
+    for (node, resource), live in sorted(held.items()):
+        cap = caps.get((node, resource))
+        if cap is None:
+            findings.append(
+                f"node {node} {resource}: {_peak(live, 0, None)} reserved, and no "
+                "capacity declared"
+            )
+            continue
+        peak = _peak(live, cap["at"], None)
+        if peak > cap["amount"]:
+            findings.append(
+                f"node {node} {resource}: {peak} reserved at once, past its "
+                f"capacity {cap['amount']}"
+            )
+    return findings
+
+
+def _run_findings(dump):
+    """Invariant 7: every running run started in the record (by a
+    `run.start`, not brought by an import) holds live reservations for its
+    task's needs on its node, and no finished run's reservation is live."""
+    findings = []
+    records = dump["records"]
+    started, seen = set(), set()
+    for raw in dump["journal"]:
+        for kind, key, _ in raw["puts"]:
+            if kind == "runs" and key[0] not in seen:
+                seen.add(key[0])
+                if raw["kind"] == "run.start":
+                    started.add(key[0])
+    runs = {r["id"]: r for r in records.get("runs", ())}
+    tasks = {t["id"]: t for t in records.get("tasks", ())}
+    live = [
+        r
+        for r in records.get("reservations", ())
+        if r["released_at"] is None and r["run"] is not None
+    ]
+    for id in sorted(started):
+        run = runs.get(id)
+        if run is None or run["finished_at"] is not None:
+            continue
+        needs = tasks[run["task"]]["needs"] if run["task"] in tasks else {}
+        for resource, amount in sorted(needs.items()):
+            have = sum(
+                r["amount"]
+                for r in live
+                if r["run"] == id
+                and (r["node"], r["resource"]) == (run["node"], resource)
+            )
+            if have < amount:
+                findings.append(
+                    f"run {id} is running on {run['node']} and holds {have} of "
+                    f"the {amount} {resource} its task needs"
+                )
+    for r in live:
+        run = runs.get(r["run"])
+        if run is not None and run["finished_at"] is not None:
+            findings.append(
+                f"reservation {r['id']} is live for run {r['run']}, which is "
+                "finished"
+            )
+    return findings
 
 
 def _findings(dump):
@@ -2120,6 +2557,8 @@ def _findings(dump):
                 f"meta: {schema.counter_name(kind)} is not past {max(ids)}, the "
                 f"highest {kind} id"
             )
+    findings += _capacity_findings(dump["records"])
+    findings += _run_findings(dump)
     return findings
 
 

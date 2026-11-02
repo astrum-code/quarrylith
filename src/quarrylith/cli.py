@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""quarrylith's command line: `quarrylith record init|check|dump|load|events
-URL`.
+"""quarrylith's command line: `quarrylith record
+init|check|dump|load|import|events|gauges URL`.
 
 Exit codes: 0 done, 1 `check` found something, 2 refused, 3 the store was
-unavailable (or the outcome is unknown).
+unavailable (or the outcome is unknown). `load` and `import` refuse a dump or
+a document before they open the record, so a refused one writes nothing and
+makes no file.
 """
 
 import argparse
@@ -13,7 +15,8 @@ import os
 import sys
 from pathlib import Path
 
-from .record import contract
+from . import gauges
+from .record import contract, importing
 
 
 def _open(args, **kw):
@@ -73,24 +76,83 @@ def _dump(args):
     return 0
 
 
-def _load(args):
+def _read_json(path, what):
     try:
-        if args.file == "-":
-            dump = json.load(sys.stdin)
-        else:
-            with open(args.file, encoding="utf-8") as source:
-                dump = json.load(source)
+        if path == "-":
+            return json.load(sys.stdin)
+        with open(path, encoding="utf-8") as source:
+            return json.load(source)
     except (OSError, ValueError) as e:
-        raise contract.Refused(f"cannot read the dump {args.file}: {e}") from None
-    record = _open(args, via="load")
+        raise contract.Refused(f"cannot read the {what} {path}: {e}") from None
+
+
+def _load_into(args, dump, via):
+    """Load a whole dump (checked before this opens anything) into the
+    record, making it if there is none. Its head."""
+    record = _open(args, via=via)
     try:
         if not record.initialised:
             record.init()
         record.load(dump)
-        head = record.head()
+        return record.head()
     finally:
         record.close()
+
+
+def _load(args):
+    dump = _read_json(args.file, "dump")
+    contract.check_dump(dump)
+    head = _load_into(args, dump, "load")
     print(f"loaded {head} events into {args.url}")
+    return 0
+
+
+def _import(args):
+    doc = _read_json(args.file, "import document")
+    dump = importing.compose(doc)
+    contract.check_dump(dump)
+    head = _load_into(args, dump, "import")
+    (imported,) = dump["records"]["imports"]
+    counts, tables = imported["counts"], imported["source"]["tables"]
+    print(f"imported {head} events into {args.url}")
+    rows = [("table", "read", "pulled", "left")] + [
+        (t, n, counts["pulled"].get(t, 0), counts["left"].get(t, 0))
+        for t, n in sorted(tables.items())
+    ]
+    wide = max(len(str(r[0])) for r in rows)
+    for name, *numbers in rows:
+        print(f"{name:<{wide}}" + "".join(f" {n:>7}" for n in numbers))
+    for column, count in counts["columns"].items():
+        print(f"dropped {column} {count}")
+    return 0
+
+
+def _quoted(value):
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + text.replace("\n", "\\n") + '"'
+
+
+def _gauges(args):
+    record = _open(args, readonly=True)
+    try:
+        now = args.now if args.now is not None else record.now_ms()
+        window_ms = int(args.window_h * 3_600_000)
+        got = gauges.measure(record, now=now, window_ms=window_ms)
+    finally:
+        record.close()
+    if args.json:
+        out = {
+            name: [{"labels": labels, "value": value} for labels, value in rows]
+            for name, rows in got.items()
+        }
+        print(json.dumps({"now": now, "window_ms": window_ms, "gauges": out}))
+        return 0
+    for gauge in gauges.GAUGES:
+        print(f"# HELP {gauge.name} {gauge.help}")
+        print(f"# UNIT {gauge.name} {gauge.unit}")
+        for labels, value in got[gauge.name]:
+            shown = ",".join(f"{k}={_quoted(v)}" for k, v in labels.items())
+            print(f"{gauge.name}{{{shown}}} {value}")
     return 0
 
 
@@ -144,6 +206,19 @@ def parser():
     command("load", _load, "load a dump into an empty record").add_argument(
         "file", help="the dump, or - for stdin"
     )
+    imports = commands.add_parser(
+        "import", help="check an import document and load it into an empty record"
+    )
+    imports.add_argument("file", help="the import document, or - for stdin")
+    imports.add_argument("--into", dest="url", required=True, help="the record's URL")
+    imports.add_argument("--actor", default=_actor(), help="who, as you name yourself")
+    imports.set_defaults(run=_import)
+    gauged = command("gauges", _gauges, "every gauge's series, computed now")
+    gauged.add_argument("--now", type=int, help="the time, in ms (default: the clock)")
+    gauged.add_argument(
+        "--window-h", type=float, default=24.0, help="the window, in hours"
+    )
+    gauged.add_argument("--json", action="store_true", help="as one JSON object")
     events = command("events", _events, "the journal's events, one JSON per line")
     events.add_argument("--after", type=int, help="the seq to start after")
     events.add_argument("--consumer", help="start after this consumer's cursor")
@@ -163,6 +238,11 @@ def main(argv=None):
         return 2
     try:
         return args.run(args)
+    except importing.ImportRefused as e:
+        print("refused: the import document is not whole:", file=sys.stderr)
+        for problem in e.problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 2
     except contract.Refused as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2

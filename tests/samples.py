@@ -1,9 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Helpers the tests share: a valid record of any kind, made from its
-declaration, and a synthetic import document with neutral names."""
+declaration, a small synthetic import document with neutral names, and the
+sample import document (`import-sample.json`)."""
+
+import json
+from pathlib import Path
 
 from quarrylith.record import schema
 from quarrylith.record.schema import RECORDS
+
+#: The sample import document: synthetic, as an older board's export writes
+#: it, with every kind an import takes. `import-sample-effort.md` is the
+#: effort document its effort `0001` was read from.
+SAMPLE = Path(__file__).resolve().parent / "import-sample.json"
+
+
+def load_sample():
+    """The sample import document, a fresh copy."""
+    return json.loads(SAMPLE.read_text(encoding="utf-8"))
 
 
 def sample(kind, /, **over):
@@ -51,15 +65,7 @@ def make_doc():
             statement="Do the alpha thing",
             order={"rule": "unblocks-then-age"},
         ),
-        sample(
-            "efforts",
-            id="unsorted",
-            slug="unsorted",
-            title="Unsorted",
-            standing="parked",
-            owner="owner-a",
-            created_at=1000,
-        ),
+        schema.unsorted_effort(1000),
     ]
     items = [
         sample(

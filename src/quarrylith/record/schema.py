@@ -17,6 +17,11 @@ measure of it, on both backends.
 Times are `int` milliseconds since the epoch, UTC. No record is ever deleted:
 a record ends by its end fields, the kind's `live`, which may name several (a
 change is open until it is merged or dropped).
+
+A *templet* is the agreed spec of a piece of work, written and reviewed before
+the work is built: an item's `templet` is the number of the item that holds
+the spec it builds to, and a review of kind `templet` judges a spec, as one of
+kind `conformance` judges the work against it.
 """
 
 import copy
@@ -57,7 +62,7 @@ LABEL_FIELDS = {"items": "labels", "tasks": "labels", "nodes": "labels"}
 FLAG_FIELDS = {"items": "flags", "tasks": "flags"}
 NAME_FIELDS = {"nodes": "drivers"}
 
-#: An item's states, the legacy board's nine.
+#: An item's nine states.
 ITEM_STATES = (
     "triage",
     "ready",
@@ -373,6 +378,31 @@ RECORDS = _declare(
     _kind("beats", "run=int", "at=int", journaled=False),
     _kind("cursors", "consumer=str", "seq=int at=int", journaled=False),
 )
+
+#: The effort an item filed with no effort and no parent is linked to.
+UNSORTED = "unsorted"
+#: Its fields, the same wherever it is made: by the record, when an item first
+#: needs it, and by an import. Only its `created_at` differs.
+UNSORTED_EFFORT = {
+    "id": UNSORTED,
+    "slug": UNSORTED,
+    "title": "Unsorted",
+    "standing": "parked",
+    "owner": "record",
+    "statement": "Items filed with no effort",
+    "inputs": {},
+    "tools": {},
+    "budget": {},
+    "evidence": {},
+    "gates": {},
+}
+
+
+def unsorted_effort(at):
+    """The `unsorted` effort, made at `at`: `UNSORTED_EFFORT`'s fields, with
+    every other field its default."""
+    return validate("efforts", {**UNSORTED_EFFORT, "created_at": at})
+
 
 #: The kinds whose key is one id from a counter in `meta` (`next:<kind>`).
 #: A change's `n` has its own, `next:change:<repo>`.

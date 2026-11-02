@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`quarrylith record init|check|dump|load|events` (templet:3159, build
-step 2), on the SQLite backend."""
+"""`quarrylith record init|check|dump|load|import|events|gauges`
+(templet:3159, build steps 2 and 4), on the SQLite backend."""
 
 import json
 import sqlite3
 import subprocess
 import sys
 
-from samples import make_doc
+from samples import SAMPLE, load_sample, make_doc
 
 from quarrylith import cli
 from quarrylith.record.contract import open_record
@@ -67,29 +67,46 @@ def test_init_load_dump_check_and_events(tmp_path, capsys):
 
 def test_check_exits_one_with_findings_and_load_refuses_a_bad_dump(tmp_path, capsys):
     """templet:3159 -- check exits 1 when it has findings, and a refused load
-    exits 2 and writes nothing."""
+    exits 2 and writes nothing: refused before the record is made, it leaves
+    no file."""
     url = f"sqlite:///{tmp_path / 'record.sqlite'}"
+    path = tmp_path / "record.sqlite"
     dump = compose(make_doc())
     dump["records"]["items"] = dump["records"]["items"][:1]
     source = tmp_path / "bad.json"
     source.write_text(json.dumps(dump))
     code, _, err = run(capsys, "record", "load", url, str(source))
     assert code == 2 and "refused" in err
-    record = open_record(url, actor="alpha", via="cli")
-    assert record.head() == 0
-    record.close()
-    path = tmp_path / "record.sqlite"
-    conn = sqlite3.connect(path, isolation_level=None)
-    conn.execute("DROP TRIGGER items_no_delete")
-    conn.close()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bad.json"]
     good = compose(make_doc())
     source.write_text(json.dumps(good))
     assert run(capsys, "record", "load", url, str(source))[0] == 0
     conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute("DROP TRIGGER items_no_delete")
     conn.execute("DELETE FROM items WHERE number = 2")
     conn.close()
     code, out, _ = run(capsys, "record", "check", url)
     assert code == 1 and "items" in out
+
+
+def test_a_refused_import_leaves_no_file(tmp_path, capsys):
+    """templet:3159 -- `record import` refuses before anything is written: a
+    document it cannot read, or one `check_import` refuses (exit 2, every
+    fault named), leaves no record file."""
+    url = f"sqlite:///{tmp_path / 'record.sqlite'}"
+    doc = make_doc()
+    doc["source"]["tables"]["extra"] = 4
+    doc["pulled"][0]["record_key"] = [99]
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(doc))
+    garbled = tmp_path / "garbled.json"
+    garbled.write_text("{not json")
+    code, out, err = run(capsys, "record", "import", str(bad), "--into", url)
+    assert code == 2 and out == ""
+    assert "extra" in err and "99" in err
+    code, out, err = run(capsys, "record", "import", str(garbled), "--into", url)
+    assert code == 2 and err.startswith("refused: cannot read the import document")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bad.json", "garbled.json"]
 
 
 def test_load_exits_two_for_a_dump_it_cannot_read(tmp_path, capsys):
@@ -115,3 +132,35 @@ def test_the_module_runs_as_a_command(tmp_path):
         text=True,
     )
     assert done.returncode == 0, done.stderr
+
+
+def test_gauges_prints_every_gauge(tmp_path, capsys):
+    """templet:3159 -- `record gauges` prints every gauge's series at a given
+    time, as text or as JSON."""
+    url = f"sqlite:///{tmp_path / 'record.sqlite'}"
+    assert run(capsys, "record", "import", str(SAMPLE), "--into", url)[0] == 0
+    now = load_sample()["source"]["read_at"]
+    code, out, err = run(
+        capsys, "record", "gauges", url, "--now", str(now), "--window-h", "720"
+    )
+    assert code == 0, err
+    assert 'unmerged_changes{repo="widgets"} 1' in out.splitlines()
+    assert 'outcomes{kind="agent",outcome="pr"} 1' in out.splitlines()
+    for name in ("capacity", "stalls", "budget_pace"):
+        assert f"# HELP {name} " in out
+    code, out, _ = run(
+        capsys,
+        "record",
+        "gauges",
+        url,
+        "--now",
+        str(now),
+        "--window-h",
+        "720",
+        "--json",
+    )
+    got = json.loads(out)
+    assert got["now"] == now and got["window_ms"] == 720 * 3_600_000
+    assert got["gauges"]["unmerged_changes"] == [
+        {"labels": {"repo": "widgets"}, "value": 1}
+    ]

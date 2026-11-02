@@ -15,9 +15,15 @@ import document, plain JSON (`IMPORT_FORMAT`):
 
 Every table of the older board is named in `pulled` or `left`, and per table
 the pulled rows plus the left rows' counts equal the rows read: nothing
-vanishes unreported. `compose` turns a checked document into a dump, pure: the
-same document gives the same dump, the `imports` record first, then the
-records in `RECORDS` order, then `pulled` and `left`, then the counters.
+vanishes unreported. An `unsorted` effort in the document is the record's own,
+`schema.unsorted_effort`, and every effort link names an effort the document
+holds. `compose` turns a checked document into a dump, pure: the same document
+gives the same dump, the `imports` record first, then the records in `RECORDS`
+order, then `pulled` and `left`, then the counters.
+
+The older board kept runs without tasks. Its reader makes one task per item
+and kind of its runs, labelled `legacy-run:<kind>` (the older board's own name
+for the kind of run, `task` or `review`), so each imported run has its task.
 """
 
 import copy
@@ -109,6 +115,24 @@ def _records(doc, problems):
         keys = schema.sort_keys(schema.key_of(kind, r) for r in good)
         by_key = {tuple(schema.key_of(kind, r)): r for r in good}
         out[kind] = [by_key[tuple(k)] for k in keys]
+    # an effort link names an effort the document holds
+    efforts = {e["id"] for e in out.get("efforts", ())}
+    for link in out.get("effort_links", ()):
+        if link["effort"] not in efforts:
+            key = schema.key_of("effort_links", link)
+            problems.append(
+                f"records.effort_links {key}: no such effort {link['effort']!r} "
+                "in the document"
+            )
+    # `unsorted` is the record's own effort, the same wherever it is made
+    for effort in out.get("efforts", ()):
+        if effort["id"] == schema.UNSORTED:
+            own = schema.unsorted_effort(effort["created_at"])
+            for name in sorted(n for n in own if effort[n] != own[n]):
+                problems.append(
+                    f"records.efforts {schema.UNSORTED}: its {name} is "
+                    f"{effort[name]!r}, not {own[name]!r} (schema.UNSORTED_EFFORT)"
+                )
     return out
 
 
@@ -401,9 +425,10 @@ def _parse(doc):
 
 def check_import(doc):
     """None if `doc` is a whole import document, else ImportRefused listing
-    every fault: every record valid against `RECORDS`, every `pulled` row
-    naming a record the document holds, every legacy table named in `pulled` or
-    `left` with the rows adding up, and the counters past the ids in use."""
+    every fault: every record valid against `RECORDS`, every effort link
+    naming an effort the document holds, every `pulled` row naming a record
+    the document holds, every legacy table named in `pulled` or `left` with
+    the rows adding up, and the counters past the ids in use."""
     problems, _ = _parse(doc)
     if problems:
         raise ImportRefused(problems)

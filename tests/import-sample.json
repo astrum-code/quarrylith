@@ -1,0 +1,1944 @@
+{
+ "format": "quarrylith-import/1",
+ "source": {
+  "name": "legacy-board",
+  "path": "/srv/board/board.sqlite",
+  "schema_version": 1,
+  "last_seq": 120,
+  "read_at": 1793371508596,
+  "tables": {
+   "budget": 3,
+   "changes": 3,
+   "claims": 5,
+   "comments": 6,
+   "cursors": 2,
+   "deps": 3,
+   "digests": 0,
+   "gates": 3,
+   "item_labels": 3,
+   "item_repos": 4,
+   "items": 10,
+   "journal": 120,
+   "mains": 0,
+   "meta": 4,
+   "needs_you": 2,
+   "quarantine": 2,
+   "questions": 2,
+   "ranks": 2,
+   "reviews": 3,
+   "rounds": 5,
+   "runs": 5,
+   "scratch": 1
+  }
+ },
+ "records": {
+  "efforts": [
+   {
+    "id": "0001",
+    "slug": "sort-the-widgets",
+    "title": "Sort the widgets",
+    "standing": "admitted",
+    "owner": "lead",
+    "created_at": 1793371508596,
+    "statement": "Widgets are listed sorted, by size and by colour, on every page that lists them.",
+    "inputs": {
+     "lines": [
+      "the widget list",
+      "the colour table"
+     ]
+    },
+    "tools": {
+     "lines": [
+      "the widgets suite"
+     ]
+    },
+    "budget": {
+     "lines": [
+      "two weeks of one agent"
+     ]
+    },
+    "evidence": {
+     "lines": [
+      "a listing sorted by size",
+      "a listing sorted by colour"
+     ]
+    },
+    "gates": {
+     "lines": [
+      "the widgets suite passes"
+     ]
+    },
+    "order": {
+     "rule": "unblocks-then-age"
+    },
+    "outcome": null,
+    "concluded_at": null
+   },
+   {
+    "id": "unsorted",
+    "slug": "unsorted",
+    "title": "Unsorted",
+    "standing": "parked",
+    "owner": "record",
+    "created_at": 1793371508596,
+    "statement": "Items filed with no effort",
+    "inputs": {},
+    "tools": {},
+    "budget": {},
+    "evidence": {},
+    "gates": {},
+    "order": {
+     "rule": "unblocks-then-age"
+    },
+    "outcome": null,
+    "concluded_at": null
+   }
+  ],
+  "effort_links": [
+   {
+    "effort": "0001",
+    "kind": "item",
+    "target": "10",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "0001",
+    "kind": "item",
+    "target": "11",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "0001",
+    "kind": "item",
+    "target": "12",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "0001",
+    "kind": "item",
+    "target": "13",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "0001",
+    "kind": "item",
+    "target": "18",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "14",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "15",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "16",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "17",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "5",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   }
+  ],
+  "items": [
+   {
+    "number": 5,
+    "kind": "task",
+    "title": "Tidy the widget docs",
+    "state": "done",
+    "role": "beta",
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793015108596,
+    "updated_at": 1793033108596,
+    "closed_at": 1793033108596,
+    "source": "legacy",
+    "source_ref": "https://git.example/acme/widgets/issues/5"
+   },
+   {
+    "number": 10,
+    "kind": "plan",
+    "title": "Plan: sort the widgets",
+    "state": "ready",
+    "role": "alpha",
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793018708596,
+    "updated_at": 1793196308596,
+    "closed_at": null,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 11,
+    "kind": "task",
+    "title": "Sort widgets by size",
+    "state": "in-review",
+    "role": "alpha",
+    "tier": 3,
+    "risk": 3,
+    "parent": 10,
+    "labels": [
+     "area:lists",
+     "legacy:docs-later",
+     "repo:widgets"
+    ],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 1,
+    "overruled_at": null,
+    "created_at": 1793022308596,
+    "updated_at": 1793227508596,
+    "closed_at": null,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 12,
+    "kind": "task",
+    "title": "Sort widgets by colour",
+    "state": "done",
+    "role": "alpha",
+    "tier": 2,
+    "risk": 2,
+    "parent": 10,
+    "labels": [
+     "repo:widgets"
+    ],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 1,
+    "overruled_at": 1793184308596,
+    "created_at": 1793022308596,
+    "updated_at": 1793191508596,
+    "closed_at": 1793191508596,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 13,
+    "kind": "task",
+    "title": "Cache the sorted list",
+    "state": "claimed",
+    "role": "alpha",
+    "tier": 3,
+    "risk": 4,
+    "parent": 5,
+    "labels": [
+     "area:lists",
+     "repo:widgets"
+    ],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793025908596,
+    "updated_at": 1793263508596,
+    "closed_at": null,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 14,
+    "kind": "task",
+    "title": "Widget icons",
+    "state": "triage",
+    "role": null,
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793029508596,
+    "updated_at": 1793029508596,
+    "closed_at": null,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 15,
+    "kind": "task",
+    "title": "Export gadgets",
+    "state": "dropped",
+    "role": "beta",
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [
+     "repo:gadgets"
+    ],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793033108596,
+    "updated_at": 1793119508596,
+    "closed_at": 1793119508596,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 16,
+    "kind": "review",
+    "title": "Review: sort by colour",
+    "state": "done",
+    "role": "gamma",
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "scheduler",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793155508596,
+    "updated_at": 1793169908596,
+    "closed_at": 1793169908596,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 17,
+    "kind": "review",
+    "title": "Review: sort by size",
+    "state": "ready",
+    "role": "gamma",
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "scheduler",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793231108596,
+    "updated_at": 1793231108596,
+    "closed_at": null,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 18,
+    "kind": "task",
+    "title": "Size sort: the docs",
+    "state": "triage",
+    "role": null,
+    "tier": null,
+    "risk": null,
+    "parent": 11,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "alpha",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793234708596,
+    "updated_at": 1793234708596,
+    "closed_at": null,
+    "source": "legacy",
+    "source_ref": null
+   }
+  ],
+  "item_text": [
+   {
+    "number": 5,
+    "body": "The widget docs repeat themselves."
+   },
+   {
+    "number": 10,
+    "body": "Sort the widgets, in three steps."
+   },
+   {
+    "number": 11,
+    "body": "List widgets by size, smallest first."
+   },
+   {
+    "number": 12,
+    "body": "List widgets by colour, by hue."
+   },
+   {
+    "number": 13,
+    "body": "Keep the sorted list, per page."
+   },
+   {
+    "number": 14,
+    "body": "Each widget gets an icon."
+   },
+   {
+    "number": 15,
+    "body": "Write gadgets out as CSV."
+   },
+   {
+    "number": 16,
+    "body": "Review the colour sort."
+   },
+   {
+    "number": 17,
+    "body": "Review the size sort."
+   },
+   {
+    "number": 18,
+    "body": "Say how the size sort orders ties."
+   }
+  ],
+  "deps": [
+   {
+    "id": 1,
+    "number": 13,
+    "blocker": 11,
+    "change": null,
+    "what": null,
+    "added_at": 1793029508596,
+    "added_by": "alpha",
+    "lifted_at": null,
+    "lifted_by": null,
+    "why": ""
+   },
+   {
+    "id": 2,
+    "number": 13,
+    "blocker": null,
+    "change": null,
+    "what": "the cache API",
+    "added_at": 1793029508596,
+    "added_by": "alpha",
+    "lifted_at": 1793083508596,
+    "lifted_by": "beta",
+    "why": ""
+   },
+   {
+    "id": 3,
+    "number": 14,
+    "blocker": null,
+    "change": 2,
+    "what": null,
+    "added_at": 1793209508596,
+    "added_by": "lead",
+    "lifted_at": null,
+    "lifted_by": null,
+    "why": ""
+   }
+  ],
+  "leases": [
+   {
+    "id": 1,
+    "number": 12,
+    "holder": "alpha",
+    "role": "alpha",
+    "fence": 1,
+    "branch": "feat/12-sort-by-colour",
+    "machine": "host-a",
+    "granted_at": 1793047508596,
+    "renewed_at": 1793155508596,
+    "paused_until": null,
+    "expires_at": null,
+    "released_at": 1793191508596,
+    "released_by": "alpha",
+    "why": "closed"
+   },
+   {
+    "id": 2,
+    "number": 13,
+    "holder": "beta",
+    "role": "beta",
+    "fence": 1,
+    "branch": "feat/13-cache",
+    "machine": "host-b",
+    "granted_at": 1793054708596,
+    "renewed_at": 1793054708596,
+    "paused_until": null,
+    "expires_at": 1793313908596,
+    "released_at": 1793119508596,
+    "released_by": "beta",
+    "why": "handed on"
+   },
+   {
+    "id": 3,
+    "number": 13,
+    "holder": "alpha",
+    "role": "alpha",
+    "fence": 2,
+    "branch": "feat/13-cache",
+    "machine": "host-a",
+    "granted_at": 1793263508596,
+    "renewed_at": 1793335508596,
+    "paused_until": null,
+    "expires_at": 1793594708596,
+    "released_at": null,
+    "released_by": null,
+    "why": null
+   },
+   {
+    "id": 4,
+    "number": 11,
+    "holder": "alpha",
+    "role": "alpha",
+    "fence": 1,
+    "branch": "feat/11-sort-by-size",
+    "machine": "host-a",
+    "granted_at": 1793040308596,
+    "renewed_at": 1793220308596,
+    "paused_until": null,
+    "expires_at": null,
+    "released_at": null,
+    "released_by": null,
+    "why": null
+   },
+   {
+    "id": 5,
+    "number": 10,
+    "holder": "alpha",
+    "role": "alpha",
+    "fence": 1,
+    "branch": "feat/10-plan",
+    "machine": "host-a",
+    "granted_at": 1793195048596,
+    "renewed_at": 1793195048596,
+    "paused_until": null,
+    "expires_at": null,
+    "released_at": 1793196308596,
+    "released_by": "alpha",
+    "why": "failed"
+   }
+  ],
+  "tasks": [
+   {
+    "id": 1,
+    "number": 12,
+    "effort": null,
+    "kind": "agent",
+    "labels": [
+     "legacy-run:task"
+    ],
+    "flags": [],
+    "needs": {},
+    "sandbox": "harness",
+    "schedule": null,
+    "not_before": null,
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    },
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 2
+    },
+    "attempts": 2,
+    "state": "done",
+    "created_at": 1793083508596,
+    "ended_at": 1793191508596
+   },
+   {
+    "id": 2,
+    "number": 13,
+    "effort": null,
+    "kind": "agent",
+    "labels": [
+     "legacy-run:task"
+    ],
+    "flags": [],
+    "needs": {},
+    "sandbox": "harness",
+    "schedule": null,
+    "not_before": null,
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    },
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "attempts": 1,
+    "state": "running",
+    "created_at": 1793270708596,
+    "ended_at": null
+   },
+   {
+    "id": 3,
+    "number": 16,
+    "effort": null,
+    "kind": "agent",
+    "labels": [
+     "legacy-run:review"
+    ],
+    "flags": [],
+    "needs": {},
+    "sandbox": "harness",
+    "schedule": null,
+    "not_before": null,
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    },
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "attempts": 1,
+    "state": "done",
+    "created_at": 1793159108596,
+    "ended_at": 1793169908596
+   },
+   {
+    "id": 4,
+    "number": 10,
+    "effort": null,
+    "kind": "agent",
+    "labels": [
+     "legacy-run:task"
+    ],
+    "flags": [],
+    "needs": {},
+    "sandbox": "harness",
+    "schedule": null,
+    "not_before": null,
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    },
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "attempts": 1,
+    "state": "open",
+    "created_at": 1793195108596,
+    "ended_at": null
+   }
+  ],
+  "nodes": [
+   {
+    "name": "legacy",
+    "drivers": [
+     "harness"
+    ],
+    "labels": [],
+    "declared_at": 1793371508596,
+    "retired_at": 1793371508596
+   }
+  ],
+  "runs": [
+   {
+    "id": 1,
+    "task": 1,
+    "attempt": 1,
+    "holder": "alpha",
+    "fence": 1,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": "feat/12-sort-by-colour",
+    "pgid": null,
+    "phase": "limited",
+    "phase_at": 1793119508596,
+    "expect_until": null,
+    "harness": {
+     "class": "standard",
+     "effort": "high",
+     "folder": "work/alpha/runs/1",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": "limited",
+    "reason": "the usage limit",
+    "started_at": 1793083508596,
+    "finished_at": 1793119508596
+   },
+   {
+    "id": 2,
+    "task": 1,
+    "attempt": 2,
+    "holder": "alpha",
+    "fence": 1,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": "feat/12-sort-by-colour",
+    "pgid": null,
+    "phase": "writing the result",
+    "phase_at": 1793151908596,
+    "expect_until": null,
+    "harness": {
+     "class": "standard",
+     "effort": "high",
+     "folder": "work/alpha/runs/2",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": "pr",
+    "reason": null,
+    "started_at": 1793126708596,
+    "finished_at": 1793151908596
+   },
+   {
+    "id": 3,
+    "task": 2,
+    "attempt": 1,
+    "holder": "alpha",
+    "fence": 2,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": "feat/13-cache",
+    "pgid": null,
+    "phase": "coding",
+    "phase_at": 1793299508596,
+    "expect_until": null,
+    "harness": {
+     "class": "standard",
+     "effort": "high",
+     "folder": "work/alpha/runs/3",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": null,
+    "reason": null,
+    "started_at": 1793270708596,
+    "finished_at": null
+   },
+   {
+    "id": 4,
+    "task": 3,
+    "attempt": 1,
+    "holder": "gamma",
+    "fence": null,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": null,
+    "pgid": null,
+    "phase": "writing the result",
+    "phase_at": 1793166308596,
+    "expect_until": null,
+    "harness": {
+     "class": "small",
+     "effort": "low",
+     "folder": "work/gamma/runs/4",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": "review",
+    "reason": null,
+    "started_at": 1793159108596,
+    "finished_at": 1793166308596
+   },
+   {
+    "id": 5,
+    "task": 4,
+    "attempt": 1,
+    "holder": "alpha",
+    "fence": 1,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": "feat/10-plan",
+    "pgid": null,
+    "phase": "starting",
+    "phase_at": 1793195108596,
+    "expect_until": null,
+    "harness": {
+     "class": "standard",
+     "effort": "high",
+     "folder": "work/alpha/runs/5",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": "failed",
+    "reason": "the suite would not start",
+    "started_at": 1793195108596,
+    "finished_at": 1793196308596
+   }
+  ],
+  "run_text": [
+   {
+    "run": 1,
+    "result": "outcome: checkpoint\n\nthe usage limit"
+   },
+   {
+    "run": 2,
+    "result": "outcome: pr\n\n--- widgets\ntitle: Sort widgets by colour"
+   },
+   {
+    "run": 4,
+    "result": "outcome: review\nreviews: #12\n\nverdict: changes"
+   },
+   {
+    "run": 5,
+    "result": "outcome: failed\n\nthe suite would not start"
+   }
+  ],
+  "changes": [
+   {
+    "id": 1,
+    "repo": "widgets",
+    "n": 40,
+    "number": 12,
+    "relation": "closes",
+    "title": "Sort widgets by colour",
+    "branch": "feat/12-sort-by-colour",
+    "head": "a1b2c3d4",
+    "base": "main",
+    "position": null,
+    "draft": false,
+    "url": "https://git.example/acme/widgets/pull/40",
+    "opened_at": 1793151908596,
+    "opened_by": "alpha",
+    "pushed_at": 1793151908596,
+    "merged_at": 1793184308596,
+    "dropped_at": null,
+    "dropped_by": null
+   },
+   {
+    "id": 2,
+    "repo": "widgets",
+    "n": 41,
+    "number": 11,
+    "relation": "closes",
+    "title": "Sort widgets by size",
+    "branch": "feat/11-sort-by-size",
+    "head": "b2c3d4e5",
+    "base": "main",
+    "position": null,
+    "draft": false,
+    "url": null,
+    "opened_at": 1793220308596,
+    "opened_by": "alpha",
+    "pushed_at": 1793223908596,
+    "merged_at": null,
+    "dropped_at": null,
+    "dropped_by": null
+   },
+   {
+    "id": 3,
+    "repo": "gadgets",
+    "n": 7,
+    "number": 15,
+    "relation": "part",
+    "title": "Export gadgets as CSV",
+    "branch": "feat/15-export",
+    "head": "c3d4e5f6",
+    "base": "main",
+    "position": 1,
+    "draft": true,
+    "url": null,
+    "opened_at": 1793083508596,
+    "opened_by": "beta",
+    "pushed_at": null,
+    "merged_at": null,
+    "dropped_at": 1793119508596,
+    "dropped_by": "beta"
+   }
+  ],
+  "change_text": [
+   {
+    "change": 1,
+    "body": "Lists widgets by hue."
+   },
+   {
+    "change": 2,
+    "body": "Lists widgets by size, smallest first."
+   },
+   {
+    "change": 3,
+    "body": "Writes gadgets out as CSV."
+   }
+  ],
+  "checks": [
+   {
+    "change": 1,
+    "head": "a1b2c3d4",
+    "name": "docs",
+    "state": "green",
+    "detail": "",
+    "at": 1793155508596,
+    "by": "scheduler"
+   },
+   {
+    "change": 1,
+    "head": "a1b2c3d4",
+    "name": "test",
+    "state": "green",
+    "detail": "412 passed",
+    "at": 1793155508596,
+    "by": "scheduler"
+   },
+   {
+    "change": 2,
+    "head": "b2c3d4e5",
+    "name": "test",
+    "state": "pending",
+    "detail": "",
+    "at": 1793227508596,
+    "by": "scheduler"
+   }
+  ],
+  "reviews": [
+   {
+    "id": 1,
+    "target": 12,
+    "round": 1,
+    "kind": "pool",
+    "item": 16,
+    "author": "alpha",
+    "heads": {
+     "1": "a1b2c3d4"
+    },
+    "pages": [],
+    "filed_by": "scheduler",
+    "reviewer": "gamma",
+    "verdict": "changes",
+    "findings": [],
+    "filed_at": 1793155508596,
+    "verdict_at": 1793166308596,
+    "read_at": null
+   },
+   {
+    "id": 2,
+    "target": 12,
+    "round": 1,
+    "kind": "user",
+    "item": null,
+    "author": "alpha",
+    "heads": {
+     "1": "a1b2c3d4"
+    },
+    "pages": [],
+    "filed_by": "user",
+    "reviewer": "user",
+    "verdict": "approve",
+    "findings": [],
+    "filed_at": 1793180708596,
+    "verdict_at": 1793180708596,
+    "read_at": null
+   },
+   {
+    "id": 3,
+    "target": 11,
+    "round": 1,
+    "kind": "pool",
+    "item": 17,
+    "author": "alpha",
+    "heads": {
+     "2": "b2c3d4e5"
+    },
+    "pages": [],
+    "filed_by": "scheduler",
+    "reviewer": null,
+    "verdict": null,
+    "findings": [],
+    "filed_at": 1793231108596,
+    "verdict_at": null,
+    "read_at": null
+   }
+  ],
+  "merges": [
+   {
+    "id": 1,
+    "change": 1,
+    "sha": "a1b2c3d4",
+    "commit": "e5f6a7b8",
+    "by": "user",
+    "rule": "legacy",
+    "at": 1793184308596
+   }
+  ],
+  "comments": [
+   {
+    "id": 1,
+    "number": 12,
+    "change": null,
+    "who": "alpha",
+    "body": "claim: alpha",
+    "at": 1793047508596,
+    "mark": "claim",
+    "ref": "claims:1",
+    "source_ref": null
+   },
+   {
+    "id": 2,
+    "number": 12,
+    "change": null,
+    "who": "user",
+    "body": "Decided: sort colours by hue, not by name.",
+    "at": 1793051108596,
+    "mark": "answer",
+    "ref": null,
+    "source_ref": null
+   },
+   {
+    "id": 3,
+    "number": 11,
+    "change": 2,
+    "who": "alpha",
+    "body": "pushed b2c3d4e5",
+    "at": 1793223908596,
+    "mark": null,
+    "ref": null,
+    "source_ref": null
+   },
+   {
+    "id": 4,
+    "number": 13,
+    "change": null,
+    "who": "alpha",
+    "body": "question: which list does the cache hold?",
+    "at": 1793281508596,
+    "mark": "question",
+    "ref": null,
+    "source_ref": null
+   },
+   {
+    "id": 5,
+    "number": 13,
+    "change": null,
+    "who": "user",
+    "body": "answer: the sorted list, per page.",
+    "at": 1793285108596,
+    "mark": "answer",
+    "ref": null,
+    "source_ref": null
+   },
+   {
+    "id": 6,
+    "number": 5,
+    "change": null,
+    "who": "beta",
+    "body": "Done in the docs.",
+    "at": 1793033108596,
+    "mark": null,
+    "ref": null,
+    "source_ref": "9001"
+   }
+  ],
+  "questions": [
+   {
+    "id": 1,
+    "number": 13,
+    "run": 3,
+    "who": "alpha",
+    "kind": "blocked",
+    "text": "Which list does the cache hold?",
+    "asked_at": 1793281508596,
+    "answered_at": 1793285108596,
+    "answered_by": "user",
+    "answer": 5
+   },
+   {
+    "id": 2,
+    "number": 11,
+    "run": null,
+    "who": "alpha",
+    "kind": "pr",
+    "text": "Merge after the colour sort?",
+    "asked_at": 1793223908596,
+    "answered_at": null,
+    "answered_by": null,
+    "answer": null
+   }
+  ],
+  "statements": [
+   {
+    "id": 1,
+    "type": "decision",
+    "effort": null,
+    "number": 12,
+    "text": "Decided: sort colours by hue, not by name.",
+    "who": "user",
+    "at": 1793051108596,
+    "where": "comment:2",
+    "supersedes": null
+   },
+   {
+    "id": 2,
+    "type": "observation",
+    "effort": null,
+    "number": null,
+    "text": "{\"changes_open\":1,\"items\":10,\"open\":6,\"runs_live\":1}",
+    "who": "import",
+    "at": 1793371508596,
+    "where": "board figures",
+    "supersedes": null
+   },
+   {
+    "id": 3,
+    "type": "decision",
+    "effort": "0001",
+    "number": null,
+    "text": "sort colours by hue, not by name.",
+    "who": "lead",
+    "at": 1792972800000,
+    "where": null,
+    "supersedes": null
+   },
+   {
+    "id": 4,
+    "type": "decision",
+    "effort": "0001",
+    "number": null,
+    "text": "the sorted list is cached per page.",
+    "who": "lead",
+    "at": 1793059200000,
+    "where": null,
+    "supersedes": null
+   },
+   {
+    "id": 5,
+    "type": "action",
+    "effort": "0001",
+    "number": null,
+    "text": "the size sort went to review.",
+    "who": "lead",
+    "at": 1793059200000,
+    "where": null,
+    "supersedes": null
+   },
+   {
+    "id": 6,
+    "type": "action",
+    "effort": "0001",
+    "number": null,
+    "text": "the colour sort merged.",
+    "who": "lead",
+    "at": 1793145600000,
+    "where": null,
+    "supersedes": null
+   }
+  ],
+  "holds": [
+   {
+    "id": 1,
+    "number": 14,
+    "who": null,
+    "cause": "attention",
+    "why": "three failed runs",
+    "set_at": 1793213108596,
+    "set_by": "scheduler",
+    "lifted_at": null,
+    "lifted_by": null
+   },
+   {
+    "id": 2,
+    "number": null,
+    "who": "gamma",
+    "cause": "hand",
+    "why": "paused by hand",
+    "set_at": 1793162708596,
+    "set_by": "user",
+    "lifted_at": 1793173508596,
+    "lifted_by": "user"
+   }
+  ],
+  "readings": [
+   {
+    "id": 1,
+    "source": "budget",
+    "kind": "five_hour",
+    "value": {
+     "resets_at": 1793357108596,
+     "run": 3,
+     "status": "allowed",
+     "utilization": 0.2
+    },
+    "at": 1793339108596
+   },
+   {
+    "id": 2,
+    "source": "budget",
+    "kind": "five_hour",
+    "value": {
+     "resets_at": 1793357108596,
+     "run": 3,
+     "status": "allowed",
+     "utilization": 0.3
+    },
+    "at": 1793346308596
+   },
+   {
+    "id": 3,
+    "source": "budget",
+    "kind": "five_hour",
+    "value": {
+     "resets_at": 1793357108596,
+     "run": 3,
+     "status": "allowed_warning",
+     "utilization": 0.82
+    },
+    "at": 1793353508596
+   }
+  ],
+  "beats": [
+   {
+    "run": 1,
+    "at": 1793115908596
+   },
+   {
+    "run": 2,
+    "at": 1793148308596
+   },
+   {
+    "run": 3,
+    "at": 1793367908596
+   },
+   {
+    "run": 5,
+    "at": 1793195408596
+   }
+  ]
+ },
+ "counters": {
+  "next:change:gadgets": 8,
+  "next:change:widgets": 42,
+  "next:changes": 4,
+  "next:comments": 7,
+  "next:deps": 4,
+  "next:efforts": 2,
+  "next:holds": 3,
+  "next:items": 19,
+  "next:leases": 6,
+  "next:merges": 2,
+  "next:questions": 3,
+  "next:readings": 4,
+  "next:reviews": 4,
+  "next:runs": 6,
+  "next:statements": 7,
+  "next:tasks": 5
+ },
+ "pulled": [
+  {
+   "table": "items",
+   "legacy_key": [
+    5
+   ],
+   "record": "items",
+   "record_key": [
+    5
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    10
+   ],
+   "record": "items",
+   "record_key": [
+    10
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    11
+   ],
+   "record": "items",
+   "record_key": [
+    11
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    12
+   ],
+   "record": "items",
+   "record_key": [
+    12
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    13
+   ],
+   "record": "items",
+   "record_key": [
+    13
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    14
+   ],
+   "record": "items",
+   "record_key": [
+    14
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    15
+   ],
+   "record": "items",
+   "record_key": [
+    15
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    16
+   ],
+   "record": "items",
+   "record_key": [
+    16
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    17
+   ],
+   "record": "items",
+   "record_key": [
+    17
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    18
+   ],
+   "record": "items",
+   "record_key": [
+    18
+   ]
+  },
+  {
+   "table": "item_repos",
+   "legacy_key": [
+    11,
+    "widgets"
+   ],
+   "record": "items",
+   "record_key": [
+    11
+   ]
+  },
+  {
+   "table": "item_repos",
+   "legacy_key": [
+    12,
+    "widgets"
+   ],
+   "record": "items",
+   "record_key": [
+    12
+   ]
+  },
+  {
+   "table": "item_repos",
+   "legacy_key": [
+    13,
+    "widgets"
+   ],
+   "record": "items",
+   "record_key": [
+    13
+   ]
+  },
+  {
+   "table": "item_repos",
+   "legacy_key": [
+    15,
+    "gadgets"
+   ],
+   "record": "items",
+   "record_key": [
+    15
+   ]
+  },
+  {
+   "table": "item_labels",
+   "legacy_key": [
+    11,
+    "area:lists"
+   ],
+   "record": "items",
+   "record_key": [
+    11
+   ]
+  },
+  {
+   "table": "item_labels",
+   "legacy_key": [
+    11,
+    "docs-later"
+   ],
+   "record": "items",
+   "record_key": [
+    11
+   ]
+  },
+  {
+   "table": "item_labels",
+   "legacy_key": [
+    13,
+    "area:lists"
+   ],
+   "record": "items",
+   "record_key": [
+    13
+   ]
+  },
+  {
+   "table": "changes",
+   "legacy_key": [
+    1
+   ],
+   "record": "changes",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "changes",
+   "legacy_key": [
+    2
+   ],
+   "record": "changes",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "changes",
+   "legacy_key": [
+    3
+   ],
+   "record": "changes",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "comments",
+   "legacy_key": [
+    1
+   ],
+   "record": "comments",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "comments",
+   "legacy_key": [
+    2
+   ],
+   "record": "comments",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "comments",
+   "legacy_key": [
+    3
+   ],
+   "record": "comments",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "comments",
+   "legacy_key": [
+    4
+   ],
+   "record": "comments",
+   "record_key": [
+    4
+   ]
+  },
+  {
+   "table": "comments",
+   "legacy_key": [
+    5
+   ],
+   "record": "comments",
+   "record_key": [
+    5
+   ]
+  },
+  {
+   "table": "comments",
+   "legacy_key": [
+    6
+   ],
+   "record": "comments",
+   "record_key": [
+    6
+   ]
+  },
+  {
+   "table": "claims",
+   "legacy_key": [
+    1
+   ],
+   "record": "leases",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "claims",
+   "legacy_key": [
+    2
+   ],
+   "record": "leases",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "claims",
+   "legacy_key": [
+    3
+   ],
+   "record": "leases",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "claims",
+   "legacy_key": [
+    4
+   ],
+   "record": "leases",
+   "record_key": [
+    4
+   ]
+  },
+  {
+   "table": "claims",
+   "legacy_key": [
+    5
+   ],
+   "record": "leases",
+   "record_key": [
+    5
+   ]
+  },
+  {
+   "table": "deps",
+   "legacy_key": [
+    1
+   ],
+   "record": "deps",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "deps",
+   "legacy_key": [
+    2
+   ],
+   "record": "deps",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "deps",
+   "legacy_key": [
+    3
+   ],
+   "record": "deps",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "runs",
+   "legacy_key": [
+    1
+   ],
+   "record": "runs",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "runs",
+   "legacy_key": [
+    2
+   ],
+   "record": "runs",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "runs",
+   "legacy_key": [
+    3
+   ],
+   "record": "runs",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "runs",
+   "legacy_key": [
+    4
+   ],
+   "record": "runs",
+   "record_key": [
+    4
+   ]
+  },
+  {
+   "table": "runs",
+   "legacy_key": [
+    5
+   ],
+   "record": "runs",
+   "record_key": [
+    5
+   ]
+  },
+  {
+   "table": "questions",
+   "legacy_key": [
+    1
+   ],
+   "record": "questions",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "questions",
+   "legacy_key": [
+    2
+   ],
+   "record": "questions",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "reviews",
+   "legacy_key": [
+    1
+   ],
+   "record": "reviews",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "reviews",
+   "legacy_key": [
+    2
+   ],
+   "record": "reviews",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "reviews",
+   "legacy_key": [
+    3
+   ],
+   "record": "reviews",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "gates",
+   "legacy_key": [
+    1,
+    "a1b2c3d4",
+    "docs"
+   ],
+   "record": "checks",
+   "record_key": [
+    1,
+    "a1b2c3d4",
+    "docs"
+   ]
+  },
+  {
+   "table": "gates",
+   "legacy_key": [
+    1,
+    "a1b2c3d4",
+    "test"
+   ],
+   "record": "checks",
+   "record_key": [
+    1,
+    "a1b2c3d4",
+    "test"
+   ]
+  },
+  {
+   "table": "gates",
+   "legacy_key": [
+    2,
+    "b2c3d4e5",
+    "test"
+   ],
+   "record": "checks",
+   "record_key": [
+    2,
+    "b2c3d4e5",
+    "test"
+   ]
+  },
+  {
+   "table": "budget",
+   "legacy_key": [
+    1
+   ],
+   "record": "readings",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "budget",
+   "legacy_key": [
+    2
+   ],
+   "record": "readings",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "budget",
+   "legacy_key": [
+    3
+   ],
+   "record": "readings",
+   "record_key": [
+    3
+   ]
+  },
+  {
+   "table": "quarantine",
+   "legacy_key": [
+    1
+   ],
+   "record": "holds",
+   "record_key": [
+    1
+   ]
+  },
+  {
+   "table": "quarantine",
+   "legacy_key": [
+    2
+   ],
+   "record": "holds",
+   "record_key": [
+    2
+   ]
+  },
+  {
+   "table": "meta",
+   "legacy_key": [
+    "next_number"
+   ],
+   "record": "meta",
+   "record_key": [
+    "next:items"
+   ]
+  },
+  {
+   "table": "meta",
+   "legacy_key": [
+    "next_change:gadgets"
+   ],
+   "record": "meta",
+   "record_key": [
+    "next:change:gadgets"
+   ]
+  },
+  {
+   "table": "meta",
+   "legacy_key": [
+    "next_change:widgets"
+   ],
+   "record": "meta",
+   "record_key": [
+    "next:change:widgets"
+   ]
+  }
+ ],
+ "left": [
+  {
+   "table": "journal",
+   "legacy_key": null,
+   "count": 120,
+   "why": "the old board's own history, readable in its file"
+  },
+  {
+   "table": "ranks",
+   "legacy_key": null,
+   "count": 2,
+   "why": "retired: the order replaces them"
+  },
+  {
+   "table": "needs_you",
+   "legacy_key": null,
+   "count": 2,
+   "why": "derived, and rebuilt from the record"
+  },
+  {
+   "table": "digests",
+   "legacy_key": null,
+   "count": 0,
+   "why": "empty"
+  },
+  {
+   "table": "rounds",
+   "legacy_key": null,
+   "count": 5,
+   "why": "the old loop's own accounting, behind the figures observation"
+  },
+  {
+   "table": "mains",
+   "legacy_key": null,
+   "count": 0,
+   "why": "derived from git, and empty"
+  },
+  {
+   "table": "cursors",
+   "legacy_key": null,
+   "count": 2,
+   "why": "the old journal's consumers"
+  },
+  {
+   "table": "scratch",
+   "legacy_key": null,
+   "count": 1,
+   "why": "an unknown table"
+  },
+  {
+   "table": "meta",
+   "legacy_key": [
+    "lease_days"
+   ],
+   "count": 1,
+   "why": "meta beyond the counters"
+  },
+  {
+   "table": "items",
+   "legacy_key": null,
+   "column": "source",
+   "count": 10,
+   "why": "every imported record is legacy"
+  },
+  {
+   "table": "comments",
+   "legacy_key": null,
+   "column": "source",
+   "count": 6,
+   "why": "every imported record is legacy"
+  },
+  {
+   "table": "runs",
+   "legacy_key": null,
+   "column": "pid",
+   "count": 4,
+   "why": "a process of the old host"
+  },
+  {
+   "table": "budget",
+   "legacy_key": null,
+   "column": "source",
+   "count": 3,
+   "why": "the reading's source is budget"
+  }
+ ]
+}

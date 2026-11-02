@@ -132,6 +132,10 @@ def in_flight(rec, clock):
     other = start(rec, j, holder="beta")
     rec.release_reservation(held[0], "the cache shrank")
     finish(rec, other, "failed", reason="exit 1")
+    # the job's own reservation, which its end releases in the same event
+    rec.reserve(
+        "n1", {"memory": 256}, task=j, holder="beta", from_at=clock(), until_at=None
+    )
     rec.end_task(j, "failed", "gave up")
     rec.set_capacity("n2", "slots", 1, "slots")
     rec.retire_node("n2")
@@ -637,6 +641,12 @@ def test_the_replay_holds_over_work_in_flight_and_a_dump_loads(record, clock, tm
     for kind in ("leases", "tasks", "nodes", "capacity", "reservations", "runs"):
         assert dump["records"][kind], kind
     assert dump["records"]["run_text"] and dump["bookkeeping"]["beats"]
+    (ended,) = [e for e in dump["journal"] if e["kind"] == "task.end"]
+    assert ended["data"]["released"] and all(
+        v["released_at"] == ended["at"]
+        for k, _, v in ended["puts"]
+        if k == "reservations"
+    )
     assert record.check() == []
     for name in sorted(contract.BACKENDS):
         if name not in URLS:

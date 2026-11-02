@@ -435,7 +435,8 @@ class SqliteRecord(Record):
             yield
         except BaseException as e:
             stuck = self._rollback()
-            if stuck:
+            # an interrupt stays an interrupt, even past a failed rollback
+            if stuck and isinstance(e, Exception):
                 raise Unavailable(f"{self.path}: {e}{stuck}") from e
             if isinstance(e, sqlite3.IntegrityError):
                 raise Refused(f"the store refused it: {e}") from e
@@ -506,9 +507,14 @@ class SqliteRecord(Record):
         sql = STATEMENTS[kind]
         row = schema.validate(kind, row)
         upsert = sql.upsert
+        # a cursor takes the larger seq, a beat the later time
         if kind == "cursors":
             upsert = upsert.replace(
                 '"seq" = excluded."seq"', '"seq" = MAX("seq", excluded."seq")'
+            )
+        elif kind == "beats":
+            upsert = upsert.replace(
+                '"at" = excluded."at"', '"at" = MAX("at", excluded."at")'
             )
         self._conn.execute(upsert, sql.values(row))
 

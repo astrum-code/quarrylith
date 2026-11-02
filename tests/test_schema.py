@@ -383,13 +383,15 @@ def test_label_grammar():
 
 
 def test_a_nodes_drivers_are_a_sorted_list_of_strs():
-    """templet:3159 -- a node's drivers are a sorted list of strs."""
+    """templet:3159 -- a node's drivers are a sorted list of strs, with no
+    repeat."""
     assert schema.check_names(["podman", "process", "vm"]) == [
         "podman",
         "process",
         "vm",
     ]
-    for bad in (["vm", "process"], ["vm", 1], "vm", {"vm": 1}):
+    bad_ones = (["vm", "process"], ["vm", 1], "vm", {"vm": 1}, ["podman", "podman"])
+    for bad in bad_ones:
         with pytest.raises(SchemaError, match="nodes.drivers"):
             schema.validate("nodes", sample("nodes", drivers=bad))
 

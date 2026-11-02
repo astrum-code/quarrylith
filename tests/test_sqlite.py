@@ -309,6 +309,37 @@ def test_a_failed_rollback_is_an_error_never_silent(record, where, raised):
     assert record.check() == []
 
 
+class Interrupting(Failing):
+    """A connection whose statements starting with `word` raise an interrupt,
+    and whose ROLLBACK fails."""
+
+    def __init__(self, conn, word, interrupt):
+        super().__init__(conn, "ROLLBACK")
+        self.word = word
+        self.interrupt = interrupt
+
+    def execute(self, sql, *args):
+        if sql.lstrip().upper().startswith(self.word):
+            raise self.interrupt()
+        return super().execute(sql, *args)
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_is_kept_when_the_rollback_also_fails(record, interrupt):
+    """An interrupt inside an operation whose ROLLBACK also fails is raised as
+    itself, never turned into Unavailable."""
+    admitted(record)
+    conn = record._conn
+    record._conn = Interrupting(conn, 'INSERT INTO "ITEMS"', interrupt)
+    with pytest.raises(interrupt):
+        record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
+    assert conn.in_transaction is True
+    conn.execute("ROLLBACK")
+    record._conn = conn
+    record.file_item("task", "t", "b", filed_by="alpha", effort="0001")
+    assert record.check() == []
+
+
 def test_check_reports_an_item_with_no_effort_link(url, record):
     """check() reports an item whose effort link was ended behind the
     journal's back, beside the replay's finding; and file_item refuses a child

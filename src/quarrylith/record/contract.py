@@ -802,17 +802,22 @@ class Record(abc.ABC):
 
     def effective_labels(self, task_id):
         """A task's effective labels: its item's, then its own, merged by key
-        (the task's winning), sorted as labels are stored. Never stored."""
+        (the task's winning: its labels of a key replace all of the item's of
+        that key, one or several), sorted as labels are stored. Never
+        stored."""
         with self.reading():
             task = self.get("tasks", task_id)
             if task is None:
                 raise Refused(f"no task {task_id}")
             number = task["number"]
             item = self.get("items", number) if number is not None else None
-        merged = {}
-        for label in (item["labels"] if item else []) + task["labels"]:
-            merged[label.split(":", 1)[0]] = label
-        return sorted(merged.values())
+        own = {label.split(":", 1)[0] for label in task["labels"]}
+        kept = [
+            label
+            for label in (item["labels"] if item else [])
+            if label.split(":", 1)[0] not in own
+        ]
+        return sorted(kept + task["labels"])
 
     # -- the journal, delivered -----------------------------------------------
 

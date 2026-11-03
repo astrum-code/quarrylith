@@ -4,10 +4,14 @@ version = "0.1.0"
 description = "The queue's record: one contract over SQLite and Henge, its journal, its fold and the import of a legacy board"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11,<4.0"
-# No runtime dependencies: the declarations, the fold, the import and the
-# SQLite backend are standard library only.
-dependencies = []
+requires-python = ">=3.12,<4.0"   # henge-store-client's floor
+# One runtime dependency, the client of a Henge store, imported only by the
+# Henge backend (quarrylith.record.henge). The declarations, the fold, the
+# import and the SQLite backend are standard library only.
+dependencies = [
+    "henge-store-client>=0.11,<0.12",   # Store.connect, sync, durability
+    "henge-core>=0.7,<0.10",            # the client's own; named for its source
+]
 
 [project.scripts]
 quarrylith = "quarrylith.cli:main"
@@ -19,7 +23,18 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 packages = [{ include = "quarrylith", from = "src" }]
 
+# Where the client comes from: its own repo, pinned by poetry.lock (and
+# henge-core, which it depends on, from its own).
+[tool.poetry.dependencies]
+henge-core = { git = "https://github.com/astrum-code/henge-core.git", branch = "main" }
+henge-store-client = { git = "https://github.com/astrum-code/henge-store-client.git", branch = "main" }
+
+# Tools for working on it, never part of the package: `poetry install`
+# brings them; `poetry install --without dev` does not. henge-store-serve
+# runs the store the Henge backend's tests connect to, and only the tests:
+# nothing under src/ imports it.
 [tool.poetry.group.dev.dependencies]
+henge-store-serve = { git = "https://github.com/astrum-code/henge-store-serve.git", branch = "main" }
 pytest = ">=8.0.0"
 flake8 = ">=7.0.0"
 black = ">=24.0"

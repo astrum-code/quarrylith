@@ -134,7 +134,7 @@ store (Rationale). Its modules:
 
 | module | holds |
 |---|---|
-| `quarrylith.record.schema` | `RECORDS`: every record kind, declared once (below); `REFERENCES`, the fields that name another record; the limits; the label and flag grammar; the key order |
+| `quarrylith.record.schema` | `RECORDS`: every record kind, declared once (below); `REFERENCES`, the fields that name another record; the limits; the label and flag grammar, with `MULTI_VALUED_LABELS`, the label keys that may repeat; the key order |
 | `quarrylith.record.events` | `Event`, `EVENT_KINDS`, `apply(view, event)`: the fold |
 | `quarrylith.record.contract` | `Record` (an `abc.ABC`), the operations written once over it, `open_record`, `BACKENDS`, `Refused`, `Unavailable`, `Unknown`; `check_dump(dump)`, `load`'s checks with no store; `efforts_of(reader, item)`, an item's efforts (its own links, else its parent chain's) |
 | `quarrylith.record.sqlite` | `SqliteRecord` |
@@ -242,13 +242,18 @@ an item first needs it, whoever files, and the import makes the same.
 
 **Labels and flags.** A label is `key:value`: the key `[a-z][a-z0-9_.-]*`, the
 value `[A-Za-z0-9][A-Za-z0-9_.-]*` (it may also hold `/`), so `repo:benchLith`
-and `tier:3` are labels and `Repo:x` and `3tier:x` are not; at most one label per key on a record. A flag is
+and `tier:3` are labels and `Repo:x` and `3tier:x` are not. A record holds
+at most one label per key, but for the keys `schema.MULTI_VALUED_LABELS`
+names, `legacy` and `repo`, which may repeat with different values: an item
+in two repos carries `repo:gadgets` and `repo:widgets`. No label is on a
+record twice, whatever its key. A flag is
 a word of the key's alphabet, optionally with a `:qualifier` (`needs:lab`).
 The keys `effort` and `state` are refused as labels: effort links are
 records, and the state is a field. Labels are stored sorted. A task's
 **effective labels** are its item's, then its own, by key, the task's
-winning. A computed read, `effective_labels(task)`, gives them, and they are
-never stored twice.
+winning: the task's labels of a key replace all of the item's of that key,
+one or several. A computed read, `effective_labels(task)`, gives them, and
+they are never stored twice.
 
 **Limits** (`schema.LIMITS`), one set on both backends: a `str` field at
 most 256 KiB, a `json` field at most 256 KiB encoded, a key field and a
@@ -931,7 +936,7 @@ never reads the legacy file, and bin/lith never imports quarrylith.
 
   | legacy | the record |
   |---|---|
-  | every item, open and closed | `items` with its number, `source="legacy"`, `source_ref` its `github_url` if any; `body` as `item_text`; `role`, `tier`, `risk`, `parent`, `templet`, `review_round`, `overruled_at`; `created_by` as `filed_by`; `item_repos` as `repo:` labels, `item_labels` as labels (one that is not `key:value` as `legacy:<label>`); `kind` as it was; `admitted=True`; its state as it was: **nothing closed, nothing reopened** |
+  | every item, open and closed | `items` with its number, `source="legacy"`, `source_ref` its `github_url` if any; `body` as `item_text`; `role`, `tier`, `risk`, `parent`, `templet`, `review_round`, `overruled_at`; `created_by` as `filed_by`; `item_repos` as `repo:` labels, `item_labels` as labels (one that is not `key:value` as `legacy:<label>`), all of them: an item in two repos carries both `repo:` labels, and each label that is not `key:value` its own `legacy:` label; `kind` as it was; `admitted=True`; its state as it was: **nothing closed, nothing reopened** |
   | `comments` | `comments`, `mark` and `ref` kept, `github_id` as `source_ref` |
   | an `answer`-marked comment whose body starts `Decided` | also a `statements` row of type `decision`, `where` naming the comment |
   | `claims` | `leases`, fences and `role` as they were |
@@ -982,10 +987,12 @@ never reads the legacy file, and bin/lith never imports quarrylith.
   opened.
 - **The sample document**, `tests/import-sample.json` in quarrylith, with the
   effort document it was read from beside it (`import-sample-effort.md`). It
-  is synthetic: ten items under neutral roles and repos, every kind the
+  is synthetic: twelve items under neutral roles and repos, every kind the
   import takes, every legacy table of the mapping, two of them left (`mains`
-  empty, and `scratch`, an unknown table). Step 5's fixture board is built to
-  export a copy of it. Where the mapping above leaves a choice, the sample
+  empty, and `scratch`, an unknown table). One item, #19, is in two repos
+  and has two labels that are not `key:value`, so it carries two `repo:` and
+  two `legacy:` labels. It is step 5's export of its fixture board, which is
+  built to export it. Where the mapping above leaves a choice, the sample
   makes it, and step 5 follows (its tests read each from the sample):
   - the effort's id and `title` are its document's heading's, `# Effort
     <id>: <title>`; its `owner` the document's `Owner:` line; its `slug` the
@@ -1012,8 +1019,13 @@ never reads the legacy file, and bin/lith never imports quarrylith.
     as its `kind`; the legacy `source` (event or limit) is a dropped column
     (user, 2026-11-01);
   - a review's `findings` is `[]`, which the legacy board did not keep;
-  - the figures observation's `text` is the figures as canonical JSON, by
-    `import` at `read_at`, with `where` `board figures`.
+  - the figures observation's `text` is `board_figures`' output over the
+    board as canonical JSON (its `switched_at`, and per figure `n`, `median`
+    and `p90` before and after it), by `import` at `read_at`, with `where`
+    `board figures`. `board_figures` reads the board and no clock, so two
+    exports of one board give the same figures. The sample's board has a
+    `switched_at` and the rows for a value on both sides of it, but
+    `finish to merge-ready`, which is after the switch only.
 
 ### Gauges
 
@@ -1172,7 +1184,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   fields, match and live field, and a record with an undeclared field or a
   wrong type is refused
 - [ ] each of these is refused: a label that is not `key:value`, a second
-  label of one key, an `effort:` or `state:` label, a field past its limit,
+  label of one key but `legacy` and `repo`, a label twice, an `effort:` or
+  `state:` label, a field past its limit,
   a NaN or infinite float, an int outside signed 64 bits, a lone surrogate,
   and a `json` or null key field
 - [ ] an operation whose journal entry, the event and its priors by
@@ -1968,3 +1981,18 @@ client alone is the dependency (above).
   none at either end; "any of them" for `check()`'s four findings; "or
   `None` given" for `open_or_update_change`'s `number`; two lines reflowed
   (this PR)
+- 2026-11-03 proposed: the label rule: `schema.MULTI_VALUED_LABELS`, the
+  keys `legacy` and `repo`, may repeat with different values; every other
+  key one label per record; no label twice; a task's labels of a key replace
+  all of its item's of that key in its effective labels; in the module
+  table, under "Labels and flags" and in the acceptance item (the user's
+  decision of 2026-11-03 on step 5: named multi-valued label keys) (this PR)
+- 2026-11-03 proposed: the mapping's `item_repos` and `item_labels`: every
+  row arrives, an item in two repos with both `repo:` labels and each label
+  that is not `key:value` its own `legacy:` label, not the first of a key
+  (the user's decision of 2026-11-03 on step 5) (this PR)
+- 2026-11-03 proposed: the sample document's description: twelve items, #19
+  in two repos with two `legacy:` labels, the sample step 5's export of its
+  board; the figures observation `board_figures`' output, both halves showing
+  (the user's decisions of 2026-11-03 on step 5: the figures as the
+  mapping says, every repo and legacy label) (this PR)

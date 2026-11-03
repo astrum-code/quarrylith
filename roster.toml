@@ -1,0 +1,329 @@
+# The roster: who works on what in the astrum-code repos.
+#
+# Synced from benchLith's agent-rules/roster.toml by `bin/lith rules`, next
+# to AGENTS.md. Change it there; an edit in any other repo is overwritten
+# by the next sync. AGENTS.md ("How work is assigned") says how to use it.
+#
+# Each standing role owns some repos, and carries the rules that hold for
+# that work. A worker (role "worker", identity `worker-<something unique>`)
+# owns nothing: it works only through a claimed issue, and follows the
+# rules of the role that owns each repo it touches.
+
+# Where tasks live: the issues of this repo, labelled role:*, repo:* and
+# status:*.
+board = "astrum-code/benchLith"
+
+# How many agents `bin/lith launch` and the sweep run at once, and how many
+# of those slots new work leaves free while a review is waiting (reviews
+# start first, so a PR is never stuck behind new work). `launch --max N`
+# overrides `max`; without it bin/lith falls back to MAX_AGENTS (8).
+#
+# The lab (issue #1274): lab_cells is how many container or VM cells run at
+# once on the host, for every agent together (a host-wide lock in the agents
+# folder; the Podman machine overloaded at 12 agents); lab_min_free_mb is the
+# memory a cell needs free in the Podman machine to start; lab_timeout_min is
+# how long a cell waits for a slot before it fails.
+#
+# `prepare` (#1205): how many starts a launch round prepares at once --
+# workspaces brought up to date from the local git cache, their scope
+# checked out and linked -- before it claims and spawns them, one by one, in
+# the board's order (default 6).
+[launch]
+max = 4
+# Codex's own concurrent cap, apart from Claude's `max` and its
+# [launch.budget] pacing. User decision, 2026-10-25 (#2554): after Claude's
+# reset, 2026-10-27 04:00, five slots: one for a long supervised run, four
+# for fast tasks and reviews. Reserving the long-run slot awaits #1376.
+codex_max = 3
+# User decision, 2026-10-28 (#3058): local runs get one slot beside
+# Codex's cap, so the local-model experiment does not wait for cloud slots.
+local_max = 1
+review_slots = 2
+lab_cells = 2
+lab_min_free_mb = 2048
+lab_timeout_min = 45
+prepare = 6
+# User decision, 2026-10-25 (#2505): while either harness is stopped,
+# allow risk <= 4 cross-reviews on the author's harness, by another worker.
+# Risk 5+ and deep reviews keep waiting for their cross-harness reviewer.
+cross_review_fallback_risk = 4
+
+# Lanes (#989): a project's share of the pool, counted inside `max`, never
+# added to it. `min` is a floor -- while the lane has ready work and fewer
+# than `min` agents running, the launcher starts one of its issues before
+# other new work (reviews still come first) -- and `max` a ceiling. A lane's
+# issues are those whose `repo:` labels fall in its `repos`, whatever the
+# role: its standing role and instances, or a worker under that role's
+# rules. The game: up to four (two for content and review,
+# two for engine; `mud` has two instances, and the second takes an issue
+# only if it carries the `parallel` label, as both work MUDLith, until #784).
+[launch.lanes]
+# Until #1376's lanes land, the user's order (2026-10-24) is developer
+# launch path, membership prerequisites, team edition, then the game and
+# everything else in idle slots. #1376's first configuration keeps this order.
+game = { min = 0, max = 4, repos = ["MUDLith"] }
+
+# The budget (#2172; user, 2026-10-24): at a warning on either window
+# (five-hour or seven-day; the tighter one counts) the launch does not stop,
+# it paces. `warning_max` is how many agents run at a warning (default 2),
+# in the board's usual order; `stop_at` the utilization at which nothing new
+# starts until the reset (default 0.95), leaving the rest for the user's own
+# sessions. A rejection still holds until the reset, and `launch --force`
+# still overrides the warning.
+[launch.budget]
+warning_max = 2
+stop_at = 0.95
+
+# The scheduler (#1425): once the board is local, `bin/lith scheduler run`
+# wakes on the board's journal, on a run's exit and on its own timers, and
+# runs the sweep's steps for what changed. Each a whole number (out of range:
+# its default). `fallback_minutes`: between its fallback rounds, every step
+# at once; `batch_ms`: a burst's debounce; `launch_gap_seconds`: the least
+# time between two launch rounds; `beat_seconds`: the liveness and budget
+# readings; `exit_poll_seconds`: the exit watcher's poll where there is no
+# kqueue; `gates`: the local gate's runs at once (0 turns the gate off, and
+# with it the sweep's merges). `gates = 2` is the user's call (2026-10-22):
+# about 30 approved changes wait at 10-30 minutes each; 3 once #1903 gives
+# gate runs a time limit.
+[scheduler]
+fallback_minutes = 20
+batch_ms = 500
+launch_gap_seconds = 15
+beat_seconds = 60
+exit_poll_seconds = 5
+gates = 2
+
+# benchLith suite: 1,809 tests, 78.6 min idle; 90 min timed out under load (user, 2026-10-27)
+[scheduler.gate_repo_seconds]
+benchLith = 9000
+
+# `instances = N` lets a standing role have N agents at once: the role
+# itself and `<role>-2` .. `<role>-N` (`bin/lith workspace henge-2`). An
+# instance takes the role's issues and follows its entry, but claims,
+# commits and opens PRs under its own name. By default no two instances
+# work the same repo at once; the `parallel` label on an issue allows it.
+#
+# Which model an agent runs on is not a role's: it comes from its issue's
+# `tier:N` score (and `risk:N` sets the reviews and merge rights), the
+# one table in bin/lith (SCORE_POLICY; AGENTS.md, "Tiers: the scores").
+
+[roles.coordinator]
+summary = "The manager: turns the user's goals into issues on the board, keeps it honest, dispatches, and brings the user only what needs them."
+owns = []
+never = [
+  "Merge a pull request -- only the user merges.",
+  "Write code or docs inside a role's repos; file an issue for that role instead.",
+  "Switch, reset, stash or commit in another agent's checkout or workspace.",
+  "Release someone's claim without a comment saying why (stale, reassigned, ...).",
+]
+notes = [
+  "Works from the shared benchLith checkout, with the `coordinate` skill.",
+]
+
+[roles.planner]
+summary = "The planner: works interactively with the user on goals and designs; reads code, plans and docs across every repo. Its output is plan issues for the coordinator."
+owns = []
+never = [
+  "Write code or docs in any repo -- the planner reads; it does not edit.",
+  "Open a pull request.",
+  "Claim or relabel a task issue.",
+  "File role:<role> task issues itself -- the coordinator splits a plan into those.",
+]
+notes = [
+  "Runs interactively (VS Code or the CLI), never headless via `bin/lith launch`, from the shared benchLith checkout, read-only.",
+  "Files each agreed plan as one issue on the board labelled `plan`, `role:coordinator` and `status:ready`, with the plan template's sections (.github/ISSUE_TEMPLATE/plan.md). AGENTS.md ('Plans') says how it flows from there.",
+]
+
+[roles.workbench]
+summary = "benchLith itself: bin/lith, the skills, agent-rules (AGENTS.md and this roster), the workspace tooling; and quarrylith, the queue's contract and scheduler policy (effort 0001)."
+owns = ["benchLith", "quarrylith"]
+instances = 4
+never = [
+  "Change agent-rules without a PR the user merges; the sync then opens a PR in every repo.",
+]
+keeps_current = [
+  "docs/ATLAS.md -- `bin/lith docs index` writes it; commit it with any change to a pinned page.",
+]
+
+[roles.henge]
+summary = "Henge: the ring and transport (core), the storage client, the storage server, the API gateway, the human docs and design plan (henge-docs), and the private tenancy plugin (henge-tenancy)."
+owns = ["henge-core", "henge-store-client", "henge-store-serve", "henge-gateway", "henge-docs", "henge-tenancy"]
+instances = 2
+keeps_current = [
+  "henge-docs/DASHBOARD.md -- with every Henge step, what a dashboard can read and do (exact answer shapes), the gaps it hits, and what is coming. The same change as the step: the henge-docs PR beside the code PR, each naming the other. Move items from 'Coming' to 'What it can read' as they land. VistaLith's agent plans from it.",
+  "The human docs a step changes (each repo's README; henge-docs' manual, BENCH*, CHAOS, PLAN.md) -- in the same commit as the step, or the henge-docs PR beside it, named in both.",
+]
+notes = [
+  "A change a consumer needs (modellith, avenlith, vistalith, meshlith, MUDLith) is that consumer's PR, filed as an issue for its role -- not edited from here.",
+  "The dev clusters dev-a and dev-b (VistaLith's devcluster.py, ports 17300-17349) may be reused, even wiped, for Henge live checks when there is something for the user to see. Use VistaLith's tooling to run them; say when they are up.",
+  "Wire messages are msgpack, never pickle (remote code execution once the mesh spans machines) and never JSON.",
+]
+
+[roles.vistalith]
+summary = "VistaLith: the web dashboard for Henge storage clusters."
+owns = ["vistalith"]
+never = [
+  "Edit anything outside the vistalith repo: no henge code or docs (DASHBOARD.md included), no MUDLith scripts/cluster.py, policy or keys files, no root pyproject.toml. Reading them is fine.",
+  "Start, stop or write to the shared Podman cluster. Reading it is fine.",
+  "Run a henge cluster any way but vistalith/dev/devcluster.py.",
+]
+notes = [
+  "Own dev clusters only through dev/devcluster.py: plain processes, no Podman or scripts/cluster.py, ports 17300-17399 on 127.0.0.1, state in dev/run/, stop only your own PIDs, keep them small, take them down at the end of a session.",
+  "What VistaLith needs from Henge: an issue on the board for role henge. Steps the operator (the user) must take on a running cluster -- roles, policy, publish rules: docs/OPERATOR.md, as before.",
+  "Plan from henge-docs/DASHBOARD.md; the henge role keeps it current.",
+]
+
+[roles.meshlith]
+summary = "MeshLith: the execution mesh, and later the CI/CD and git mirrors (see its docs/CICD.md)."
+owns = ["meshlith"]
+never = [
+  "Edit anything outside the meshlith repo; henge needs go on the board for role henge, and into docs/OPERATOR.md.",
+]
+notes = [
+  "Follow PLAN.md's phases. Phase 1 waits for henge 8.4j (henge's order: 8.4h -> 8.4i -> 8.4j); check whether it has landed before starting it.",
+  "Wire messages are msgpack, never pickle and never JSON.",
+]
+
+[roles.laylith]
+summary = "layLith: deployment and configuration management ('our Ansible'), separate from MeshLith."
+owns = ["laylith"]
+keeps_current = [
+  "laylith/PLAN.md and laylith/docs/OPERATOR.md -- in the same commit as the step that changes what they describe.",
+]
+never = [
+  "Edit anything outside the laylith repo: meshlith needs go on the board for role meshlith; henge and its consumers (modellith, avenlith, vistalith, MUDLith) are not touched either. Reading them is fine.",
+]
+notes = [
+  "layLith depends on meshlith; meshlith never depends on layLith.",
+]
+
+[roles.design]
+summary = "ashlar: the design system -- framework-agnostic components over the record's types, and the public gallery that doubles as the style guide (plan #1724)."
+owns = ["ashlar"]
+keeps_current = [
+  "ashlar's README and gallery index -- in the same commit as the component that changes them.",
+]
+never = [
+  "Edit product code: memlith, avenlith, vistalith, memlith-site and the rest. The page owners (mem, vistalith, models) build their pages on ashlar; what they need from it goes on the board for role design.",
+  "Put anything internal in ashlar: it is public-bound (AGENTS.md, 'Public and private'). No role names, plan files or private repo names.",
+]
+notes = [
+  "Components are framework-agnostic over the record's types; the gallery is public.",
+]
+
+[roles.mud]
+summary = "MUDLith: the saiMUD game (smud), its services, content, tests and cluster scripts."
+owns = ["MUDLith"]
+instances = 2
+notes = [
+  "Every step that changes what a human reads about updates those docs (ARCHITECTURE, SETUP, DEMO, ...) in the same commit; name them in the commit. The plan file is not a human doc.",
+  "Wire messages are msgpack (MessageEnvelope.to_bytes/from_bytes), never pickle and never JSON. Payloads are plain data.",
+  "Long gate, smoke and cluster runs go in the background. A stray smud stack holds port 2223 and breaks the next smoke test: check `lsof -ti:2223` first.",
+  "~/Desktop/Artlier/Code/saiMUD-archive is an archive of the old monorepo. Work in the MUDLith repo.",
+]
+
+[roles.models]
+summary = "ModelLith and AvenLith: the data models on Henge, and the web framework on top of them."
+owns = ["modellith", "avenlith", "avenlith-iam"]
+instances = 2
+notes = [
+  "Henge changes these need are issues for role henge.",
+]
+
+[roles.iam]
+summary = "iamLith: identity and access management (plan #83), on top of ModelLith and AvenLith."
+owns = ["iamlith"]
+keeps_current = [
+  "iamlith/PLAN.md -- in the same commit as the step that changes what it describes.",
+]
+never = [
+  "Edit anything outside the iamlith repo: henge, modellith and avenlith needs go on the board for their roles. Reading them is fine.",
+]
+notes = [
+  "iamlith depends on modellith and avenlith.",
+]
+
+[roles.mem]
+summary = "memLith: memory and coordination for agent fleets (plan #86), on top of ModelLith, iamLith and the Henge store client."
+owns = ["memlith", "memlith-site", "memlith-cloud", "memlith-provider", "memlith-claude", "memlith-hermes", "memlith-adapters", "memlith-vscode", "memlith-browser"]
+instances = 4
+keeps_current = [
+  "memlith/PLAN.md -- in the same commit as the step that changes what it describes.",
+  "memlith/docs/PRODUCT.md -- in the same commit as the step that changes what it describes.",
+  "memlith-site/README.md -- the memlith.dev site; keep it true to what memlith and the clients do.",
+  "Each integration repo's README (memlith-provider, -claude, -hermes, -adapters, -vscode, memlith-cloud) -- what it plugs into and how to install it, in the same commit as the step that changes it.",
+]
+never = [
+  "Edit Henge (core, store-client, store-serve, gateway), modellith or iamlith: what memlith needs from them goes on the board for their roles. Reading them is fine.",
+]
+notes = [
+  "memlith depends on modellith, iamlith and henge-store-client; memlith-site (the memlith.dev site, plan #217) depends on avenlith.",
+  "One repo per integration (plans #344, #346, #419): memlith-provider, -claude, -hermes, -adapters and -vscode are public-to-be through #344's mirror, under a permissive licence, so nothing internal goes in them (see AGENTS.md, 'Public and private'). memlith-cloud is a private plugin package and stays private.",
+  "Henge never computes embeddings; memory is data, not instruction (plan #86).",
+]
+
+[roles.templet]
+summary = "The templet role: writes the spec (the templet) of deep work from a plan issue and the owning repo's docs, in a spec-only run, and reviews a built PR for conformance to it, beside the pool's code review. It owns no repo."
+owns = []
+instances = 4
+class = "deep"
+never = [
+  "Touch anything outside `docs/templets/`: no `src/`, no tests, no other doc, no version bump, no pipeline.",
+  "Build the work a templet specs, or fix a build to match it -- a finding goes to the author in a review.",
+  "Change an agreed templet without the coordinator's approval comment (AGENTS.md, 'Templets').",
+  "Pick a choice that is the user's inside a spec -- it goes under 'For the user to decide', or `outcome: blocked`.",
+]
+keeps_current = [
+  "docs/templets/README.md -- the templet skeleton and what a templet is, in benchLith, in the same PR as the rule that changes it.",
+]
+notes = [
+  "Always the deep class (`class = \"deep\"`): `bin/lith launch --spec N` runs the spec-only run as this role, whatever the owning repo's role is, and a launch of any other issue of this role runs at least deep too.",
+  "The owning role reviews the templet PR for feasibility and fit (`outcome: review`, `reviews: #N`): the launcher files that review when the PR opens. A templet the owner finds infeasible comes back here with the findings; the owner never edits it. The user's merge is the agreement.",
+  "The conformance review (`kind: conformance` in the review issue's body; `outcome: review`, `reviews: #N`, a `verdict:` line) is filed by the sweep when a built PR's issue has an attached templet: interfaces as specified, invariants held, every acceptance item a `templet:<issue>` test and unweakened, boundaries respected, the PR's 'not tested' honest. Where the other instance is free it is not the one that wrote the templet. It edits neither the PR nor the page; a finding goes to the author. `status:reviewed` needs its approval and the pool's.",
+  "Reads the plan issue, the issue's *Decided*, the owning repo's code and its atlas pages (`docs/ATLAS.md`) before it writes; a spec names real code, read, not remembered.",
+]
+
+[roles.edge]
+summary = "lintel: the edge, a C data plane with a Python control plane (plan #788)."
+owns = ["lintel"]
+keeps_current = [
+  "lintel/README.md -- what the data and control planes do and how to build and test them, in the same commit as the step that changes it.",
+]
+never = [
+  "Edit henge, meshlith, laylith or their consumers: what lintel needs from them goes on the board for their roles. Reading them is fine.",
+]
+notes = [
+  "lintel is public under the engine's source-available licence (FSL-1.1-Apache-2.0), so nothing internal goes in it (see AGENTS.md, 'Public and private').",
+  "The C data plane is Linux-only; build and test it in the lab's container and VM classes, never on the laptop host.",
+]
+
+[roles.proving]
+summary = "Proving: a long run that proves a scenario end to end in a fresh VM, files every finding instead of fixing it, and reports. Owns no repo and never pushes to one."
+owns = []
+instances = 2
+keeps_current = [
+  "Its scenario's report -- agents/<instance>/runs/<N>/report.md: per step pass or fail with timings, and the commit of every repo it installed. The launcher posts it on the mission issue when the scenario passes or the mission is stopped.",
+]
+never = [
+  "Edit or push to any repo -- the work is in a VM, and what it writes is the findings file and the report.",
+  "Fix a finding in place: a workaround stays in its VM and in the finding's notes, so the real fix is reviewed and planned separately. Filing and going on is the job.",
+  "Merge anything, or install anything on the host (brew, apt, npm -g, sudo): the lab's tools are the operator's, `laylith lab doctor` names them. Installing inside its own VM is the job.",
+  "Use another instance's VM, lab directory or ports, or hold or wait for the smoke lock.",
+]
+notes = [
+  "A mission is a board issue labelled `role:proving` whose body has a `## Scenario` (a `VM:` line, then numbered steps each with `pass:` and `within <time>`); one instance per mission, and each instance its own VM, named `lab-<instance>-<issue>`. AGENTS.md, 'Proving', says the rest.",
+  "Runs long: the launcher resumes it after each usage-limit reset and each checkpoint (`outcome: checkpoint`) until the scenario passes or the mission is stopped. It ends `outcome: report` (no PR).",
+  "Findings go to the findings.md in its run folder, appended as they happen, one entry each, with a suggested owner role.",
+]
+
+[roles.worker]
+summary = "A pool worker: no standing ownership. Takes one claimed issue at a time, from any repo."
+owns = []
+identity = "worker-<something unique>, e.g. worker-cloud-3 or worker-mini-1"
+never = [
+  "Work on anything without claiming its issue first.",
+]
+notes = [
+  "In each repo you touch, follow the never/notes of the role that owns it.",
+  "A review (a kind:review issue, #709) is a run like any other: same rules, no edits to the branch under review, and never your own work.",
+]

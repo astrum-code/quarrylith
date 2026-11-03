@@ -392,7 +392,7 @@ def test_the_gauges_compute_over_the_sample_import(record):
     assert every["outcomes"] == [
         ({"kind": "agent", "outcome": "failed"}, 1),
         ({"kind": "agent", "outcome": "limited"}, 1),
-        ({"kind": "agent", "outcome": "pr"}, 1),
+        ({"kind": "agent", "outcome": "pr"}, 2),
         ({"kind": "agent", "outcome": "review"}, 1),
     ]
     # utilization from 0.2 to 0.82 of the period over four hours

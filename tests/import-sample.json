@@ -4,7 +4,7 @@
   "name": "legacy-board",
   "path": "/srv/board/board.sqlite",
   "schema_version": 1,
-  "last_seq": 120,
+  "last_seq": 121,
   "read_at": 1793371508596,
   "tables": {
    "budget": 3,
@@ -15,19 +15,19 @@
    "deps": 3,
    "digests": 0,
    "gates": 3,
-   "item_labels": 3,
-   "item_repos": 4,
-   "items": 10,
-   "journal": 120,
+   "item_labels": 5,
+   "item_repos": 6,
+   "items": 12,
+   "journal": 121,
    "mains": 0,
-   "meta": 4,
+   "meta": 5,
    "needs_you": 2,
    "quarantine": 2,
    "questions": 2,
    "ranks": 2,
-   "reviews": 3,
-   "rounds": 5,
-   "runs": 5,
+   "reviews": 4,
+   "rounds": 6,
+   "runs": 6,
    "scratch": 1
   }
  },
@@ -163,6 +163,22 @@
     "effort": "unsorted",
     "kind": "item",
     "target": "17",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "19",
+    "at": 1793371508596,
+    "by": "import",
+    "unlinked_at": null
+   },
+   {
+    "effort": "unsorted",
+    "kind": "item",
+    "target": "20",
     "at": 1793371508596,
     "by": "import",
     "unlinked_at": null
@@ -417,6 +433,57 @@
     "closed_at": null,
     "source": "legacy",
     "source_ref": null
+   },
+   {
+    "number": 19,
+    "kind": "task",
+    "title": "Ship widgets with gadgets",
+    "state": "done",
+    "role": "alpha",
+    "tier": 2,
+    "risk": 2,
+    "parent": null,
+    "labels": [
+     "legacy:good-first-issue",
+     "legacy:needs-design",
+     "repo:gadgets",
+     "repo:widgets"
+    ],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "lead",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793236308596,
+    "updated_at": 1793270000000,
+    "closed_at": 1793270000000,
+    "source": "legacy",
+    "source_ref": null
+   },
+   {
+    "number": 20,
+    "kind": "review",
+    "title": "Review: ship together",
+    "state": "done",
+    "role": "gamma",
+    "tier": null,
+    "risk": null,
+    "parent": null,
+    "labels": [],
+    "flags": [],
+    "admitted": true,
+    "filed_by": "scheduler",
+    "must_fix": false,
+    "templet": null,
+    "review_round": 0,
+    "overruled_at": null,
+    "created_at": 1793251800000,
+    "updated_at": 1793260800000,
+    "closed_at": 1793260800000,
+    "source": "legacy",
+    "source_ref": null
    }
   ],
   "item_text": [
@@ -459,6 +526,14 @@
    {
     "number": 18,
     "body": "Say how the size sort orders ties."
+   },
+   {
+    "number": 19,
+    "body": "Release the widget and gadget changes together."
+   },
+   {
+    "number": 20,
+    "body": "Review the release of widgets with gadgets."
    }
   ],
   "deps": [
@@ -685,6 +760,32 @@
     "state": "open",
     "created_at": 1793195108596,
     "ended_at": null
+   },
+   {
+    "id": 5,
+    "number": 19,
+    "effort": null,
+    "kind": "agent",
+    "labels": [
+     "legacy-run:task"
+    ],
+    "flags": [],
+    "needs": {},
+    "sandbox": "harness",
+    "schedule": null,
+    "not_before": null,
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    },
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "attempts": 1,
+    "state": "done",
+    "created_at": 1793240000000,
+    "ended_at": 1793270000000
    }
   ],
   "nodes": [
@@ -828,6 +929,32 @@
     "reason": "the suite would not start",
     "started_at": 1793195108596,
     "finished_at": 1793196308596
+   },
+   {
+    "id": 6,
+    "task": 5,
+    "attempt": 1,
+    "holder": "alpha",
+    "fence": null,
+    "node": "legacy",
+    "sandbox": "harness",
+    "branch": "feat/19-ship-together",
+    "pgid": null,
+    "phase": "writing the result",
+    "phase_at": 1793249000000,
+    "expect_until": null,
+    "harness": {
+     "class": "standard",
+     "effort": "high",
+     "folder": "work/alpha/runs/6",
+     "model": "model-a"
+    },
+    "footprint": {},
+    "cost": {},
+    "outcome": "pr",
+    "reason": null,
+    "started_at": 1793240000000,
+    "finished_at": 1793250000000
    }
   ],
   "run_text": [
@@ -846,6 +973,10 @@
    {
     "run": 5,
     "result": "outcome: failed\n\nthe suite would not start"
+   },
+   {
+    "run": 6,
+    "result": "outcome: pr\n\n--- widgets\ntitle: Ship widgets with gadgets"
    }
   ],
   "changes": [
@@ -1010,6 +1141,23 @@
     "filed_at": 1793231108596,
     "verdict_at": null,
     "read_at": null
+   },
+   {
+    "id": 4,
+    "target": 19,
+    "round": 1,
+    "kind": "pool",
+    "item": 20,
+    "author": "alpha",
+    "heads": {},
+    "pages": [],
+    "filed_by": "scheduler",
+    "reviewer": "gamma",
+    "verdict": "approve",
+    "findings": [],
+    "filed_at": 1793251800000,
+    "verdict_at": 1793260800000,
+    "read_at": null
    }
   ],
   "merges": [
@@ -1134,7 +1282,7 @@
     "type": "observation",
     "effort": null,
     "number": null,
-    "text": "{\"changes_open\":1,\"items\":10,\"open\":6,\"runs_live\":1}",
+    "text": "{\"finish to merge-ready\":{\"after\":{\"median\":12000.0,\"n\":1,\"p90\":12000.0},\"before\":{\"median\":null,\"n\":0,\"p90\":null}},\"finish to review\":{\"after\":{\"median\":1800.0,\"n\":1,\"p90\":1800.0},\"before\":{\"median\":3600.0,\"n\":1,\"p90\":3600.0}},\"finish to verdict\":{\"after\":{\"median\":10800.0,\"n\":1,\"p90\":10800.0},\"before\":{\"median\":14400.0,\"n\":1,\"p90\":14400.0}},\"round gap\":{\"after\":{\"median\":750.0,\"n\":2,\"p90\":900.0},\"before\":{\"median\":1200.0,\"n\":2,\"p90\":1200.0}},\"round length\":{\"after\":{\"median\":35.0,\"n\":3,\"p90\":40.0},\"before\":{\"median\":60.0,\"n\":3,\"p90\":90.0}},\"switched_at\":\"2026-10-28T15:06:40.000Z\"}",
     "who": "import",
     "at": 1793371508596,
     "where": "board figures",
@@ -1263,6 +1411,10 @@
    {
     "run": 5,
     "at": 1793195408596
+   },
+   {
+    "run": 6,
+    "at": 1793246000000
    }
   ]
  },
@@ -1274,15 +1426,15 @@
   "next:deps": 4,
   "next:efforts": 2,
   "next:holds": 3,
-  "next:items": 19,
+  "next:items": 21,
   "next:leases": 6,
   "next:merges": 2,
   "next:questions": 3,
   "next:readings": 4,
-  "next:reviews": 4,
-  "next:runs": 6,
+  "next:reviews": 5,
+  "next:runs": 7,
   "next:statements": 7,
-  "next:tasks": 5
+  "next:tasks": 6
  },
  "pulled": [
   {
@@ -1386,6 +1538,26 @@
    ]
   },
   {
+   "table": "items",
+   "legacy_key": [
+    19
+   ],
+   "record": "items",
+   "record_key": [
+    19
+   ]
+  },
+  {
+   "table": "items",
+   "legacy_key": [
+    20
+   ],
+   "record": "items",
+   "record_key": [
+    20
+   ]
+  },
+  {
    "table": "item_repos",
    "legacy_key": [
     11,
@@ -1430,6 +1602,28 @@
    ]
   },
   {
+   "table": "item_repos",
+   "legacy_key": [
+    19,
+    "gadgets"
+   ],
+   "record": "items",
+   "record_key": [
+    19
+   ]
+  },
+  {
+   "table": "item_repos",
+   "legacy_key": [
+    19,
+    "widgets"
+   ],
+   "record": "items",
+   "record_key": [
+    19
+   ]
+  },
+  {
    "table": "item_labels",
    "legacy_key": [
     11,
@@ -1463,6 +1657,28 @@
    ]
   },
   {
+   "table": "item_labels",
+   "legacy_key": [
+    19,
+    "good-first-issue"
+   ],
+   "record": "items",
+   "record_key": [
+    19
+   ]
+  },
+  {
+   "table": "item_labels",
+   "legacy_key": [
+    19,
+    "needs-design"
+   ],
+   "record": "items",
+   "record_key": [
+    19
+   ]
+  },
+  {
    "table": "changes",
    "legacy_key": [
     1
@@ -1683,6 +1899,16 @@
    ]
   },
   {
+   "table": "runs",
+   "legacy_key": [
+    6
+   ],
+   "record": "runs",
+   "record_key": [
+    6
+   ]
+  },
+  {
    "table": "questions",
    "legacy_key": [
     1
@@ -1730,6 +1956,16 @@
    "record": "reviews",
    "record_key": [
     3
+   ]
+  },
+  {
+   "table": "reviews",
+   "legacy_key": [
+    4
+   ],
+   "record": "reviews",
+   "record_key": [
+    4
    ]
   },
   {
@@ -1859,7 +2095,7 @@
   {
    "table": "journal",
    "legacy_key": null,
-   "count": 120,
+   "count": 121,
    "why": "the old board's own history, readable in its file"
   },
   {
@@ -1883,7 +2119,7 @@
   {
    "table": "rounds",
    "legacy_key": null,
-   "count": 5,
+   "count": 6,
    "why": "the old loop's own accounting, behind the figures observation"
   },
   {
@@ -1913,10 +2149,18 @@
    "why": "meta beyond the counters"
   },
   {
+   "table": "meta",
+   "legacy_key": [
+    "switched_at"
+   ],
+   "count": 1,
+   "why": "meta beyond the counters"
+  },
+  {
    "table": "items",
    "legacy_key": null,
    "column": "source",
-   "count": 10,
+   "count": 12,
    "why": "every imported record is legacy"
   },
   {
@@ -1930,7 +2174,7 @@
    "table": "runs",
    "legacy_key": null,
    "column": "pid",
-   "count": 4,
+   "count": 5,
    "why": "a process of the old host"
   },
   {

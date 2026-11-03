@@ -145,7 +145,7 @@ def test_gauges_prints_every_gauge(tmp_path, capsys):
     )
     assert code == 0, err
     assert 'unmerged_changes{repo="widgets"} 1' in out.splitlines()
-    assert 'outcomes{kind="agent",outcome="pr"} 1' in out.splitlines()
+    assert 'outcomes{kind="agent",outcome="pr"} 2' in out.splitlines()
     for name in ("capacity", "stalls", "budget_pace"):
         assert f"# HELP {name} " in out
     code, out, _ = run(

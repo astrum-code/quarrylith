@@ -58,7 +58,16 @@ GAUGES_PY = Path(gauges.__file__)
 STDLIB = {"math", "dataclasses"}
 CONTRACT_NAMES = {"efforts_of"}
 #: Names that reach an attribute, or code, by a name in a string.
-BY_NAME = {"getattr", "vars", "eval", "exec", "compile", "__import__"}
+BY_NAME = {
+    "getattr",
+    "vars",
+    "globals",
+    "locals",
+    "eval",
+    "exec",
+    "compile",
+    "__import__",
+}
 
 
 def contract_only(record):
@@ -354,6 +363,29 @@ def test_stalls_counts_a_run_past_its_margin_and_not_one_inside_it(record, clock
 
 
 @over_backends
+def test_queue_depth_counts_an_item_in_two_repos_under_each(record):
+    """templet:3159 -- `queue_depth` counts an item in two repos once under
+    each `repo:` label and once under `*`, and its task the same by its
+    effective labels."""
+    admitted(record)
+    n = record.file_item(
+        "task",
+        "both",
+        "",
+        role="alpha",
+        effort="0001",
+        labels=["repo:gadgets", "repo:widgets"],
+        filed_by="lead",
+    )
+    record.file_task("agent", number=n, sandbox="harness")
+    got = values(gauges.by_name("queue_depth"), record, now=1)
+    for of, state in (("items", "ready"), ("tasks", "open")):
+        for label in ("*", "repo:gadgets", "repo:widgets"):
+            assert got[series(of=of, state=state, effort="0001", label=label)] == 1
+    assert len(got) == 6
+
+
+@over_backends
 def test_the_gauges_compute_over_the_sample_import(record):
     """Every gauge computes over the sample import, whose runs sit on the
     retired node `legacy`."""
@@ -369,7 +401,7 @@ def test_the_gauges_compute_over_the_sample_import(record):
     assert every["outcomes"] == [
         ({"kind": "agent", "outcome": "failed"}, 1),
         ({"kind": "agent", "outcome": "limited"}, 1),
-        ({"kind": "agent", "outcome": "pr"}, 1),
+        ({"kind": "agent", "outcome": "pr"}, 2),
         ({"kind": "agent", "outcome": "review"}, 1),
     ]
     # utilization from 0.2 to 0.82 of the period over four hours
@@ -397,7 +429,9 @@ def reaches(source):
     - reads no `_`-prefixed attribute (so nothing private off a gauge's
       `record`, and no `__self__`);
     - names none of `BY_NAME`, nor `__builtins__`, whether it calls it or
-      not, so nothing reaches an attribute, or code, by a name in a string.
+      not, so nothing reaches an attribute, or code, by these names.
+      (`str.format` still reads an attribute by a string, and no AST lint
+      catches that.)
 
     It is a lint over plain Python, not a sandbox: a gauge is reviewed code.
     """
@@ -461,6 +495,15 @@ ESCAPES = (
     ("from math import fsum as add\n", "imports fsum as add"),
     ("def f():\n    return vars\n", "names vars"),
     ("def f(record):\n    return record.read.__self__\n", "reads __self__"),
+    (
+        "def f(record):\n"
+        "    ga = globals()['__builtins__']['getattr']\n"
+        "    real = ga(record.read, '__se' + 'lf__')\n"
+        "    return ga(ga(globals()['contract'], 'sqlite'), 'sqlite3')"
+        ".connect(real.path)\n",
+        "names globals",
+    ),
+    ("def f():\n    return locals()['contract']\n", "names locals"),
 )
 
 
@@ -476,6 +519,8 @@ ESCAPES = (
         "import-as",
         "vars-named",
         "self",
+        "globals-named",
+        "locals-named",
     ],
 )
 def test_the_contract_check_finds_a_way_past_it(escape, says):

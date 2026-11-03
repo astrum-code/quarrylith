@@ -55,6 +55,10 @@ LABEL_RE = re.compile(r"[a-z][a-z0-9_.-]*:[A-Za-z0-9][A-Za-z0-9_./-]*")
 FLAG_RE = re.compile(r"[a-z][a-z0-9_.-]*(:[a-z][a-z0-9_./-]*)?")
 #: Effort links are records and the state is a field, so neither is a label.
 BARRED_LABEL_KEYS = ("effort", "state")
+#: The label keys that may repeat on a record, each value once: an item in
+#: two repos, and an older board's labels that were not `key:value`. Every
+#: other key is one label per record.
+MULTI_VALUED_LABELS = frozenset({"legacy", "repo"})
 
 #: The `json` fields that hold labels, those that hold flags, and those that
 #: hold a sorted list of names, by kind.
@@ -602,10 +606,11 @@ def _words(value, what, limit):
 
 
 def check_labels(value):
-    """`value` as a list of labels: `key:value`, one label per key, the keys
-    `effort` and `state` barred, at most 64, stored sorted."""
+    """`value` as a list of labels: `key:value`, one label per key but those
+    of `MULTI_VALUED_LABELS`, none twice, the keys `effort` and `state`
+    barred, at most 64, stored sorted."""
     labels = _words(value, "labels", LIMITS["labels"])
-    keys = set()
+    keys, seen = set(), set()
     for label in labels:
         if not LABEL_RE.fullmatch(label):
             raise SchemaError(f"label {label!r} is not key:value")
@@ -615,9 +620,12 @@ def check_labels(value):
                 f"label {label!r}: the keys effort and state are not labels "
                 "(effort links are records, the state is a field)"
             )
-        if key in keys:
+        if label in seen:
+            raise SchemaError(f"label {label!r} twice")
+        if key in keys and key not in MULTI_VALUED_LABELS:
             raise SchemaError(f"label {label!r}: one label per key")
         keys.add(key)
+        seen.add(label)
     if labels != sorted(labels):
         raise SchemaError("labels are stored sorted")
     return labels

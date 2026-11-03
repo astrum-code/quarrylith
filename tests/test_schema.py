@@ -354,7 +354,7 @@ def test_label_grammar():
     with pytest.raises(SchemaError, match="sorted"):
         schema.check_labels(["b:A", "a:B"])
     with pytest.raises(SchemaError, match="one label per key"):
-        schema.check_labels(["repo:WidgetShop", "repo:MixedCase"])
+        schema.check_labels(["tier:2", "tier:3"])
     with pytest.raises(SchemaError, match="one label per key"):
         schema.check_labels(["team:a", "team:b"])
     for barred in ("effort:0001", "effort:alpha", "state:ready"):
@@ -380,6 +380,30 @@ def test_label_grammar():
     for bad in (["zone:a", "rack:b"], ["Zone:a"], ["zone:a", "zone:b"]):
         with pytest.raises(SchemaError, match="nodes.labels"):
             schema.validate("nodes", sample("nodes", labels=bad))
+
+
+def test_the_multi_valued_label_keys_may_repeat():
+    """templet:3159 -- the keys `MULTI_VALUED_LABELS` names, `legacy` and
+    `repo`, may repeat with different values: an item in two repos carries
+    both `repo:` labels, and each legacy label its own `legacy:` label. Every
+    other key stays one per record, and no label is there twice, whatever its
+    key."""
+    assert schema.MULTI_VALUED_LABELS == frozenset({"legacy", "repo"})
+    two = ["legacy:docs-later", "legacy:needs-design", "repo:gadgets", "repo:widgets"]
+    assert schema.check_labels(two) == two
+    assert schema.check_labels(["repo:MixedCase", "repo:WidgetShop", "tier:3"])
+    for key in ("role", "tier", "risk", "area", "legacy-run"):
+        with pytest.raises(SchemaError, match="one label per key"):
+            schema.check_labels([f"{key}:a", f"{key}:b"])
+    for twice in (["repo:widgets", "repo:widgets"], ["legacy:x", "legacy:x"]):
+        with pytest.raises(SchemaError, match="twice"):
+            schema.check_labels(twice)
+    with pytest.raises(SchemaError, match="twice"):
+        schema.check_labels(["tier:3", "tier:3"])
+    for kind in ("items", "tasks", "nodes"):
+        assert schema.validate(kind, sample(kind, labels=two))["labels"] == two
+        with pytest.raises(SchemaError, match=f"{kind}.labels"):
+            schema.validate(kind, sample(kind, labels=["repo:a", "repo:a"]))
 
 
 def test_a_nodes_drivers_are_a_sorted_list_of_strs():

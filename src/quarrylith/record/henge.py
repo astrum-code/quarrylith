@@ -69,8 +69,9 @@ TIMEOUT_S = 30.0
 TRY_MS = 2000
 #: A follower's catch-up read of `head` after this long with no note.
 FOLLOW_IDLE_S = 1.0
-#: How many objects the writer keeps in memory, read or put.
-KEPT = 200_000
+#: How many objects the writer keeps in memory, read or put (a journal
+#: entry only as it commits it).
+KEPT = 100_000
 #: A record's name: its spaces are `quarrylith.<name>.*`.
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 SPACES = ("journal", "rec", "idx", "state")
@@ -278,11 +279,13 @@ class HengeRecord(Record):
         self._closed = None
         self._ready = False
         self._loading = None
-        self._in_load = False
         self._report = {}
         self._recheck = False
         try:
             self._start()
+        except _StoreDown as e:
+            self._shut()
+            raise Unavailable(f"the store at {self._where()}: {e}") from e
         except BaseException:
             self._shut()
             raise
@@ -414,7 +417,7 @@ class HengeRecord(Record):
             return self._keep(space, key, ABSENT, None, False)
         return self._keep(space, key, item.value, item.version, False)
 
-    def _fetch_many(self, space, keys):
+    def _fetch_many(self, space, keys, *, keep=True):
         out = []
         for i in range(0, len(keys), MANY):
             batch = keys[i : i + MANY]
@@ -423,17 +426,25 @@ class HengeRecord(Record):
             except _Conflict as e:
                 raise _StoreDown(str(e)) from e
             for key, item in zip(batch, items):
-                if item is None:
-                    out.append(self._keep(space, key, ABSENT, None, False))
+                value, version = (
+                    (ABSENT, None)
+                    if item is None
+                    else (
+                        item.value,
+                        item.version,
+                    )
+                )
+                if keep:
+                    out.append(self._keep(space, key, value, version, False))
                 else:
-                    out.append(self._keep(space, key, item.value, item.version, False))
+                    out.append([value, version, self._epoch, False])
         return out
 
     def _look(self, space, key):
         got = self._kept.get((space, _ckey(key)))
         return got if got is not None else self._fetch(space, key)
 
-    def _look_many(self, space, keys):
+    def _look_many(self, space, keys, *, keep=True):
         found, missing = {}, []
         for key in keys:
             got = self._kept.get((space, _ckey(key)))
@@ -441,7 +452,7 @@ class HengeRecord(Record):
                 missing.append(key)
             else:
                 found[_ckey(key)] = got
-        for key, got in zip(missing, self._fetch_many(space, missing)):
+        for key, got in zip(missing, self._fetch_many(space, missing, keep=keep)):
             found[_ckey(key)] = got
         return [found[_ckey(key)] for key in keys]
 
@@ -786,7 +797,7 @@ class HengeRecord(Record):
     @contextlib.contextmanager
     def _write(self):
         self._live()
-        if self._loading is not None and not self._in_load:
+        if self._loading is not None:
             raise Refused(
                 f"a load into {self.name} is in progress: load the same dump to "
                 "finish it"
@@ -849,17 +860,13 @@ class HengeRecord(Record):
                         f"a load of another dump ({self._loading.get('digest')}) "
                         "is in progress: give that dump to finish it"
                     )
-                self._in_load = True
-                try:
-                    for event in journal[self._high :]:
-                        priors = contract._priors(self._get, event)
-                        self._check_entry(event, priors)
-                        self._store(event, priors)
-                    for kind in sorted(kept):
-                        for row in dump["bookkeeping"].get(kind, []):
-                            self._bookkeep(kind, schema.validate(kind, row))
-                finally:
-                    self._in_load = False
+                for event in journal[self._high :]:
+                    priors = contract._priors(self._get, event)
+                    self._check_entry(event, priors)
+                    self._store(event, priors)
+                for kind in sorted(kept):
+                    for row in dump["bookkeeping"].get(kind, []):
+                        self._bookkeep(kind, schema.validate(kind, row))
                 for kind, v in RECORDS.items():
                     if v.journaled and self._read(kind, {}, None, False, None) != dump[
                         "records"
@@ -962,7 +969,8 @@ class HengeRecord(Record):
                 if limit is not None:
                     seqs = seqs[:limit]
             out = []
-            for seq, row in zip(seqs, self._look_many(self.J, [[s] for s in seqs])):
+            rows = self._look_many(self.J, [[s] for s in seqs], keep=False)
+            for seq, row in zip(seqs, rows):
                 if row[0] is ABSENT:
                     continue
                 out.append(ev.Event.from_dict(row[0]["event"]))
@@ -1025,7 +1033,7 @@ class HengeRecord(Record):
             self._forget()
             top = self._high
             seqs = list(range(1, top + 1))
-            rows = self._fetch_many(self.J, [[s] for s in seqs])
+            rows = self._fetch_many(self.J, [[s] for s in seqs], keep=False)
             entries = {}
             for s, row in zip(seqs, rows):
                 if row[0] is ABSENT:

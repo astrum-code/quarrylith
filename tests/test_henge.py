@@ -475,17 +475,17 @@ def test_a_crash_after_the_journal_put_is_recovered_at_the_next_open(single):
     admitted(rec)
     n = item(rec)
     s = henge.spaces(rec.name)
-    for after_key in (None, ["items"]):
-        if after_key is None:
-            # dies once the commit put is answered
-            match = lambda space, key: space == s["journal"]  # noqa: E731
-        else:
-            # dies once the item's record is put, before any index
-            match = (
-                lambda space, key: space == s["rec"] and key[0] == "items"
-            )  # noqa: E731,E501
+    points = {
+        # once the commit put is answered
+        "journal": (lambda space, key: space == s["journal"], True),
+        # once the item's record is put, before any index
+        "record": (lambda space, key: space == s["rec"] and key[0] == "items", True),
+        # after applied and the sync, before head
+        "head": (lambda space, key: space == s["state"] and key == ["head"], False),
+    }
+    for after_key, (match, after) in points.items():
         seq = rec.head() + 1
-        rec.store = Crashing(rec.store, match, after=True)
+        rec.store = Crashing(rec.store, match, after=after)
         with pytest.raises(Crash):
             rec.edit_item(n, title=f"crashed {after_key}")
         abandon(rec)

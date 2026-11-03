@@ -897,6 +897,7 @@ class Writers:
         self.n = itertools.count()
         self.live = {}
         self.ended = []  # (who, the error)
+        self.errors = []  # (who, the error, its record or None)
         self.seen = {}
         self.s = henge.spaces("rec")
 
@@ -906,6 +907,7 @@ class Writers:
             rec = fake_record(self.fake, who, clock=self.clock)
         except (Unavailable, Refused) as e:
             self.ended.append((who, e))
+            self.errors.append((who, e, None))
             return None
         self.live[tag] = (who, rec)
         return rec
@@ -928,6 +930,7 @@ class Writers:
         except Refused:
             return None
         except Unavailable as e:
+            self.errors.append((who, e, rec))
             if rec._closed is not None:
                 self.ended.append((who, e))
                 self.live.pop(tag, None)
@@ -966,6 +969,10 @@ class Writers:
             self.run(tag, lambda r: _some_op(r, rng, tag, i))
 
     def finish(self):
+        # a writer that found another writer live closed: it puts nothing more
+        for who, error, rec in self.errors:
+            if "another writer is live" in str(error) and rec is not None:
+                assert rec._closed is not None, (who, error)
         for who, rec in list(self.live.values()):
             rec.close()
         reader = fake_record(self.fake, "reader", clock=self.clock)

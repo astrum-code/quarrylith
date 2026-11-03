@@ -2581,10 +2581,13 @@ def open_record(
     authorize=None,
     **backend,
 ):
-    """Open the record at `url` (`sqlite:///path/record.sqlite`). `shared`
+    """Open the record at `url` (`sqlite:///path/record.sqlite`, or
+    `henge:<folder>#<name>` for a record in the Henge store running in
+    `folder`). `shared`
     opens the record a deployment runs on, which must be durable unless
     `allow_undurable` (tests and the bench). `backend` passes settings the
-    backend takes (tests only: SQLite's `synchronous`, `fullfsync`)."""
+    backend takes (tests only: SQLite's `synchronous`, `fullfsync`; Henge's
+    `timeout_s`)."""
     if not isinstance(url, str) or ":" not in url:
         raise Refused(f"a record's URL is <backend>:<where>, not {url!r}")
     name = url.split(":", 1)[0]
@@ -2613,3 +2616,4 @@ def open_record(
 BACKENDS = {}
 
 from . import sqlite  # noqa: E402,F401  (registers the SQLite backend)
+from . import henge  # noqa: E402,F401  (registers the Henge backend)

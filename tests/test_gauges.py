@@ -58,7 +58,16 @@ GAUGES_PY = Path(gauges.__file__)
 STDLIB = {"math", "dataclasses"}
 CONTRACT_NAMES = {"efforts_of"}
 #: Names that reach an attribute, or code, by a name in a string.
-BY_NAME = {"getattr", "vars", "eval", "exec", "compile", "__import__"}
+BY_NAME = {
+    "getattr",
+    "vars",
+    "globals",
+    "locals",
+    "eval",
+    "exec",
+    "compile",
+    "__import__",
+}
 
 
 def contract_only(record):
@@ -420,7 +429,9 @@ def reaches(source):
     - reads no `_`-prefixed attribute (so nothing private off a gauge's
       `record`, and no `__self__`);
     - names none of `BY_NAME`, nor `__builtins__`, whether it calls it or
-      not, so nothing reaches an attribute, or code, by a name in a string.
+      not, so nothing reaches an attribute, or code, by these names.
+      (`str.format` still reads an attribute by a string, and no AST lint
+      catches that.)
 
     It is a lint over plain Python, not a sandbox: a gauge is reviewed code.
     """

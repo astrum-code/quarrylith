@@ -77,20 +77,20 @@ def test_the_imports_report_counts_equal_the_rows_per_table(url, capsys):
         == {
             "budget.source": 3,
             "comments.source": 6,
-            "items.source": 11,
+            "items.source": 12,
             "runs.pid": 5,
         }
     )
     for table, (read, pulled, left) in tables.items():
         assert pulled + left == read, table
-    assert tables["items"] == (11, 11, 0) and tables["journal"] == (121, 0, 121)
+    assert tables["items"] == (12, 12, 0) and tables["journal"] == (121, 0, 121)
     assert tables["meta"] == (5, 3, 2) and tables["scratch"] == (1, 0, 1)
     assert tables["item_repos"] == (6, 6, 0) and tables["item_labels"] == (5, 5, 0)
     record = open_record(url, actor="alpha", via="cli", readonly=True)
     try:
         counts = record.get("imports", 1)["counts"]
         assert record.check() == []
-        assert len(record.read("items")) == 11
+        assert len(record.read("items")) == 12
     finally:
         record.close()
     assert {t: v for t, v in counts["pulled"].items()} == {
@@ -153,6 +153,7 @@ def test_the_sample_is_whole_and_holds_every_kind_an_import_takes():
         17: "ready",
         18: "triage",
         19: "done",
+        20: "done",
     }
 
 
@@ -184,7 +185,7 @@ def test_check_import_names_a_link_to_an_effort_the_document_lacks():
     with pytest.raises(ImportRefused) as refused:
         check_import(doc)
     dangling = [p for p in refused.value.problems if "effort_links" in p]
-    assert len(dangling) == 6, refused.value.problems
+    assert len(dangling) == 7, refused.value.problems
     assert all("'unsorted'" in p and "no such effort" in p for p in dangling)
     assert any("'unsorted', 'item', '14'" in p for p in dangling)
 

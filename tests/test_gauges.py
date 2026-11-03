@@ -484,6 +484,15 @@ ESCAPES = (
     ("from math import fsum as add\n", "imports fsum as add"),
     ("def f():\n    return vars\n", "names vars"),
     ("def f(record):\n    return record.read.__self__\n", "reads __self__"),
+    (
+        "def f(record):\n"
+        "    ga = globals()['__builtins__']['getattr']\n"
+        "    real = ga(record.read, '__se' + 'lf__')\n"
+        "    return ga(ga(globals()['contract'], 'sqlite'), 'sqlite3')"
+        ".connect(real.path)\n",
+        "names globals",
+    ),
+    ("def f():\n    return locals()['contract']\n", "names locals"),
 )
 
 
@@ -499,6 +508,8 @@ ESCAPES = (
         "import-as",
         "vars-named",
         "self",
+        "globals-named",
+        "locals-named",
     ],
 )
 def test_the_contract_check_finds_a_way_past_it(escape, says):

@@ -379,6 +379,47 @@ RECORDS = _declare(
     _kind("cursors", "consumer=str", "seq=int at=int", journaled=False),
 )
 
+#: The fields that name another record: `(kind, field)` -> the kind it names,
+#: whose key the field holds when it is not null. Each is resolved by the
+#: operations that write it, and `importing.check_import` resolves each in its
+#: document. An effort link's `target` (an item's number or an effort's id, by
+#: the link's `kind`) and a review's `heads` (keyed by change id) name records
+#: too, each by its own rule. An item's `templet` and a beat's `run` are not
+#: here: no operation resolves them.
+REFERENCES = {
+    ("effort_links", "effort"): "efforts",
+    ("items", "parent"): "items",
+    ("item_text", "number"): "items",
+    ("deps", "number"): "items",
+    ("deps", "blocker"): "items",
+    ("deps", "change"): "changes",
+    ("leases", "number"): "items",
+    ("tasks", "number"): "items",
+    ("tasks", "effort"): "efforts",
+    ("capacity", "node"): "nodes",
+    ("reservations", "node"): "nodes",
+    ("reservations", "task"): "tasks",
+    ("reservations", "run"): "runs",
+    ("runs", "task"): "tasks",
+    ("runs", "node"): "nodes",
+    ("run_text", "run"): "runs",
+    ("changes", "number"): "items",
+    ("change_text", "change"): "changes",
+    ("checks", "change"): "changes",
+    ("reviews", "target"): "items",
+    ("reviews", "item"): "items",
+    ("merges", "change"): "changes",
+    ("comments", "number"): "items",
+    ("comments", "change"): "changes",
+    ("questions", "number"): "items",
+    ("questions", "run"): "runs",
+    ("questions", "answer"): "comments",
+    ("statements", "effort"): "efforts",
+    ("statements", "number"): "items",
+    ("statements", "supersedes"): "statements",
+    ("holds", "number"): "items",
+}
+
 #: The effort an item filed with no effort and no parent is linked to.
 UNSORTED = "unsorted"
 #: Its fields, the same wherever it is made: by the record, when an item first

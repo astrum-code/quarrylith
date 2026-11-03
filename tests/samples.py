@@ -52,8 +52,9 @@ def sample(kind, /, **over):
 
 
 def make_doc():
-    """A small import document: two items, a lease, a run, a comment, the
-    counters, and what was left. The names are neutral on purpose."""
+    """A small import document: two items, a lease, a task and its run on
+    the node `legacy`, a comment, the counters, and what was left. The names
+    are neutral on purpose."""
     efforts = [
         sample(
             "efforts",
@@ -156,6 +157,17 @@ def make_doc():
                     state="done",
                     attempts=1,
                     created_at=2200,
+                    loop={"max_attempts": 1, "interval_s": 0},
+                    supervision={"expect_s": None, "beat_s": None},
+                )
+            ],
+            "nodes": [
+                sample(
+                    "nodes",
+                    name="legacy",
+                    drivers=["harness"],
+                    declared_at=2000,
+                    retired_at=2000,
                 )
             ],
             "runs": [

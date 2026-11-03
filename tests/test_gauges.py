@@ -15,7 +15,7 @@ from samples import load_sample
 from quarrylith import cli, gauges
 from quarrylith.gauges import GAUGES, Gauge
 from quarrylith.record import contract
-from quarrylith.record.importing import compose
+from quarrylith.record.importing import ImportRefused, check_import, compose
 
 MIN = 60_000
 DAY = 24 * 60 * MIN
@@ -57,7 +57,7 @@ GAUGES_PY = Path(gauges.__file__)
 #: quarrylith, `.record.contract` alone, and of it only `efforts_of`.
 STDLIB = {"math", "dataclasses"}
 CONTRACT_NAMES = {"efforts_of"}
-#: Calls that reach an attribute, or code, by a name in a string.
+#: Names that reach an attribute, or code, by a name in a string.
 BY_NAME = {"getattr", "vars", "eval", "exec", "compile", "__import__"}
 
 
@@ -379,15 +379,39 @@ def test_the_gauges_compute_over_the_sample_import(record):
 
 
 def test_the_gauges_reach_the_record_only_by_the_contract():
-    """templet:3159 -- `quarrylith.gauges`, read as source: it imports only
-    `math` and `dataclasses` of the standard library (never `sqlite3`) and
-    `.record.contract` of quarrylith, takes only `efforts_of` off the
-    contract, reads no `_`-prefixed attribute (so nothing private off a
-    gauge's `record`), and reaches nothing by a name in a string."""
-    tree = ast.parse(GAUGES_PY.read_text(encoding="utf-8"))
+    """templet:3159 -- `quarrylith.gauges`, read as source, passes `reaches`:
+    it reaches the record by the contract's reads alone."""
+    assert reaches(GAUGES_PY.read_text(encoding="utf-8")) == []
+    assert "sqlite3" in sys.stdlib_module_names and "sqlite3" not in STDLIB
+
+
+def reaches(source):
+    """What `source` (a module, as text) reaches past the contract, a list of
+    `<line>: <what>`; empty when it:
+
+    - imports only `math` and `dataclasses` of the standard library (never
+      `sqlite3`), and of quarrylith only `contract` from `.record`;
+    - names nothing it imports by another name (no `as`);
+    - uses `contract` only as the base of `contract.<name>`, and takes only
+      `efforts_of` off it;
+    - reads no `_`-prefixed attribute (so nothing private off a gauge's
+      `record`, and no `__self__`);
+    - names none of `BY_NAME`, nor `__builtins__`, whether it calls it or
+      not, so nothing reaches an attribute, or code, by a name in a string.
+
+    It is a lint over plain Python, not a sandbox: a gauge is reviewed code.
+    """
+    tree = ast.parse(source)
+    parents = {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
     found = []
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.asname is not None:
+                    found.append(f"{line}: imports {alias.name} as {alias.asname}")
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name not in STDLIB:
@@ -407,11 +431,60 @@ def test_the_gauges_reach_the_record_only_by_the_contract():
             if isinstance(base, ast.Name) and base.id == "contract":
                 if node.attr not in CONTRACT_NAMES:
                     found.append(f"{line}: takes contract.{node.attr}")
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in BY_NAME:
-                found.append(f"{line}: calls {node.func.id}")
-    assert found == []
-    assert "sqlite3" in sys.stdlib_module_names and "sqlite3" not in STDLIB
+        elif isinstance(node, ast.Name):
+            if node.id in BY_NAME or node.id == "__builtins__":
+                found.append(f"{line}: names {node.id}")
+            elif node.id == "contract":
+                parent = parents.get(node)
+                if not (isinstance(parent, ast.Attribute) and parent.value is node):
+                    found.append(f"{line}: uses contract other than contract.<name>")
+    return found
+
+
+#: The module's own lines, then a way past the contract and what `reaches`
+#: says of it: round 2's two escapes first.
+ESCAPES = (
+    (
+        "def f(record):\n"
+        "    ga = getattr\n"
+        "    real = ga(record.read, '__se' + 'lf__')\n"
+        "    return ga(ga(contract, 'sqlite'), 'sqlite3').connect(real.path)\n",
+        "names getattr",
+    ),
+    (
+        "def f(record):\n    return __builtins__['getattr'](record.read, '__self__')\n",
+        "names __builtins__",
+    ),
+    ("c = contract\n", "uses contract other than contract.<name>"),
+    ("def f(record):\n    return g(contract)\n", "uses contract other than"),
+    ("from .record import contract as c\n", "imports contract as c"),
+    ("from math import fsum as add\n", "imports fsum as add"),
+    ("def f():\n    return vars\n", "names vars"),
+    ("def f(record):\n    return record.read.__self__\n", "reads __self__"),
+)
+
+
+@pytest.mark.parametrize(
+    "escape, says",
+    ESCAPES,
+    ids=[
+        "getattr-renamed",
+        "builtins",
+        "contract-bound",
+        "contract-passed",
+        "contract-as",
+        "import-as",
+        "vars-named",
+        "self",
+    ],
+)
+def test_the_contract_check_finds_a_way_past_it(escape, says):
+    """templet:3159 -- `reaches` finds each way past the contract: `getattr`
+    taken under another name, `__builtins__`, `contract` used other than as
+    `contract.<name>`, or imported under another name."""
+    source = GAUGES_PY.read_text(encoding="utf-8") + "\n\n" + escape
+    found = reaches(source)
+    assert any(says in f for f in found), found
 
 
 @over_backends
@@ -466,8 +539,9 @@ def test_a_footprint_or_supervision_that_is_not_a_dict_breaks_no_gauge(record, c
     assert every["outcomes"] == [({"kind": "job", "outcome": "done"}, 5)]
 
 
-#: An imported task's `supervision`, which the record holds as any JSON: none
-#: of these is a positive `beat_s`, so each run beats by the 10 minutes.
+#: A task's `supervision` no operation writes, which an import refuses and a
+#: dump made by hand can carry: none of these is a positive `beat_s`, so each
+#: run beats by the 10 minutes.
 SUPERVISIONS = (
     [1],
     7,
@@ -480,35 +554,61 @@ SUPERVISIONS = (
 )
 
 
+def by_hand(dump, kind, key, field, value):
+    """`dump` with one record's `field` set to `value`, in its records and in
+    every put of it in the journal: a dump made by hand, which `check_dump`
+    takes as the fold of its journal."""
+    dump = json.loads(json.dumps(dump))
+    for rec in dump["records"][kind]:
+        if [rec[n] for n in contract.RECORDS[kind].key_names] == key:
+            rec[field] = value
+    for event in dump["journal"]:
+        for put_kind, put_key, put in event["puts"]:
+            if put_kind == kind and put_key == key and put is not None:
+                put[field] = value
+    return dump
+
+
 @over_backends
-def test_an_import_with_a_footprint_or_supervision_not_a_dict_breaks_no_gauge(
+def test_a_footprint_or_supervision_not_a_dict_from_an_import_or_a_dump(
     backend, tmp_path, capsys
 ):
-    """An import carries a run's `footprint` and a task's `supervision` as any
-    JSON: a footprint that is not a dict reports nothing, a `beat_s` that is
-    not a positive number is none (the run alive within 10 minutes of a
-    beat), and `measure` and `quarrylith record gauges` compute every
-    gauge."""
+    """An import carries a run's `footprint` as any JSON, and a footprint that
+    is not a dict reports nothing. A task's `supervision` that no operation
+    writes is refused by the import, and a dump made by hand can still carry
+    one: a `beat_s` that is not a positive number is none (the run alive
+    within 10 minutes of a beat). `measure` and `quarrylith record gauges`
+    compute every gauge over each."""
+    doc = load_sample()
+    runs = {r["id"]: r for r in doc["records"]["runs"]}
+    runs[1]["footprint"] = [1]
+    runs[2]["footprint"] = "much"
+    runs[4]["footprint"] = {"memory": 64}
+    live = next(r for r in runs.values() if r["finished_at"] is None)
+    beat = next(b for b in doc["records"]["beats"] if b["run"] == live["id"])
+    # five minutes past the live run's last beat: alive by the 10 minutes
+    now = beat["at"] + 5 * MIN
+    path = tmp_path / "doc.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    url = url_for(backend, tmp_path / "imported")
+    code, _, err = run_cli(capsys, "record", "import", str(path), "--into", url)
+    assert code == 0, err
     for i, supervision in enumerate(SUPERVISIONS):
-        doc = load_sample()
-        runs = {r["id"]: r for r in doc["records"]["runs"]}
-        runs[1]["footprint"] = [1]
-        runs[2]["footprint"] = "much"
-        runs[4]["footprint"] = {"memory": 64}
-        live = next(r for r in runs.values() if r["finished_at"] is None)
-        for task in doc["records"]["tasks"]:
+        bad = json.loads(json.dumps(doc))
+        for task in bad["records"]["tasks"]:
             if task["id"] == live["task"]:
                 task["supervision"] = supervision
-        beat = next(b for b in doc["records"]["beats"] if b["run"] == live["id"])
-        # five minutes past the live run's last beat: alive by the 10 minutes
-        now = beat["at"] + 5 * MIN
-        path = tmp_path / f"doc-{i}.json"
-        path.write_text(json.dumps(doc), encoding="utf-8")
+        with pytest.raises(ImportRefused, match="supervision"):
+            check_import(bad)
+        dump = by_hand(
+            compose(doc), "tasks", [live["task"]], "supervision", supervision
+        )
         url = url_for(backend, tmp_path / f"record-{i}")
-        code, _, err = run_cli(capsys, "record", "import", str(path), "--into", url)
-        assert code == 0, err
-        record = contract.open_record(url, actor="alpha", via="cli", readonly=True)
+        record = contract.open_record(url, actor="alpha", via="cli")
         try:
+            record.init()
+            record.load(dump)
+            assert record.get("tasks", live["task"])["supervision"] == supervision
             every = gauges.measure(contract_only(record), now=now, window_ms=30 * DAY)
         finally:
             record.close()

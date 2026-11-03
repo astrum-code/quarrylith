@@ -609,6 +609,18 @@ def test_a_crash_after_each_put_of_a_split_is_recovered(single, raw, small_chunk
     assert ("put", s["idx"], henge.ix_key(ix, 0)) in puts
     assert raw.get(s["idx"], henge.ix_key(ix, 0)).value[0] == ["a00"]
     assert [e["id"] for e in rec.read("efforts")] == ["a00"] + ids + ["e18"]
+    # every load of a chunk filters it to its range: chunk 0 holding chunk
+    # 1's keys again, as a split stopped after its directory put leaves it,
+    # still reads each key once
+    stale = raw.get(s["idx"], henge.ix_key(ix, 0))
+    raw.put(
+        s["idx"],
+        henge.ix_key(ix, 0),
+        stale.value + [[i] for i in ids[4:]],
+        expect={"version": stale.version},
+    )
+    rec._forget()
+    assert [e["id"] for e in rec.read("efforts")] == ["a00"] + ids + ["e18"]
     rec.close()
 
 
@@ -946,16 +958,30 @@ class Writers:
         for space, key in self.fake.keys():
             if space == self.s["rec"] and key[0] == "cursors":
                 now[tuple(key)] = self.fake.value(space, key)["seq"]
+            if space == self.s["rec"] and key[0] == "beats":
+                now[tuple(key)] = self.fake.value(space, key)["at"]
         for k, v in now.items():
             if v is None:
                 continue
             assert v >= self.seen.get(k, v), (k, v, self.seen[k])
             self.seen[k] = v
 
-    def committed_past(self, tag, seq, tries=8):
-        """`tag` runs operations until it has committed past `seq`."""
+    def committed_past(self, tag, seq, tries=8, touch=False):
+        """`tag` runs operations until it has committed past `seq`. With
+        `touch`, each moves the newest item, so the event past `seq` writes
+        that item's record and its state's index chunks: what the other
+        writer, held, may then put over."""
+
+        def op(r, i):
+            items = r.read("items")
+            if not touch or not items:
+                return r.note("past", f"{tag}-{seq}-{i}")
+            last = items[-1]
+            to = "blocked" if last["state"] == "ready" else "ready"
+            return r.move(last["number"], to, "past")
+
         for i in range(tries):
-            self.run(tag, lambda r: r.note("past", f"{tag}-{seq}-{i}"))
+            self.run(tag, lambda r: op(r, i))
             rec = self.live.get(tag, (None, None))[1]
             if rec is not None and rec._high > seq and top(self.fake) > seq:
                 return
@@ -1026,7 +1052,18 @@ def _who(tag):
     return lambda who, space, key, value: who == tag or who.startswith(tag + ".")
 
 
-def race(writers, tag, action, match, *, op="put", late=False, past=True, during=None):
+def race(
+    writers,
+    tag,
+    action,
+    match,
+    *,
+    op="put",
+    late=False,
+    past=True,
+    during=None,
+    touch=False,
+):
     """`action(record of tag)` in a thread, its next call `match` takes held
     back; the other writer does `during` and commits past it, then the call
     is released."""
@@ -1046,10 +1083,11 @@ def race(writers, tag, action, match, *, op="put", late=False, past=True, during
     if during is not None:
         during()
     if past:
-        writers.committed_past(other, top(writers.fake))
+        writers.committed_past(other, top(writers.fake), touch=touch)
     held.release()
     thread.join(30)
     assert not thread.is_alive()
+    writers.monotone()
     return result
 
 
@@ -1174,9 +1212,10 @@ def _run_row(fake, clock, row, case):
             slow.release()
             t2.join(30)
             if reached:
-                writers.committed_past("w2", top(fake))
+                writers.committed_past("w2", top(fake), touch=True)
                 mine.release()
             t1.join(30)
+            writers.monotone()
             if not reached:
                 fake.holds.remove(mine)
                 return None
@@ -1198,7 +1237,8 @@ def _run_row(fake, clock, row, case):
         held.release()
         t1.join(30)
     else:
-        writers = _setup(fake, clock, items=8 if row == 3 else 3)
+        split = row == 3 and case != "chunk"
+        writers = _setup(fake, clock, items=8 if split else 3)
         w1 = writers.open("w1")
         if row == 1:
             match = _and(_who("w1"), _in("journal"))
@@ -1212,7 +1252,7 @@ def _run_row(fake, clock, row, case):
                 _who("w1"),
                 _in("idx"),
                 {
-                    "chunk": lambda w, sp, k, v: k[-1] != "dir",
+                    "chunk": lambda w, sp, k, v: k == ["items", "state", "ready", 0],
                     "new chunk": lambda w, sp, k, v: k == henge.ix_key(ix, 1),
                     "directory": lambda w, sp, k, v: k == henge.ix_key(ix, "dir"),
                     "shrunk chunk": lambda w, sp, k, v: k == henge.ix_key(ix, 0)
@@ -1254,7 +1294,7 @@ def _run_row(fake, clock, row, case):
 
             during = beats
 
-        race(writers, "w1", action, match, during=during)
+        race(writers, "w1", action, match, during=during, touch=row in (2, 3, 5))
     writers.interleave(200, seed=row * 1000 + sum(map(ord, str(case))))
     return writers.finish()
 
@@ -1442,3 +1482,50 @@ class _Then:
 
     def __getattr__(self, op):
         return getattr(self.first, op)
+
+
+def test_monotone_values_keep_their_order_under_a_retry():
+    """templet:3159 -- Henge: applied and head are put only upward, a cursor
+    takes the larger of the value read and its own, and a beat the later at:
+    each put retried after a Conflict whose fresh read shows a value moved on
+    with no new journal entry (so the check passes) keeps that value."""
+    fake = FakeStore()
+    clock = Clock()
+    rec = fake_record(fake, "w", clock=clock)
+    rec.init()
+    admitted(rec)
+    rec.ack("c", 1)
+    rec.beat(1)
+    s = henge.spaces("rec")
+    raw = fake.client("raw")
+
+    def move(space, key, value):
+        got = raw.get(space, key)
+        raw.put(space, key, value, expect={"version": got.version})
+
+    # applied and head moved on by hand: the next operation leaves them
+    high = rec.head()
+    move(s["state"], ["applied"], high + 5)
+    move(s["state"], ["head"], high + 5)
+    item(rec, "after")
+    assert fake.value(s["state"], ["applied"]) == high + 5
+    assert fake.value(s["state"], ["head"]) == high + 5
+    # a cursor and a beat written past this writer's, while its put waits
+    for kind, op, value, field in (
+        (
+            "cursors",
+            lambda: rec.ack("c", 2),
+            {"consumer": "c", "seq": 3, "at": 1},
+            "seq",
+        ),
+        ("beats", lambda: rec.beat(1), {"run": 1, "at": clock() + 60_000}, "at"),
+    ):
+        key = [kind, *schema.key_of(kind, value)]
+        held = fake.hold(_and(_who("w"), _in("rec", kind)))
+        thread = threading.Thread(target=lambda: _capture(op))
+        thread.start()
+        assert held.reached.wait(30)
+        move(s["rec"], key, value)
+        held.release()
+        thread.join(30)
+        assert fake.value(s["rec"], key)[field] == value[field]

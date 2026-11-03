@@ -406,6 +406,12 @@ it for that repo), run the fast form first (`pytest -n 8`, then the
 failures on their own), and the serial full suite only when the issue
 needs it. Otherwise, the serial run through `bin/lith test <repo>` is the
 gate. Never install a package to get the parallel form.
+A repo's tests may be split into **categories**, each a code path: a
+registered pytest marker and one test step of its alterlith,
+`.lith/alterlith.yaml` (unmarked tests in `core`). `bin/lith test <repo>`
+runs each test step under its own bound, after a check that every test is
+in exactly one step; `bin/lith test <repo> --step <name>` runs only that
+one, for a quick run.
 
 ## Proving
 
@@ -962,11 +968,11 @@ benchLith's `meshlith/docs/CICD.md`.
 
 - **Do not add GitHub Actions workflows** (`.github/workflows/`), and do
   not add tokens or secrets to make one work.
-- **A repo's pipeline is its gate**: `.meshlith/pipeline.yaml` in the
-  repo, MeshLith's pipeline document, run by the mesh at each commit and
-  reported as a commit status. What it says and how to write one is in
+- **A repo's pipeline is its gate**: its alterlith, `.lith/alterlith.yaml`
+  in the repo, MeshLith's pipeline document, run by the mesh at each commit
+  and reported as a commit status. What it says and how to write one is in
   benchLith's `docs/PIPELINE.md`. A repo with a pipeline changes it like
-  any code, in a PR, and runs `bin/lith pipeline check <repo>` first. A
+  any code, in a PR, and runs `bin/lith alterlith check <repo>` first. A
   changed pipeline is not run by the mesh until the user has approved its
   new content, so say in the PR that it needs approving.
 - **`bin/lith test` stays the local gate**, and the pipeline runs the same

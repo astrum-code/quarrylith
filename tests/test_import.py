@@ -77,19 +77,20 @@ def test_the_imports_report_counts_equal_the_rows_per_table(url, capsys):
         == {
             "budget.source": 3,
             "comments.source": 6,
-            "items.source": 10,
-            "runs.pid": 4,
+            "items.source": 11,
+            "runs.pid": 5,
         }
     )
     for table, (read, pulled, left) in tables.items():
         assert pulled + left == read, table
-    assert tables["items"] == (10, 10, 0) and tables["journal"] == (120, 0, 120)
-    assert tables["meta"] == (4, 3, 1) and tables["scratch"] == (1, 0, 1)
+    assert tables["items"] == (11, 11, 0) and tables["journal"] == (121, 0, 121)
+    assert tables["meta"] == (5, 3, 2) and tables["scratch"] == (1, 0, 1)
+    assert tables["item_repos"] == (6, 6, 0) and tables["item_labels"] == (5, 5, 0)
     record = open_record(url, actor="alpha", via="cli", readonly=True)
     try:
         counts = record.get("imports", 1)["counts"]
         assert record.check() == []
-        assert len(record.read("items")) == 10
+        assert len(record.read("items")) == 11
     finally:
         record.close()
     assert {t: v for t, v in counts["pulled"].items()} == {
@@ -151,6 +152,7 @@ def test_the_sample_is_whole_and_holds_every_kind_an_import_takes():
         16: "done",
         17: "ready",
         18: "triage",
+        19: "done",
     }
 
 
@@ -182,7 +184,7 @@ def test_check_import_names_a_link_to_an_effort_the_document_lacks():
     with pytest.raises(ImportRefused) as refused:
         check_import(doc)
     dangling = [p for p in refused.value.problems if "effort_links" in p]
-    assert len(dangling) == 5, refused.value.problems
+    assert len(dangling) == 6, refused.value.problems
     assert all("'unsorted'" in p and "no such effort" in p for p in dangling)
     assert any("'unsorted', 'item', '14'" in p for p in dangling)
 
@@ -303,6 +305,67 @@ def test_the_samples_other_choices_are_the_pages_rules():
             comment["at"],
             comment["number"],
         )
+
+
+#: `board_figures`' output: each figure's before and after halves, split at
+#: the board's `switched_at`.
+FIGURES = (
+    "round gap",
+    "round length",
+    "finish to review",
+    "finish to verdict",
+    "finish to merge-ready",
+)
+
+
+def test_the_samples_figures_observation_is_board_figures_output():
+    """templet:3159 -- the figures observation's `text` is the older board's
+    figures as canonical JSON: its `switched_at`, and per figure the `n`,
+    `median` and `p90` before and after it. The sample's board has both
+    halves of each, but `finish to merge-ready`, which is after the switch
+    only."""
+    doc = load_sample()
+    (figures,) = [s for s in doc["records"]["statements"] if s["type"] == "observation"]
+    got = json.loads(figures["text"])
+    assert figures["text"] == json.dumps(
+        got, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    assert set(got) == {"switched_at", *FIGURES}
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", got["switched_at"])
+    for name in FIGURES:
+        assert set(got[name]) == {"before", "after"}, name
+        for side, half in got[name].items():
+            assert set(half) == {"n", "median", "p90"}, (name, side)
+            empty = (name, side) == ("finish to merge-ready", "before")
+            assert (half["n"] == 0) == empty, (name, side)
+            if half["n"]:
+                assert half["median"] <= half["p90"], (name, side)
+            else:
+                assert half["median"] is half["p90"] is None, (name, side)
+
+
+def test_the_sample_carries_every_repo_and_every_legacy_label():
+    """templet:3159 -- an item in two repos carries both `repo:` labels, and
+    each of its labels that is not `key:value` its own `legacy:` label: the
+    sample's #19, every one of its `item_repos` and `item_labels` rows pulled,
+    none left."""
+    doc = load_sample()
+    items = {i["number"]: i for i in doc["records"]["items"]}
+    assert items[19]["labels"] == [
+        "legacy:good-first-issue",
+        "legacy:needs-design",
+        "repo:gadgets",
+        "repo:widgets",
+    ]
+    assert items[11]["labels"] == ["area:lists", "legacy:docs-later", "repo:widgets"]
+    pulled = {(r["table"], tuple(r["legacy_key"])) for r in doc["pulled"]}
+    for key in ((19, "gadgets"), (19, "widgets")):
+        assert ("item_repos", key) in pulled
+    for key in ((19, "good-first-issue"), (19, "needs-design")):
+        assert ("item_labels", key) in pulled
+    assert not [r for r in doc["left"] if r["table"] in ("item_repos", "item_labels")]
+    for item in items.values():
+        assert schema.check_labels(item["labels"]) == item["labels"]
 
 
 @over_backends

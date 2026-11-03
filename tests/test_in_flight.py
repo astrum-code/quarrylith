@@ -916,6 +916,93 @@ def test_effective_labels_are_merged_by_key_whatever_the_stored_order(record):
 
 
 @over_backends
+def test_effective_labels_keep_every_label_of_a_key_that_repeats(record):
+    """templet:3159 -- an item in two repos keeps both `repo:` labels in its
+    task's effective labels; the task's own labels of a key replace all of the
+    item's of that key, as for any key, and the item's of the other keys
+    stay."""
+    admitted(record)
+    two = ["legacy:docs-later", "legacy:needs-design", "repo:gadgets", "repo:widgets"]
+    n = item(record, labels=["area:lists"] + two)
+    plain = agent_task(record, n)
+    assert record.effective_labels(plain) == ["area:lists"] + two
+    own = agent_task(record, n, labels=["repo:sprockets", "tier:3"])
+    assert record.effective_labels(own) == [
+        "area:lists",
+        "legacy:docs-later",
+        "legacy:needs-design",
+        "repo:sprockets",
+        "tier:3",
+    ]
+    both = agent_task(record, n, labels=["repo:gadgets", "repo:sprockets"])
+    assert record.effective_labels(both) == [
+        "area:lists",
+        "legacy:docs-later",
+        "legacy:needs-design",
+        "repo:gadgets",
+        "repo:sprockets",
+    ]
+    assert record.effective_labels(job(record, labels=two)) == two
+
+
+@over_backends
+def test_an_item_in_two_repos_through_every_label_reader(record, clock, tmp_path):
+    """templet:3159 -- the record's readers of labels with an item in two
+    repos: it is filed, edited, read and folded with both `repo:` labels; the
+    ready read and a lease read no label, so it is ready, granted and viewed
+    as any item; `read()` matches on no label; a dump of it loads whole. A
+    repeated `tier:`, or the same label twice, is refused by `file_item`,
+    `edit_item`, `file_task`, `edit_task` and `declare_node`."""
+    admitted(record)
+    node(record)
+    n = item(record, labels=["repo:widgets"])
+    record.edit_item(n, labels=["repo:widgets", "repo:gadgets"])
+    labels = ["repo:gadgets", "repo:widgets"]
+    assert record.get("items", n)["labels"] == labels
+    view = MemoryView()
+    for raw in record.dump()["journal"]:
+        apply(view, Event.from_dict(raw))
+    assert view.records()["items"][0]["labels"] == labels
+    assert [i["number"] for i in record.ready(now=clock())["items"]] == [n]
+    t = agent_task(record, n)
+    assert [x["id"] for x in record.ready(now=clock())["tasks"]] == [t]
+    fence = grant(record, n)
+    assert record.lease_view(n, now=clock())["fence"] == fence
+    assert record.get("items", n)["labels"] == labels
+    with pytest.raises(Refused, match="not read by labels"):
+        record.read("items", labels=labels)
+    record.declare_node("n2", ["process"], ["repo:gadgets", "repo:widgets"])
+    assert record.get("nodes", "n2")["labels"] == labels
+    for bad in (["tier:2", "tier:3"], ["repo:widgets", "repo:widgets"]):
+        head = record.head()
+        with pytest.raises(Refused, match="labels"):
+            item(record, labels=bad)
+        with pytest.raises(Refused, match="labels"):
+            record.edit_item(n, labels=bad)
+        with pytest.raises(Refused, match="labels"):
+            agent_task(record, n, labels=bad)
+        with pytest.raises(Refused, match="labels"):
+            record.edit_task(t, labels=bad)
+        with pytest.raises(Refused, match="labels"):
+            record.declare_node("n3", ["process"], bad)
+        assert record.head() == head
+    dump = record.dump()
+    for name in sorted(contract.BACKENDS):
+        if name not in URLS:
+            continue
+        target = open_record(
+            url_for(name, tmp_path / f"into-{name}"), actor="loader", via="load"
+        )
+        try:
+            target.init()
+            target.load(dump)
+            assert target.get("items", n)["labels"] == labels
+            assert target.check() == []
+        finally:
+            target.close()
+
+
+@over_backends
 def test_events_wait_inside_reading_is_refused(record):
     """events(wait=) inside reading() is refused: the reading holds every
     other caller back, so the wait could only end empty; events() with no

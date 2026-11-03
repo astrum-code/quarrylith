@@ -354,6 +354,29 @@ def test_stalls_counts_a_run_past_its_margin_and_not_one_inside_it(record, clock
 
 
 @over_backends
+def test_queue_depth_counts_an_item_in_two_repos_under_each(record):
+    """templet:3159 -- `queue_depth` counts an item in two repos once under
+    each `repo:` label and once under `*`, and its task the same by its
+    effective labels."""
+    admitted(record)
+    n = record.file_item(
+        "task",
+        "both",
+        "",
+        role="alpha",
+        effort="0001",
+        labels=["repo:gadgets", "repo:widgets"],
+        filed_by="lead",
+    )
+    record.file_task("agent", number=n, sandbox="harness")
+    got = values(gauges.by_name("queue_depth"), record, now=1)
+    for of, state in (("items", "ready"), ("tasks", "open")):
+        for label in ("*", "repo:gadgets", "repo:widgets"):
+            assert got[series(of=of, state=state, effort="0001", label=label)] == 1
+    assert len(got) == 6
+
+
+@over_backends
 def test_the_gauges_compute_over_the_sample_import(record):
     """Every gauge computes over the sample import, whose runs sit on the
     retired node `legacy`."""

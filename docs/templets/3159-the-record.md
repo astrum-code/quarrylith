@@ -916,10 +916,13 @@ never reads the legacy file, and bin/lith never imports quarrylith.
     counts (a column is not a row) equal the rows read; and that each
     counter is past the highest id its records hold (`next:change:<repo>`:
     the highest `n` of that repo). It refuses with every fault it finds
-    (`ImportRefused`), not the first only. So a document the operations
-    could not have written never loads: a run whose task is missing, a task
-    whose item is missing or whose `loop` is not a dict would load clean,
-    and a gauge or `ready()` would raise on it later.
+    (`ImportRefused`), not the first only. So a reference that does not
+    resolve, or a shape no operation writes, never loads: a run whose task
+    is missing, a task whose item is missing or whose `loop` is not a dict
+    would load clean, and a gauge or `ready()` would raise on it later. It
+    does not check what the operations check across records: an effort
+    linked to itself, or two items each the other's parent, still load, and
+    no read raises on either.
   - `compose(doc)` writes one `imports` record, then the records in
     `RECORDS` order as `import` events (one per record kind, split to stay
     under the journal entry's limit), then `pulled` and `left` as `import` events,
@@ -1941,7 +1944,7 @@ client alone is the dependency (above).
   names it; the four driver classes are today's and the list is open
   (approved: the conformance review of quarrylith#5, rounds 1 and 2, and the
   user's merge)
-- 2026-11-01 proposed: what building step 4 settled: `unsorted` named once,
+- 2026-11-01 changed: what building step 4 settled: `unsorted` named once,
   `schema.unsorted_effort` (owner `record`, the user's 2026-11-01), made the
   same by `file_item` whoever files and by the import, and `check_import`
   refuses another; `check_import` names an effort link to an effort the
@@ -1971,8 +1974,9 @@ client alone is the dependency (above).
   its dated statements, a `Decided` statement's fields, the tasks per (item,
   run kind) with their `created_at` and state, an `open` one never ready, the
   node `legacy`, `budget.source` dropped (the user's 2026-11-01), a review's
-  `findings`, and the figures observation (this PR)
-- 2026-11-03 proposed: what step 4's follow-ups settled: `check_import`
+  `findings`, and the figures observation (approved: the conformance
+  review of quarrylith#6, rounds 1 and 2, and the user's merge)
+- 2026-11-03 changed: what step 4's follow-ups settled: `check_import`
   refuses a reference that does not resolve within the document
   (`schema.REFERENCES`, in the module table and under "References", an
   effort link's `target` by its kind, a review's `heads`) and a task's
@@ -1980,7 +1984,7 @@ client alone is the dependency (above).
   item's `templet` and a beat's `run` are no reference; the slug's hyphens
   none at either end; "any of them" for `check()`'s four findings; "or
   `None` given" for `open_or_update_change`'s `number`; two lines reflowed
-  (this PR)
+  (approved: the conformance review of quarrylith#8)
 - 2026-11-03 proposed: the label rule: `schema.MULTI_VALUED_LABELS`, the
   keys `legacy` and `repo`, may repeat with different values; every other
   key one label per record; no label twice; a task's labels of a key replace
@@ -1996,3 +2000,8 @@ client alone is the dependency (above).
   board; the figures observation `board_figures`' output, both halves showing
   (the user's decisions of 2026-11-03 on step 5: the figures as the
   mapping says, every repo and legacy label) (this PR)
+- 2026-11-03 proposed: `check_import`'s claim narrowed to what it checks: a
+  reference that does not resolve, or a shape no operation writes, never
+  loads; an effort linked to itself and a parent cycle, which the operations
+  refuse, still load, and no read raises on either (the templet role's
+  review of quarrylith#8) (this PR)

@@ -18,10 +18,10 @@ the pulled rows plus the left rows' counts equal the rows read: nothing
 vanishes unreported. An `unsorted` effort in the document is the record's own,
 `schema.unsorted_effort`. Every reference names a record the document holds,
 and a task's `loop`, `needs` and `supervision` are as `file_task` writes
-them: what no operation could write is refused. `compose` turns a checked
-document into a dump, pure: the same document gives the same dump, the
-`imports` record first, then the records in `RECORDS` order, then `pulled` and
-`left`, then the counters.
+them: a reference that does not resolve, or a shape no operation writes, is
+refused. `compose` turns a checked document into a dump, pure: the same
+document gives the same dump, the `imports` record first, then the records in
+`RECORDS` order, then `pulled` and `left`, then the counters.
 
 The older board kept runs without tasks. Its reader makes one task per item
 and kind of its runs, labelled `legacy-run:<kind>` (the older board's own name

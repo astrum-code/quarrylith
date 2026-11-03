@@ -3,7 +3,7 @@ title: The record
 owner: workbench
 mechanism: record
 templet: 3159
-status: agreed
+status: built
 base:
   quarrylith: 2b08bf0
   benchLith: d3fb1bd5
@@ -23,23 +23,26 @@ pins:
       - bin/lith::board_figures
       - bin/lith::LocalBoard
     at: d3fb1bd5
+  - repo: quarrylith
+    paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
+    at: efdae46
   - repo: henge-store-client
     symbols:
-      - src/henge/store/client/store.py::Store.local
+      - src/henge/store/client/store.py::Store.connect
+      - src/henge/store/client/store.py::Store.sync
+      - src/henge/store/client/store.py::Store.durability
+      - src/henge/store/client/store.py::Store.get_many
       - src/henge/store/client/asyncstore.py::AsyncStore.watch
       - src/henge/store/client/api.py::Item
-      - src/henge/store/client/api.py::encode_key
     paths: [src/henge/store/client/ops.py]
-    at: 437de30
+    at: d7c2bec
   - repo: henge-store-serve
     symbols:
+      - src/henge/store/serve/single.py::Single
       - src/henge/store/serve/engine.py::Partition.put
       - src/henge/store/serve/engine.py::Partition._check
-      - src/henge/store/serve/engine.py::Space
-      - src/henge/store/serve/local.py::Local
       - src/henge/store/serve/router.py::MANY
-      - src/henge/store/serve/segments.py::Durability
-    at: 1081c1b
+    at: 071c171
 ---
 
 # The record
@@ -126,7 +129,9 @@ events and so hold the same records, and `dump()` shows it.
 quarrylith is one package, `quarrylith`, Apache-2.0. Through build step 5
 it depends on **the standard library only**. Step 6 adds
 **henge-store-client** (Apache-2.0), imported only by
-`quarrylith.record.henge`, and nothing else: the Henge backend reaches a
+`quarrylith.record.henge`, and nothing else (henge-core, the client's own
+dependency, is named beside it for its git source, and the client's
+Python 3.12 is the package's floor): the Henge backend reaches a
 running store with `Store.connect(ipc://...)`, which needs only the client
 (user, 2026-10-30). `src/` never imports henge-store-serve (FSL-1.1).
 henge-store-serve is a **dev-only** dependency, for the tests that start a
@@ -138,7 +143,7 @@ store (Rationale). Its modules:
 | `quarrylith.record.events` | `Event`, `EVENT_KINDS`, `apply(view, event)`: the fold |
 | `quarrylith.record.contract` | `Record` (an `abc.ABC`), the operations written once over it, `open_record`, `BACKENDS`, `Refused`, `Unavailable`, `Unknown`; `check_dump(dump)`, `load`'s checks with no store; `efforts_of(reader, item)`, an item's efforts (its own links, else its parent chain's) |
 | `quarrylith.record.sqlite` | `SqliteRecord` |
-| `quarrylith.record.henge` | `HengeRecord(store, name)`; `open_henge(folder, name)` (step 6) |
+| `quarrylith.record.henge` | `HengeRecord(store, name)`; `open_henge(folder, name, *, timeout_s=30)`; `HengeFollower(folder, name)`, a follower in another process (step 6) |
 | `quarrylith.record.importing` | `IMPORT_FORMAT`, `check_import(doc)`, `compose(doc) -> dump` |
 | `quarrylith.gauges` | `Gauge`, `GAUGES`, `measure(record, *, now, window_ms)`, `by_name(name)` |
 | `quarrylith.cli` | `quarrylith record init|check|dump|load|import|events|gauges` |
@@ -609,7 +614,7 @@ such case.
   |---|---|---|
   | `.journal` | `[seq]` | the **journal entry**: `{"event": the event, "priors": [[kind, key, {match field: value} or null], ...]}` |
   | `.rec` | `[kind, *key]` | the record's fields, plus `_seq`, the event that last wrote it |
-  | `.idx` | `[kind, field, value, chunk]`, `[kind, "*", chunk]`, `[journal, subject, chunk]`; for `str` keys also `[kind, field, value, "dir"]` | a chunk: the sorted keys of the records of `kind` whose `field` is `value` (`*`: all of the kind's keys; `journal`: the seqs of a subject). A directory: the chunk numbers, each with its lowest key |
+  | `.idx` | `[kind, field, value, chunk]`, `[kind, "*", chunk]`, `[journal, subject, chunk]`; for every record kind also its directory, `[kind, field, value, "dir"]` and `[kind, "*", "dir"]` | a chunk: the sorted keys of the records of `kind` whose `field` is `value` (`*`: all of the kind's keys; `journal`: the seqs of a subject). A directory: the chunk numbers, each with its lowest key |
   | `.state` | `["head"]`, `["applied"]`, `["writer"]`, `["schema"]`, `["loading"]` | the highest committed seq; the highest applied; the writer's pid, host and open time; the schema version; a load in progress, with its dump's digest. Not journaled, and apart from the `meta` record kind |
 
 - **The priors.** For each put, the writer records the values its `match`
@@ -619,14 +624,17 @@ such case.
   the event alone. They make every index move of an event redoable, since
   adding a key to a chunk and removing one are idempotent.
 - **Chunks.** A chunk holds at most 8,192 keys and at most 512 KiB encoded.
-  - **Counter keys.** For a kind keyed by an `int` counter (every `id`,
-    `items.number`, and the journal's seqs), a key's chunk is `key //
-    8192`. It never splits, and a reader knows the chunks from the counter
-    (0 to `next // 8192`; an absent one is empty).
-  - **The directory, for every other key.** That includes `efforts.id`, a
-    `str` such as `0001`. Its `"dir"` blob lists the chunks by number. Chunk
-    0 is first and has no lower bound. Each other chunk is listed with its
-    lowest key.
+  - **The journal's seqs.** A subject's chunk is `seq // 8192`. It never
+    splits, and a reader knows the chunks from `head` (0 to `head // 8192`;
+    an absent one is empty).
+  - **The directory, for every record's key**, `int` and `str` alike: a
+    kind's `*` index and each of its match fields' indexes. A counter is no
+    guide to a record's ids: a load takes a dump whose counter lags its ids
+    (`check()` reports it, `load` does not refuse it), a beat names any run,
+    and an id may be negative, so a reader that took the chunks from a
+    counter would miss records. Its `"dir"` blob lists the chunks by
+    number. Chunk 0 is first and has no lower bound. Each other chunk is
+    listed with its lowest key.
     - A chunk's **range** runs from its lowest key up to the next listed
       key. Every key below the first listed lowest key is chunk 0's, so a
       key below every key so far needs no directory change.
@@ -798,8 +806,8 @@ such case.
   | 9 | the load's start: `.state ["loading"]` with the dump's digest | `.state` | `absent`, or fresh read of a null | `journal/[head+1]` | `Unavailable` |
   | 10 | the load's events | rows 1-6 | | | |
   | 11 | the load's end: `loading` put to null, never deleted | `.state` | own put (row 9), or fresh read | `journal/[head+1]` after a fresh read | `Unavailable`: `loading` stays, and the next open goes on with the same dump |
-  | 12 | `ack`: a cursor, the larger of read and own | `.rec` `cursors` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
-  | 13 | `beat`: a beat, the later `at` | `.rec` `beats` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
+  | 12 | `ack`: a cursor, the larger of read and own; a new one's `*` chunk first | `.rec` `cursors`; `.idx` `[cursors, "*", n]` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
+  | 13 | `beat`: a beat, the later `at`; a new one's `*` chunk first | `.rec` `beats`; `.idx` `[beats, "*", n]` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
 
   A `readonly` open makes rows 6 and 7 only. `check()`, `dump()` and every
   read put nothing. A path not in this table is a change to this page.
@@ -813,6 +821,12 @@ such case.
   most 1,000 (henge's `MANY`), and checks each record against every match
   field. `dump()` walks `[kind, "*", chunk]` the same way. No read lists a
   space.
+- **The writer's memory.** The writer keeps each object it has read or
+  put, its value and version (a journal entry only as it commits it; at
+  most 100,000 objects), so a decide or a read repeats no `get`. A version
+  kept from a read was read before a later check, or it is the writer's own
+  put, so the guard holds for it. Recovery, `check()` and any failed put
+  start again from fresh reads.
 - **Events**: `events(wait=)` wakes on the writer's own commit, in the
   process. A follower in another process watches `.state ["head"]` with
   `AsyncStore.watch(..., idle_s=1.0)`: at least once, with the version, and
@@ -820,9 +834,11 @@ such case.
   dropped note stand that long, since the publisher never waits for a slow
   subscriber. The follower reads `.journal` from its cursor up to `head`
   with `get_many`, and so gives `events()`'s semantics, latency under a
-  second included. `cursors` and `beats` are `.rec` entries the writer puts
-  without an event, each with its expected version. A follower's cursor is
-  its own, until step 5's service records it.
+  second included. `HengeFollower(folder, name)` is that follower:
+  `events(cursor, *, limit, wait)` and `head()`, with no lock and no write.
+  `cursors` and `beats` are `.rec` entries the writer puts without an
+  event, each with its expected version. A follower's cursor is its own,
+  until step 5's service records it.
 - **The resumable load** writes events in seq order, each through the
   commit protocol. It first writes `.state ["loading"]`, with the digest
   of the dump (sha256 of its canonical encoding). A load stopped part-way
@@ -832,9 +848,18 @@ such case.
   null, never a delete, so a late `absent` put of the load's start meets
   `Conflict` and cannot bring it back (henge-2, round 4).
 - **`check()`** on Henge also reports a journal hole (a seq absent below
-  `head`), a record whose `_seq` is past `applied`, and an index chunk that
-  disagrees with the records. An undurable store (tests, the bench) can
-  come back torn after a power cut, and these findings say so.
+  `head`), `applied` behind `head`, a record whose `_seq` is past
+  `applied`, and an index chunk that disagrees with the records: a key
+  indexed with no record, a record the journal wrote that its kind's `*`
+  index lacks, or a match field's index, at any value the journal ever
+  wrote, that is not the records'. An undurable store (tests, the bench)
+  can come back torn after a power cut, and these findings say so.
+- **`backup(dir)`** writes the record's `dump()` as one JSON file, `0600`
+  from its creation, in `dir` (`0700`).
+- **The record's timeout**, `timeout_s` (30 s; tests shorten it), is how
+  long the record waits for the store before it gives an operation up:
+  past the commit point that is `Unknown`, before it `Unavailable`. The
+  client tries a call every 2 s, with the same request id, for that long.
 - **`durable`** reads the store's report, `durability(space)`: it is
   `power_safe and ordered`. That is, the `sync` barrier is power-safe
   (`F_FULLFSYNC` on macOS, `fsync` on Linux), and the store is
@@ -1329,8 +1354,9 @@ Each item is a test marked `templet:3159`, run over every backend in
   than 1,000 keys
 - [ ] Henge: `check()` reports a journal hole, a record past `applied` and
   an index chunk that disagrees with the records
-- [ ] Henge: no read lists a space (a store fake that refuses listing runs
-  the whole suite)
+- [ ] Henge: no read lists a space (a client that refuses listing, a
+  delete and a `get_many` past 1,000 keys runs the whole suite, on the real
+  store)
 - [ ] export: `bin/lith quarry export` over a fixture legacy board opened
   read-only writes the document `0600` from its creation, replaces an
   existing `--out` whole, and leaves the fixture's bytes unchanged
@@ -1739,11 +1765,14 @@ the store stays unreachable. Step 5's service needs the same rule for a
 caller whose connection drops (left to it).
 
 **Indexes as blob chunks.** No Henge read lists a space, so every read the
-contract offers has to come from a key the record already knows. Chunks by
-counter (`key // 8192`) never split or renumber, which suits every kind
-keyed by a counter, and a reader finds them from the counter. `str` keys
-need a directory, and a byte bound as well as a count, since 8,192 keys of
-256 bytes would pass `max_inline`. The largest legacy group (2,222 done
+contract offers has to come from a key the record already knows. The
+journal's seqs chunk by `seq // 8192`, which never splits or renumbers,
+and a reader finds the chunks from `head`. Every record kind's keys,
+counter ones included, go through a directory: a counter can lag the ids a
+load brings, and nothing bounds a beat's run, so chunks found from a
+counter could miss a record (step 6). A directory also needs a byte bound
+as well as a count, since 8,192 keys of 256 bytes would pass
+`max_inline`. The largest legacy group (2,222 done
 items) is one chunk. Henge tables were rejected (Reuse, above).
 
 **One key order, and no `json` in keys.** SQLite would order a `json` key
@@ -2005,3 +2034,28 @@ client alone is the dependency (above).
   loads; an effort linked to itself and a parent cycle, which the operations
   refuse, still load, and no read raises on either (the templet role's
   review of quarrylith#8) (this PR)
+- 2026-11-03 proposed: every record kind's index goes through a directory,
+  counter keys included (a counter can lag a loaded record's ids, and a beat
+  names any run), and only the journal's subject index chunks by
+  `seq // 8192`; the `*` index has its directory too (`[kind, "*", "dir"]`):
+  in the layout's table, under "Chunks" and in the Rationale (this PR)
+- 2026-11-03 proposed: the writer's memory: each object read or put kept
+  with its version (a journal entry only as it is committed; 100,000 at
+  most), its versions under the guard, so a decide or a read repeats no
+  `get` (this PR)
+- 2026-11-03 proposed: `HengeFollower(folder, name)` in the module table and
+  under "Events"; `open_henge`'s `timeout_s` (30 s) and the client's tries
+  every 2 s, under "The record's timeout" (this PR)
+- 2026-11-03 proposed: rows 12 and 13 name the `*` chunk a new cursor or
+  beat joins, put before its record (this PR)
+- 2026-11-03 proposed: `check()` also reports `applied` behind `head`, a key
+  indexed with no record and a record its kind's `*` index lacks, and checks
+  a match field's index at every value the journal wrote (this PR)
+- 2026-11-03 proposed: `backup(dir)` on Henge writes the dump as one JSON
+  file, `0600` from its creation (this PR)
+- 2026-11-03 proposed: henge-core named beside the client for its git
+  source, and Python 3.12, the client's floor, the package's (this PR)
+- 2026-11-03 proposed: "no read lists a space" runs the whole suite through
+  a client that refuses a listing, a delete and a `get_many` past 1,000
+  keys, on the real store, where the item said a store fake (the
+  Rationale: the real store where it exists) (this PR)

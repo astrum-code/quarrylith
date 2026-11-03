@@ -193,7 +193,9 @@ def parser():
 
     def command(name, run, help):
         p = commands.add_parser(name, help=help)
-        p.add_argument("url", help="sqlite:///path/record.sqlite")
+        p.add_argument(
+            "url", help="sqlite:///path/record.sqlite or henge:<folder>#<name>"
+        )
         p.add_argument("--actor", default=_actor(), help="who, as you name yourself")
         p.set_defaults(run=run)
         return p

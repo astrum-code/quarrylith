@@ -1965,8 +1965,8 @@ class Record(abc.ABC):
         field not given keeps its value on an update and takes its default on
         an open (`CHANGE_FIELDS`); an open gives the `title`. `pushed_at`
         moves when the head does. An open change with no `number` takes one by
-        an update; one with a number keeps it, so another `number`, or none,
-        is a second open change on the branch, and refused. Returns the
+        an update; one with a number keeps it, so another `number`, or `None`
+        given, is a second open change on the branch, and refused. Returns the
         change's id, an update that changes nothing too, and writes nothing
         then."""
         given = {

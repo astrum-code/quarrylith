@@ -559,10 +559,11 @@ def test_check_import_resolves_a_reviews_heads():
         assert problem.startswith(f"records.reviews [1]: {says}"), problem
 
 
-#: Fields that hold another record's key and are not in `schema.REFERENCES`,
-#: and why: no operation resolves them, or `check_import` resolves them by
-#: their own rule.
+#: Fields named like a reference that are not in `schema.REFERENCES`, and
+#: why: no operation resolves them, `check_import` resolves them by their own
+#: rule, or they name no record.
 NOT_REFERENCES = {
+    ("efforts", "statement"): "the effort's own statement, a text",
     ("items", "templet"): "edit_item takes any number",
     ("beats", "run"): "a beat is bookkeeping, never refused",
     ("effort_links", "target"): "an item or an effort, by the link's kind",

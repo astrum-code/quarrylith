@@ -16,10 +16,12 @@ import document, plain JSON (`IMPORT_FORMAT`):
 Every table of the older board is named in `pulled` or `left`, and per table
 the pulled rows plus the left rows' counts equal the rows read: nothing
 vanishes unreported. An `unsorted` effort in the document is the record's own,
-`schema.unsorted_effort`, and every effort link names an effort the document
-holds. `compose` turns a checked document into a dump, pure: the same document
-gives the same dump, the `imports` record first, then the records in `RECORDS`
-order, then `pulled` and `left`, then the counters.
+`schema.unsorted_effort`. Every reference names a record the document holds,
+and a task's `loop`, `needs` and `supervision` are as `file_task` writes
+them: what no operation could write is refused. `compose` turns a checked
+document into a dump, pure: the same document gives the same dump, the
+`imports` record first, then the records in `RECORDS` order, then `pulled` and
+`left`, then the counters.
 
 The older board kept runs without tasks. Its reader makes one task per item
 and kind of its runs, labelled `legacy-run:<kind>` (the older board's own name
@@ -28,6 +30,7 @@ for the kind of run, `task` or `review`), so each imported run has its task.
 
 import copy
 
+from . import contract
 from . import events as ev
 from . import schema
 from .schema import RECORDS, SchemaError
@@ -115,15 +118,6 @@ def _records(doc, problems):
         keys = schema.sort_keys(schema.key_of(kind, r) for r in good)
         by_key = {tuple(schema.key_of(kind, r)): r for r in good}
         out[kind] = [by_key[tuple(k)] for k in keys]
-    # an effort link names an effort the document holds
-    efforts = {e["id"] for e in out.get("efforts", ())}
-    for link in out.get("effort_links", ()):
-        if link["effort"] not in efforts:
-            key = schema.key_of("effort_links", link)
-            problems.append(
-                f"records.effort_links {key}: no such effort {link['effort']!r} "
-                "in the document"
-            )
     # `unsorted` is the record's own effort, the same wherever it is made
     for effort in out.get("efforts", ()):
         if effort["id"] == schema.UNSORTED:
@@ -134,6 +128,77 @@ def _records(doc, problems):
                     f"{effort[name]!r}, not {own[name]!r} (schema.UNSORTED_EFFORT)"
                 )
     return out
+
+
+def _id(value):
+    """The id a key's str holds (`"12"`, never `"012"`), or None."""
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        if str(int(value)) == value:
+            return int(value)
+    return None
+
+
+def _references(records, keys, problems):
+    """Every reference resolved within the document, and a task's `loop`,
+    `needs` and `supervision` as `file_task` writes them: a record no
+    operation could write is refused here, not when a gauge or `ready()`
+    reads it after the load."""
+
+    def lacks(kind, rec, what, value, target):
+        problems.append(
+            f"records.{kind} {schema.key_of(kind, rec)}: {what} {value!r}: "
+            f"no such {target[:-1]} in the document"
+        )
+
+    for (kind, field), target in schema.REFERENCES.items():
+        for rec in records.get(kind, ()):
+            value = rec[field]
+            if value is not None and (value,) not in keys.get(target, ()):
+                lacks(kind, rec, field, value, target)
+    # an effort link's target by its kind; a plan's is not a record
+    for link in records.get("effort_links", ()):
+        target, kind = link["target"], link["kind"]
+        if kind == "item" and _id(target) is None:
+            problems.append(
+                f"records.effort_links {schema.key_of('effort_links', link)}: "
+                f"target {target!r}: an item link's target is its number"
+            )
+        elif kind == "item" and (_id(target),) not in keys.get("items", ()):
+            lacks("effort_links", link, "target", target, "items")
+        elif kind == "effort" and (target,) not in keys.get("efforts", ()):
+            lacks("effort_links", link, "target", target, "efforts")
+    for review in records.get("reviews", ()):
+        heads = review["heads"]
+        if not isinstance(heads, dict) or not all(
+            _id(c) is not None and isinstance(sha, str) and sha
+            for c, sha in heads.items()
+        ):
+            problems.append(
+                f"records.reviews {schema.key_of('reviews', review)}: heads "
+                f"{heads!r}: a review's heads are {{change id: sha}}"
+            )
+            continue
+        for change in heads:
+            if (_id(change),) not in keys.get("changes", ()):
+                lacks("reviews", review, "heads change", change, "changes")
+    shapes = (
+        ("loop", contract._loop),
+        ("needs", contract._needs),
+        ("supervision", contract._supervision),
+    )
+    for task in records.get("tasks", ()):
+        for name, made in shapes:
+            where = f"records.tasks {schema.key_of('tasks', task)}: {name}"
+            value = task[name]
+            try:
+                written = made(value)
+            except contract.Refused as e:
+                problems.append(f"{where} {value!r}: {e.reason}")
+                continue
+            if written != value:
+                problems.append(
+                    f"{where} {value!r}: an operation writes it as {written!r}"
+                )
 
 
 def _counters(doc, records, problems):
@@ -377,16 +442,18 @@ def _parse(doc):
             problems.append(f"{part}: not a part of an import document")
     source = _source(doc, problems) if "source" in doc else None
     records = _records(doc, problems) if "records" in doc else {}
+    # each kind's keys once, so a reference or a pulled row is found without
+    # a scan
+    keys = {
+        kind: {tuple(schema.key_of(kind, r)) for r in rows}
+        for kind, rows in records.items()
+    }
+    _references(records, keys, problems)
     counters = _counters(doc, records, problems) if "counters" in doc else {}
     if source is None or "pulled" not in doc or "left" not in doc:
         return problems, None
     at = source["read_at"] if schema.is_int(source.get("read_at")) else 0
     tables = source["tables"]
-    # each kind's keys once, so a pulled row is found without a scan
-    keys = {
-        kind: {tuple(schema.key_of(kind, r)) for r in rows}
-        for kind, rows in records.items()
-    }
     pulled = _pulled(doc, tables, keys, counters, at, problems)
     left = _left(doc, tables, at, problems)
     n_pulled, n_left, columns = _counts(tables, pulled, left, problems)
@@ -425,10 +492,12 @@ def _parse(doc):
 
 def check_import(doc):
     """None if `doc` is a whole import document, else ImportRefused listing
-    every fault: every record valid against `RECORDS`, every effort link
-    naming an effort the document holds, every `pulled` row naming a record
-    the document holds, every legacy table named in `pulled` or `left` with
-    the rows adding up, and the counters past the ids in use."""
+    every fault: every record valid against `RECORDS`, every reference
+    (`schema.REFERENCES`, an effort link's target, a review's heads) naming a
+    record the document holds, a task's `loop`, `needs` and `supervision` as
+    `file_task` writes them, every `pulled` row naming a record the document
+    holds, every legacy table named in `pulled` or `left` with the rows adding
+    up, and the counters past the ids in use."""
     problems, _ = _parse(doc)
     if problems:
         raise ImportRefused(problems)

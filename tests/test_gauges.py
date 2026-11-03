@@ -402,9 +402,16 @@ def reaches(source):
     It is a lint over plain Python, not a sandbox: a gauge is reviewed code.
     """
     tree = ast.parse(source)
+    parents = {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
     found = []
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.asname is not None:
+                    found.append(f"{line}: imports {alias.name} as {alias.asname}")
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name not in STDLIB:
@@ -424,9 +431,13 @@ def reaches(source):
             if isinstance(base, ast.Name) and base.id == "contract":
                 if node.attr not in CONTRACT_NAMES:
                     found.append(f"{line}: takes contract.{node.attr}")
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in BY_NAME:
-                found.append(f"{line}: calls {node.func.id}")
+        elif isinstance(node, ast.Name):
+            if node.id in BY_NAME or node.id == "__builtins__":
+                found.append(f"{line}: names {node.id}")
+            elif node.id == "contract":
+                parent = parents.get(node)
+                if not (isinstance(parent, ast.Attribute) and parent.value is node):
+                    found.append(f"{line}: uses contract other than contract.<name>")
     return found
 
 

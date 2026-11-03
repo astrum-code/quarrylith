@@ -385,21 +385,20 @@ def test_the_replay_holds_over_the_landing_records_and_a_dump_loads(
 @over_backends
 def test_unsorted_is_the_records_own_whoever_files_first(opener, clock):
     """The `unsorted` effort `file_item` makes is `schema.unsorted_effort`,
-    the same whoever files first: its owner is not the filer's."""
-    made = []
-    for actor in ("alpha", "beta"):
-        rec = opener(actor=actor)
-        if not rec.initialised:
-            rec.init()
-        made.append(rec)
-    first = made[1].file_item("task", "loose", "", filed_by="beta")
-    got = made[1].get("efforts", "unsorted")
+    the same whoever files first: its owner is not the filer's. (One handle
+    at a time: a Henge record has one writer.)"""
+    beta = opener(actor="beta")
+    beta.init()
+    first = beta.file_item("task", "loose", "", filed_by="beta")
+    got = beta.get("efforts", "unsorted")
     assert got == schema.unsorted_effort(clock())
     assert got["owner"] == "record" and got["standing"] == "parked"
+    beta.close()
     clock.step()
-    made[0].file_item("task", "loose too", "", filed_by="alpha")
-    assert made[0].get("efforts", "unsorted") == got
-    assert made[0].read("effort_links", target=str(first))[0]["effort"] == "unsorted"
+    alpha = opener(actor="alpha")
+    alpha.file_item("task", "loose too", "", filed_by="alpha")
+    assert alpha.get("efforts", "unsorted") == got
+    assert alpha.read("effort_links", target=str(first))[0]["effort"] == "unsorted"
 
 
 def _with_event(dump, kind, puts):

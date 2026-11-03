@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """The conformance pattern: every backend in `BACKENDS`, a way to make a
 record's URL on each, and `over_backends` to run a test over all of them. A
-backend with no entry in `URLS` skips with that reason, never passes."""
+backend with no entry in `URLS` skips with that reason, never passes.
+
+Henge runs twice, on the `single` store and on the `mirror` (`henge-single`,
+`henge-mirror`): each is one store per test process, and each test's record
+a fresh name in it. `URLS["henge"]` is the single store's."""
 
 import pytest
+from hengestore import store
 
 from quarrylith.record import contract
 
@@ -13,12 +18,36 @@ def _sqlite(folder):
     return f"sqlite:///{folder / 'record.sqlite'}"
 
 
-#: How a test makes a fresh record's URL in a folder, per backend.
-URLS = {"sqlite": _sqlite}
+def _henge(placement):
+    def make(folder):
+        return store(placement).url()
 
-#: Run a test once per backend: it takes the `backend` argument, and the
-#: `url`, `opener` and `record` fixtures follow it.
-over_backends = pytest.mark.parametrize("backend", sorted(contract.BACKENDS))
+    return make
+
+
+#: How a test makes a fresh record's URL in a folder, per backend (and, for
+#: Henge, per placement).
+URLS = {
+    "sqlite": _sqlite,
+    "henge": _henge("single"),
+    "henge-single": _henge("single"),
+    "henge-mirror": _henge("mirror"),
+}
+
+#: The fixtures each backend runs on.
+FIXTURES = {"sqlite": ["sqlite"], "henge": ["henge-single", "henge-mirror"]}
+
+#: Run a test once per backend's fixture: it takes the `backend` argument,
+#: and the `url`, `opener` and `record` fixtures follow it.
+over_backends = pytest.mark.parametrize(
+    "backend",
+    sorted(f for name in contract.BACKENDS for f in FIXTURES.get(name, [name])),
+)
+
+
+def scheme(backend):
+    """The backend a fixture runs: `henge-mirror` is `henge`."""
+    return backend.split("-", 1)[0]
 
 
 def url_for(backend, folder):

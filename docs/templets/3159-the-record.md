@@ -25,7 +25,7 @@ pins:
     at: d3fb1bd5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: c791a0b
+    at: 7668bbf
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -42,7 +42,9 @@ pins:
       - src/henge/store/serve/engine.py::Partition.put
       - src/henge/store/serve/engine.py::Partition._check
       - src/henge/store/serve/router.py::MANY
-    at: 071c171
+      - src/henge/store/serve/placement.py::MirrorPlacement.write_ack
+      - src/henge/store/serve/worker.py::Worker._execute_now
+    at: 24aeed8
 ---
 
 # The record
@@ -535,11 +537,11 @@ written before it is power-safe on disk. The record's build step waits for
 it (user, 2026-10-30).
 
 **The store's names** are its spec's: benchLith's
-`docs/efforts/0001-the-queue/specs/henge-single-node-store.md`, at f955dab
-(under review). They are `Store.connect("ipc://<folder>/henge.sock")`,
+`docs/efforts/0001-the-queue/specs/henge-single-node-store.md`, reviewed
+and built (the spec at d2d29c6; henge-store-serve at 24aeed8, local mode
+included). They are `Store.connect("ipc://<folder>/henge.sock")`,
 `sync(space)` and `durability(space)`, whose report carries `power_safe`
-and `ordered`. If the store's review changes them, step 6 updates this page
-by a `proposed:` line.
+and `ordered`, and the review left them as this page has them.
 
 The backend reaches it with **`Store.connect("ipc://<folder>/henge.sock")`**,
 which needs only the Apache-2.0 client, to a store that runs as its own
@@ -589,13 +591,27 @@ such case.
   `.state` puts, and the bookkeeping, all under the one lock that orders
   its operations. So the store takes the record's writes in one order, on
   every worker that holds them (Boundaries: "a prefix after a power cut").
-  The record's spaces keep the store's default `write_ack` (every home). A
-  space that declared `write_ack: 1` on a mirror would break that one
-  order.
+  A mirror ignores a space's or a request's `write_ack`
+  (`MirrorPlacement.write_ack`, and henge-store-serve's
+  `test_a_request_s_own_write_ack_is_not_honoured_on_a_mirror`): a put is
+  answered OK only once both copies hold it.
+- **Only past an answer.** The writer goes on past a value only once the
+  store has answered a put of it to this writer. On a mirror, a put that
+  the second copy did not take in time is applied by the leader and
+  answered `Unavailable` ("written here, held by 1 of the 2 copies
+  wanted"), and either copy may answer a read. So a value the writer read
+  rather than had answered is put again, the same value with the version
+  read, and the writer goes on once that put is answered: the commit put's
+  own entry read back after a `Conflict`, a retry or a redo whose fresh
+  read leaves nothing to put, and the entry a redo starts from. The leader
+  ships a whole object to a copy that lacks it, so the answer means both
+  copies hold it. A put of a value read again keeps its content, and a late
+  `absent` put still meets `Conflict`. It costs one put on the error path
+  and in a redo, none on the normal path.
 - **Other processes** may follow the record's events directly: `watch`
   `.state ["head"]` and `get_many` `.journal` up to it, over `henge.sock`,
-  and `watch.sock` for the watch. Every other read, and every operation, goes through the writer's
-  process, which is step 5's service. Records past `head` may be half
+  and `watch.sock` for the watch. Every other read, and every operation,
+  goes through the writer's process, which is step 5's service. Records past `head` may be half
   applied, so a reader in another process must not read `.rec`. Inside the
   process, one lock orders the operations, and a `reading()` holds a read
   lock. So a `dump()` or a gauge sweep delays the writer for its length,
@@ -720,7 +736,9 @@ such case.
     `loading`, bookkeeping) it raises `Unavailable`.
   - **A `Conflict` at the put** means the object moved after its version was
     seen. The writer reads it again, checks again, and puts again. The same
-    applies after any error from the store at a put.
+    applies after any error from the store at a put. A fresh read that
+    leaves nothing to put still puts the value read, after the check ("Only
+    past an answer").
   - **Why it holds.** Another writer puts an object for an event past
     `high` only after its entry at `high + 1` exists: no seq is taken
     before the one below it, and step 3 follows step 2. So:
@@ -744,15 +762,19 @@ such case.
   - **A `Conflict` at step 2** is read back. If `journal/[seq]` holds this
     entry (compared by `schema.canonical`, since msgpack gives tuples back
     as lists), it was this writer's own retried put (henge's retry gap,
-    #158), and the operation goes on to step 3. If it holds another entry,
+    #158), or one the store applied and answered `Unavailable`. The writer
+    puts the entry again with the version read, and the operation goes on
+    to step 3 once that put is answered ("Only past an answer"). A journal
+    entry is never put with another value, so this put needs no check. If
+    the read finds nothing (a copy that lacks it answered), the put
+    `absent` is sent again. If it holds another entry,
     another writer took that seq: a gone one's late request, or a live one.
     The writer runs recovery, and the operation raises `Unavailable`: it did
     not happen.
   - **Any other error at step 2** (the store unreachable, a timeout): the
     writer sends the same put again, `expect absent`, until the store
-    answers. The commit put is idempotent by content, so a success, or a
-    `Conflict` with this entry, means it committed, and a `Conflict` with
-    another entry is the case above. If the store stays unreachable past the
+    answers. The commit put is idempotent by content, so a success means it
+    committed, and a `Conflict` is read back as above. If the store stays unreachable past the
     record's timeout, the record closes and the operation raises `Unknown`.
     If the entry landed, the next open's recovery finishes it.
     - **The same request where the client allows it.** The client retries
@@ -761,11 +783,14 @@ such case.
       landed with its first reply, and on a mirror re-ships it to a copy
       that lacks it. The record sets the client's `tries` and timeout so
       that the commit's whole wait is one call where it can. At 437de30 a
-      caller cannot give a request id of its own. So a resend after a call
-      has given up is a new request: its `Conflict` with this entry still
-      means committed, and a mirror copy that lacked the entry is made good
-      by the store's scan. A way to resend with the caller's own id is
-      henge's to offer, and step 6 uses it if it exists by then.
+      caller cannot give a request id of its own, and at d7c2bec the client
+      does not resend a reply that asks for a retry with the same id
+      ("written here, held by 1 of the 2 copies"). So a resend after a call
+      has given up, or after that reply, is a new request: its `Conflict`
+      with this entry is put again with the version read, and that put,
+      answered, makes good a mirror copy that lacked the entry. A way to
+      resend with the caller's own id is henge's to offer, and the record
+      uses it once it exists.
   - **An error or a `Conflict` at steps 3 or 4** is the guard's retry: read
     the object, check `journal/[seq+1]`, put again. If the store stays
     unreachable, the record closes and the operation raises `Unknown`. It
@@ -775,7 +800,9 @@ such case.
   - **No entry at a+1:** nothing to redo. Step 4, through the guard, brings
     `head` up to a (a crash can fall between the two `.state` puts).
   - **One entry, at a+1, and none at a+2:** it redoes that entry whole,
-    with `high` = a+1. That covers every record put (whole values), every
+    with `high` = a+1. It first puts the entry itself again, with the
+    version read, and goes on once that put is answered ("Only past an
+    answer"). That covers every record put (whole values), every
     index move from the priors (loads filtered to their range, a split
     remade as above), and then step 4, each put through the guard. It does
     not check `_seq`. An event whose journal entry was written is never
@@ -795,12 +822,12 @@ such case.
 
   | # | put path | objects | `expect` from | check | when the check finds an entry |
   |---|---|---|---|---|---|
-  | 1 | the commit, step 2 (re-sent after an error) | `journal/[seq]` | `absent` | itself: one entry per seq | its `Conflict` is read back: this entry goes on; another entry, recovery (row 6) and `Unavailable` |
+  | 1 | the commit, step 2 (re-sent after an error) | `journal/[seq]` | `absent`; this entry read back, the version read | itself: one entry per seq | its `Conflict` is read back: this entry is put again with the version read, and goes on once answered; another entry, recovery (row 6) and `Unavailable` |
   | 2 | the event's records, step 3 (`meta` counters included) | `.rec` | decide's read, or own put | the commit put | `Unknown` |
   | 3 | the event's index edits and a split, step 3 | chunks, directories; new chunks `absent` | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
   | 4 | `applied` and `head`, step 4, only upward | `.state` | decide's read, or own put | the commit put | `Unknown` |
-  | 5 | a retry after an error or `Conflict` at rows 2-4 | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
-  | 6 | recovery's redo of one entry, a split's redo and step 4 included | as rows 2-4 | fresh read | `journal/[a+2]`; a second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
+  | 5 | a retry after an error or `Conflict` at rows 2-4; nothing left to put, the value read put again | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
+  | 6 | recovery's redo of one entry: the entry put again first, then rows 2-4, a split's redo included; nothing left to put, the value read put again | `journal/[a+1]`, then as rows 2-4 | the entry's version as read; fresh read | `journal/[a+2]` (the entry's put needs none); a second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
   | 7 | `.state ["writer"]`, at open after recovery | `.state` | fresh read | `journal/[head+1]` | `Unavailable`: the open is refused |
   | 8 | `init()`: `.state ["schema"]`, and `applied` and `head` at 0 | `.state` | `absent` | `journal/[1]` | `Unavailable` |
   | 9 | the load's start: `.state ["loading"]` with the dump's digest | `.state` | `absent`, or fresh read of a null | `journal/[head+1]` | `Unavailable` |
@@ -862,6 +889,11 @@ such case.
   long the record waits for the store before it gives an operation up:
   past the commit point that is `Unknown`, before it `Unavailable`. The
   client tries a call every 2 s, with the same request id, for that long.
+  A call the store refuses at once is tried again after a pause, 10 ms
+  first and each the double of the one before, up to 2 s, so a store that
+  refuses at once (a mirror's start, a worker dropped for silence) is not
+  hit as fast as the loop turns. A refusal for good (`TooLarge`, `Invalid`,
+  `Forbidden`) gives up at once, as the timeout would.
 - **`durable`** reads the store's report, `durability(space)`: it is
   `power_safe and ordered`. That is, the `sync` barrier is power-safe
   (`F_FULLFSYNC` on macOS, `fsync` on Linux), and the store is
@@ -870,14 +902,19 @@ such case.
   `single` or `mirror` alike (on the mirror, `sync` is a barrier on both
   workers).
   - It gives the record a prefix of its writes because the writer sends one
-    put at a time, each answered before the next is sent. Every earlier put
+    put at a time, each answered before the next is sent, and goes on only
+    past a put answered to it ("Only past an answer"). Every earlier put
     was answered before a later one was sent, so a surviving put survives
     with every put before it: a prefix, in the writer's order.
   - A store whose report says otherwise (a `ring`, or `full_sync: None`)
     opens with `durable` false, so a shared open of it is refused unless
     `allow_undurable` (tests and the bench).
-  - A store without the operations (today's local mode: `batch`, 64
-    separately synced partitions, no `sync`) is refused at open, as above.
+  - Henge's local mode is the single store since henge-store-serve 24aeed8
+    (`Local(folder)`, `henge local DIR` and `Store.local` run a `Single`):
+    it serves the same `henge.sock`, `sync` and report, and the record
+    opens on it unchanged. A local folder of several workers is a ring, so
+    its report says `ordered: false` and `durable` is false. A store
+    without the operations is refused at open, as above.
   - **The report is read again** after any `Unavailable` from the store,
     before the next operation, since a store restarted under other
     settings may answer on the same socket. A shared record whose report
@@ -1343,11 +1380,24 @@ Each item is a test marked `templet:3159`, run over every backend in
   chunk; a redo after the directory put makes no second split; a key below
   every key of a directory goes in chunk 0 with no directory put
 - [ ] Henge: a `Conflict` at the commit point that is the writer's own
-  retried put (its entry read back with tuples as lists) goes on as
-  committed; an error at the commit point re-sends
+  retried put (its entry read back with tuples as lists) puts the entry
+  again with the version read, and goes on as committed once that put is
+  answered; an error at the commit point re-sends
   the same put and returns the operation's result; a store unreachable past
   the timeout raises `Unknown`, and the next open finishes an entry that
   landed
+- [ ] Henge, the mirror: with the second copy refusing the replicate of one
+  put once (the leader applied it and answered `Unavailable`), the writer
+  puts again, answered, the value it read back from the leader before it
+  goes on: the commit put's entry, the entry a redo starts from, and a
+  chunk whose retry has nothing left to put. With the store's default scan
+  pause and no worker lost, the second copy alone gives `events()` with no
+  gap and a clean `check()`; with the leader then lost for good, the record
+  on the second copy has no hole below `head`, and goes on
+- [ ] Henge: a call the store refuses at once is tried again after a pause,
+  each the double of the one before, up to `TRY_MS`, until the timeout (a
+  read, a put, the commit put and the sync); a refusal for good
+  (`TooLarge`, `Invalid`, `Forbidden`) gives up at once
 - [ ] Henge: a load stopped part-way continues from `head() + 1` at the
   next open when given the same dump, refuses a different dump, and refuses
   every other operation until it ends
@@ -1509,7 +1559,10 @@ after step 6. The switch (#3170) waits on the bake-off.
     workers' tails (henge-2, round 2).
     - The writer sends one put at a time, each answered before the next, so
       each worker takes the record's writes in that one order, and what
-      survives is a prefix of them.
+      survives is a prefix of them. It goes on only past a put answered to
+      it, so a value it read back is put again first: on a mirror an
+      `Unavailable` put may sit on the leader alone, and either copy may
+      answer a read (henge-2, step 6's review).
     - The store's spec meets this in its section "The mirror". Both workers
       take a write before it is answered. Each log reopens as a prefix of
       its own (its invariant 6). A mirror that starts from `both` runs one
@@ -2068,3 +2121,26 @@ client alone is the dependency (above).
 - 2026-11-04 proposed: a follower in another process reaches the store
   over `henge.sock`, and `watch.sock` for the watch (the store's watch
   endpoint), where the page said "the same socket" (this PR)
+- 2026-11-04 proposed: "Only past an answer" (henge-2's review of step 6,
+  its fix A, decided by the coordinator, 2026-11-04): the writer goes on
+  past a value only once the store has answered a put of it to this
+  writer, so the commit put's entry read back after a `Conflict`, a retry
+  or a redo whose fresh read leaves nothing to put, and the entry a redo
+  starts from are each put again with the version read, answered, before
+  it goes on: a new bullet, and the step-2 `Conflict`, the request-id
+  note, recovery's one entry, rows 1, 5 and 6, the Boundaries' prefix and
+  `durable`'s prefix argument (this PR)
+- 2026-11-04 proposed: a call the store refuses at once is tried again
+  after a pause, 10 ms doubling up to 2 s, and a refusal for good
+  (`TooLarge`, `Invalid`, `Forbidden`) gives up at once, under "The
+  record's timeout"; two acceptance items for them and for the mirror
+  (this PR)
+- 2026-11-04 proposed: local mode is the single store since
+  henge-store-serve 24aeed8 (`henge local DIR` serves the same
+  `henge.sock`, `sync` and report; a local folder of several workers is a
+  ring, so `durable` is false), where the page said local mode is refused
+  at open; the store's names paragraph cites the reviewed spec (d2d29c6)
+  and the built store, where it said "under review" (this PR)
+- 2026-11-04 proposed: a mirror ignores a space's or a request's
+  `write_ack` (`MirrorPlacement.write_ack`), cited where the page warned
+  against a space declaring `write_ack: 1` (this PR)

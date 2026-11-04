@@ -989,8 +989,8 @@ never reads the legacy file, and bin/lith never imports quarrylith.
   - the `journal` (65,966 events): the legacy record's own history, kept
     readable in the legacy file, which goes read-only. `source.last_seq`
     marks where the new record starts. The figures observation reads it (the
-    first move of each item to merge-ready), and stands behind it as it
-    stands behind `rounds`.
+    first move of each item to merge-ready), and the journal stands behind it
+    as `rounds` does.
   - `ranks` (retired by #3157);
   - `needs_you` (derived, and #3052's to rebuild);
   - `digests` (empty);
@@ -1017,11 +1017,12 @@ never reads the legacy file, and bin/lith never imports quarrylith.
   import takes, every legacy table of the mapping: the journal, `ranks`,
   `needs_you`, `digests`, `rounds`, `mains` and `cursors` left whole by the
   reasons above, `meta` beyond the counters left row by row, and `scratch`,
-  a table the mapping does not know, left as an unknown table. One item, #19, is in two repos
-  and has two labels that are not `key:value`, so it carries two `repo:` and
-  two `legacy:` labels. It is step 5's export of its fixture board, which is
-  built to export it. Where the mapping above leaves a choice, the sample
-  makes it, and step 5 follows (its tests read each from the sample):
+  a table the mapping does not know, left as an unknown table. One item,
+  #19, is in two repos and has two labels that are not `key:value`, so it
+  carries two `repo:` and two `legacy:` labels. It is step 5's export of its
+  fixture board, which is built to export it. Where the mapping above leaves a
+  choice, the sample makes it, and step 5 follows (its tests read each from the
+  sample):
   - the effort's id and `title` are its document's heading's, `# Effort
     <id>: <title>`; its `owner` the document's `Owner:` line; its `slug` the
     title in lower case, each run of other characters a hyphen, and none at
@@ -2010,27 +2011,31 @@ client alone is the dependency (above).
   none at either end; "any of them" for `check()`'s four findings; "or
   `None` given" for `open_or_update_change`'s `number`; two lines reflowed
   (approved: the conformance review of quarrylith#8)
-- 2026-11-03 proposed: the label rule: `schema.MULTI_VALUED_LABELS`, the
+- 2026-11-03 changed: the label rule: `schema.MULTI_VALUED_LABELS`, the
   keys `legacy` and `repo`, may repeat with different values; every other
   key one label per record; no label twice; a task's labels of a key replace
   all of its item's of that key in its effective labels; in the module
   table, under "Labels and flags" and in the acceptance item (the user's
-  decision of 2026-11-03 on step 5: named multi-valued label keys) (this PR)
-- 2026-11-03 proposed: the mapping's `item_repos` and `item_labels`: every
+  decision of 2026-11-03 on step 5: named multi-valued label keys) (approved:
+  the conformance review of quarrylith#9 and the user's merge)
+- 2026-11-03 changed: the mapping's `item_repos` and `item_labels`: every
   row arrives, an item in two repos with both `repo:` labels and each label
   that is not `key:value` its own `legacy:` label, not the first of a key
-  (the user's decision of 2026-11-03 on step 5) (this PR)
-- 2026-11-03 proposed: the sample document's description: twelve items, #19
+  (the user's decision of 2026-11-03 on step 5) (approved: the conformance
+  review of quarrylith#9 and the user's merge)
+- 2026-11-03 changed: the sample document's description: twelve items, #19
   in two repos with two `legacy:` labels, the sample step 5's export of its
   board; the figures observation `board_figures`' output, both halves showing
   (the user's decisions of 2026-11-03 on step 5: the figures as the
-  mapping says, every repo and legacy label) (this PR)
-- 2026-11-03 proposed: `check_import`'s claim narrowed to what it checks: a
+  mapping says, every repo and legacy label) (approved: the conformance review
+  of quarrylith#9 and the user's merge)
+- 2026-11-03 changed: `check_import`'s claim narrowed to what it checks: a
   reference that does not resolve, or a shape no operation writes, never
   loads; an effort linked to itself and a parent cycle, which the operations
   refuse, still load, and no read raises on either (the templet role's
-  review of quarrylith#8) (this PR)
-- 2026-11-03 proposed: the export's choices beyond the mapping, in "The
+  review of quarrylith#8) (approved: the conformance review of quarrylith#9 and
+  the user's merge)
+- 2026-11-03 changed: the export's choices beyond the mapping, in "The
   import": a legacy `templet` of `this issue writes it` the item's own number
   and `not required` null; a claim's null `branch` or `machine` `""` and a
   run's null `phase_at` its `started_at`; a merge's null `merged_by`
@@ -2038,14 +2043,17 @@ client alone is the dependency (above).
   labels of a one-per-key key the first in sort order kept; a label of a
   barred key left as `legacy:effort:x`, which no label takes; an item left
   for a limit takes its subtree (the templet role's review of
-  benchLith#1649, round 1 choices 1-5 and the three beside them) (this PR)
-- 2026-11-03 proposed: the journal's reason for being left says the figures
+  benchLith#1649, round 1 choices 1-5 and the three beside them) (approved: the
+  conformance review of quarrylith#14)
+- 2026-11-03 changed: the journal's reason for being left says the figures
   observation reads it, as `rounds`' does (the templet role's review of
-  benchLith#1649, round 2 note 1) (this PR)
-- 2026-11-03 proposed: the sample's description names the tables it leaves
+  benchLith#1649, round 2 note 1) (approved: the conformance review of
+  quarrylith#14)
+- 2026-11-03 changed: the sample's description names the tables it leaves
   and why, in place of "two of them left"; the acceptance item reads "a key
   other than `legacy` and `repo`" (the templet role's review of
-  quarrylith#9, notes 1 and 4) (this PR)
-- 2026-11-03 proposed: the benchLith pin's `at` the export's merge,
+  quarrylith#9, notes 1 and 4) (approved: the conformance review of
+  quarrylith#14)
+- 2026-11-03 changed: the benchLith pin's `at` the export's merge,
   `2a8a78e5` (the templet role's review of benchLith#1649, `docs-later`)
-  (this PR)
+  (approved: the conformance review of quarrylith#14)

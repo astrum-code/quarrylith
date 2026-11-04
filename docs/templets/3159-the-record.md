@@ -25,7 +25,7 @@ pins:
     at: d3fb1bd5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: aef842a
+    at: c791a0b
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -593,8 +593,8 @@ such case.
   space that declared `write_ack: 1` on a mirror would break that one
   order.
 - **Other processes** may follow the record's events directly: `watch`
-  `.state ["head"]` and `get_many` `.journal` up to it, over the same
-  socket. Every other read, and every operation, goes through the writer's
+  `.state ["head"]` and `get_many` `.journal` up to it, over `henge.sock`,
+  and `watch.sock` for the watch. Every other read, and every operation, goes through the writer's
   process, which is step 5's service. Records past `head` may be half
   applied, so a reader in another process must not read `.rec`. Inside the
   process, one lock orders the operations, and a `reading()` holds a read
@@ -837,8 +837,10 @@ such case.
   second included. `HengeFollower(folder, name)` is that follower:
   `events(cursor, *, limit, wait)` and `head()`, with no lock and no write.
   `cursors` and `beats` are `.rec` entries the writer puts without an
-  event, each with its expected version. A follower's cursor is its own,
-  until step 5's service records it.
+  event, each with its expected version, and an `ack` or a `beat` then ends
+  with one `sync(space)`, as SQLite's commit syncs them, so a cursor never
+  steps back across a power cut (user, 2026-11-04). A follower's cursor is
+  its own, until step 5's service records it.
 - **The resumable load** writes events in seq order, each through the
   commit protocol. It first writes `.state ["loading"]`, with the digest
   of the dump (sha256 of its canonical encoding). A load stopped part-way
@@ -1841,7 +1843,7 @@ tail. That holds. So the page asked only that a write is acknowledged once
 it is durable and that writes keep their order, and left the unit of sync
 to the store's step. That step decided it: one `sync` barrier per
 operation, with group commit (user, 2026-10-30). The backend calls it once,
-at step 4.
+at step 4, and once after an `ack` or a `beat` (user, 2026-11-04).
 
 **`durable` means power-safe** (user, 2026-10-30). A record that runs our
 development must survive the laptop losing power. So both backends sync
@@ -2059,3 +2061,10 @@ client alone is the dependency (above).
   a client that refuses a listing, a delete and a `get_many` past 1,000
   keys, on the real store, where the item said a store fake (the
   Rationale: the real store where it exists) (this PR)
+- 2026-11-04 proposed: `ack` and `beat` end with one `sync(space)` after
+  their last put, as SQLite's commit syncs them, so a cursor never steps
+  back across a power cut (user, 2026-11-04): under "Events" and in the
+  Rationale (this PR)
+- 2026-11-04 proposed: a follower in another process reaches the store
+  over `henge.sock`, and `watch.sock` for the watch (the store's watch
+  endpoint), where the page said "the same socket" (this PR)

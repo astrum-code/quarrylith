@@ -1,0 +1,2 @@
+bump: minor
+- `quarrylith.order.walk.Walk` walks a sequence in its own order: it cuts a candidate for its role's instances and for a repo at the landing limit (counting the work in flight), passes a candidate the allocator refused until it has waited `hold_after_s`, and then holds back what needs the resource it was short of; it reads the refusal by attribute name and keeps the first-refused times in the caller's map

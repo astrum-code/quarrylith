@@ -601,7 +601,10 @@ them is either a resource here or dropped:
   seam leaves those to the order (invariant 3). Today's only lane has `min`
   0, so the switch loses nothing. Room kept for something outside the queue,
   a slot for the user's own session, say, is a standing consumer:
-  `[[consumer]]` with `"slots.claude-code" = 1`.
+  `[[consumer]]` with `"slots.claude-code" = 1`. A slot kept for one kind
+  of work (#2554's Codex slot for a long supervised run) is a partition, not
+  a reserve: a resource of its own, as `lab.smoke` is, taken by a class that
+  names it, and its budget, in place of `harness`.
 - **A share keeps its ceiling, as `max`**: a quarter of 4 slots is `max =
   1`. Its other half, a lane under its share going first, is ordering, and
   the order's strict rank across efforts (the user, 2026-11-03) takes its

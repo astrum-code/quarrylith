@@ -235,7 +235,7 @@ def test_a_refusal_reads_its_waits_and_until_from_its_shorts():
 def test_a_refusal_with_no_shorts_is_refused():
     """templet:3161 -- a Refusal names its reason: with no short there is
     none."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least one short"):
         refuse(5, "agent", {}, [], node="laptop")
 
 

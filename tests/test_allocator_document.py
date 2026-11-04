@@ -97,6 +97,7 @@ def test_amounts_with_units_become_bytes_rounded_up():
     assert parse_amount("0.5B", "bytes") == 1
     assert parse_amount("0GiB", "bytes") == 0
     assert parse_amount("1.0000000001B", "bytes") == 2
+    assert parse_amount("2.0000000000000001B", "bytes") == 3  # no float
     assert parse_amount(7, "bytes") == 7
     assert parse_amount(3, "slots") == 3
     for value, unit in (

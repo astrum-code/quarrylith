@@ -191,7 +191,7 @@ def test_the_landing_limit_cuts_new_work_at_the_limit(backend, record, clock):
     resync = job(record, flags=["resync"], labels=["repo:widgets"])
     tick(clock)
     sent_back = item(record, "sent back", role="r6", labels=["repo:widgets"])
-    task_of(record, sent_back)
+    sent_task = task_of(record, sent_back)
     grant(record, sent_back)
     record.edit_item(sent_back, review_round=1)
     verdict = record.file_review(sent_back, 1, "pool", author="alpha")
@@ -209,10 +209,11 @@ def test_the_landing_limit_cuts_new_work_at_the_limit(backend, record, clock):
         [own_change, elsewhere, unlabelled, review, f"task {resync}", sent_back],
         key=str,
     )
-    exempt = {c.item or c.task: c.exempt for c in sequence.candidates}
-    assert exempt[review] == "review"
-    assert exempt[sent_back] == "post-review"
-    assert exempt[new] is None
+    exempt = {c.key: c.exempt for c in sequence.candidates}
+    assert exempt[("item", review)] == "review"
+    assert exempt[("task", resync)] == "resync"
+    assert exempt[("task", sent_task)] == "post-review"
+    assert exempt[("item", new)] is None
 
 
 @over_backends
@@ -295,9 +296,7 @@ def test_an_item_in_two_repos_is_cut_by_either_and_counts_in_each(
 
 
 @over_backends
-def test_a_refused_candidate_is_passed_by_a_later_one_that_fits(
-    backend, record, clock
-):
+def test_a_refused_candidate_is_passed_by_a_later_one_that_fits(backend, record, clock):
     """templet:3163 -- a refused candidate is passed, until it has waited
     `hold_after_s`; its wait starts at the sequence's `at`."""
     first, second, third = listed(record, clock, 3)
@@ -404,13 +403,14 @@ def test_a_hold_with_an_until_names_it(backend, record, clock):
     settings = Settings()
     sequence = sequence_at(record, settings)
     since = {("item", a): NOON - HOUR}
+    needs = {b: {"budget": 1}}
 
     walk = Walk(sequence, settings=settings, waiting=dict(since))
-    drive(walk, sequence, {a: refusal("budget", until=utc(2023, 11, 15, 18))})
+    drive(walk, sequence, {a: refusal("budget", until=utc(2023, 11, 15, 18))}, needs)
     assert why_of(walk, b) == f"held behind #{a}: budget until 18:00"
 
     walk = Walk(sequence, settings=settings, waiting=dict(since))
-    drive(walk, sequence, {a: refusal("budget", until=utc(2023, 11, 16, 2))})
+    drive(walk, sequence, {a: refusal("budget", until=utc(2023, 11, 16, 2))}, needs)
     assert why_of(walk, b) == f"held behind #{a}: budget until 2023-11-16 02:00"
 
     day = {("item", a): NOON - 14 * HOUR}

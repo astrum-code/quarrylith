@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """quarrylith's command line: `quarrylith record
-init|check|dump|load|import|events|gauges URL`.
+init|check|dump|load|import|events|gauges URL` and `quarrylith order
+schedule TEXT`.
 
 Exit codes: 0 done, 1 `check` found something, 2 refused, 3 the store was
 unavailable (or the outcome is unknown). `load` and `import` refuse a dump or
@@ -13,9 +14,11 @@ import getpass
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from . import gauges
+from .order import schedule as schedules
 from .record import contract, importing
 
 
@@ -178,6 +181,35 @@ def _events(args):
     return 0
 
 
+def _order_schedule(args):
+    started = time.perf_counter()
+    schedule = schedules.parse(args.text)
+    parsed = time.perf_counter()
+    if args.debug:
+        print(f"schedule: {schedule}", file=sys.stderr)
+    start = args.start if args.start is not None else int(time.time() * 1000)
+    fires = []
+    while schedule.cron is not None and len(fires) < args.count:
+        fires.append(schedule.next_fire(fires[-1] if fires else start))
+    opens = schedules.openings(schedule, start, args.count)
+    done = time.perf_counter()
+    if schedule.cron is None:
+        print("no cron")
+    for at in fires:
+        print(f"fire {schedule.local_iso(at)} {at}")
+    if not schedule.windows:
+        print("no window")
+    for at in opens:
+        print(f"open {schedule.local_iso(at)} {at}")
+    if args.timing:
+        print(
+            f"timing: parse {(parsed - started) * 1000:.1f} ms, "
+            f"next {(done - parsed) * 1000:.1f} ms",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def _actor():
     try:
         return getpass.getuser()
@@ -230,6 +262,19 @@ def parser():
     events.add_argument("--limit", type=int, default=500)
     events.add_argument("--wait", type=float, default=0.0, help="seconds to wait")
     events.add_argument("--subject", help="only this subject's events")
+    order = groups.add_parser("order", help="the order")
+    ordered = order.add_subparsers(dest="command", required=True)
+    scheduled = ordered.add_parser(
+        "schedule", help="the next fires and window openings of a schedule"
+    )
+    scheduled.add_argument("text", help='e.g. "cron 0 22 * * mon-fri; tz UTC"')
+    scheduled.add_argument(
+        "--from", dest="start", type=int, help="the time, in ms (default: the clock)"
+    )
+    scheduled.add_argument("--count", type=int, default=3, help="how many of each")
+    scheduled.add_argument("--timing", action="store_true", help="time per layer")
+    scheduled.add_argument("--debug", action="store_true", help="what was parsed")
+    scheduled.set_defaults(run=_order_schedule)
     return top
 
 
@@ -244,6 +289,9 @@ def main(argv=None):
         print("refused: the import document is not whole:", file=sys.stderr)
         for problem in e.problems:
             print(f"  {problem}", file=sys.stderr)
+        return 2
+    except schedules.ScheduleError as e:
+        print(f"refused: {e}", file=sys.stderr)
         return 2
     except contract.Refused as e:
         print(f"refused: {e}", file=sys.stderr)

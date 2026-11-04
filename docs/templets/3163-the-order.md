@@ -216,15 +216,15 @@ record's labels and flags; the allocator (step 3) reads its own.
 |---|---|---|
 | role | a task's effective `role:` label, else its item's `role` field (so an item's `role:` label beats its own `role` field) | the per-role cut |
 | repos | effective `repo:` labels (several on one record) | the landing limit |
+| `resync` (flag) | the task's or its item's flags | exempt from the landing limit: work that brings an open change up to date with main |
+| `night` (flag) | the task's or its item's flags | the task starts only within `Settings.night` |
+| kind | the task's `kind` field, the item's `kind` field | a review is either one's `review` |
 
 **A repo is named the same way** in a `repo:` label and in a change's
 `changes.repo`: the same string, the repo's own name. The landing limit
 joins the two by that string, so a filer or an import that writes one
 writes the other alike (the legacy import takes both from the board, so
 they agree today).
-| `resync` (flag) | the task's or its item's flags | exempt from the landing limit: work that brings an open change up to date with main |
-| `night` (flag) | the task's or its item's flags | the task starts only within `Settings.night` |
-| kind | the task's `kind` field, the item's `kind` field | a review is either one's `review` |
 
 Flags are an open list (#3157: supervised, the sandbox class, looped,
 night, long, needs:lab, local-ok, ...). A flag this page does not read is
@@ -463,9 +463,10 @@ or None, testing in this order:
    runs plus this walk's landing starts reach `review_slots`.
 4. **A hold ahead.** An earlier candidate of this walk is **held** (below)
    and short of a resource that `needs` names, or short of every resource
-   (a short with `resource` None), or `needs` is None: "held behind #3170:
-   memory short since 14:02", or, with the refusal's `until` set, "held
-   behind #3170: budget until 18:00".
+   (a short with `resource` None), or `needs` is None (the allocator's `Fit`
+   and `Refusal` always carry a dict, so none arises only from a caller that
+   skips `place`): "held behind #3170: memory short since 14:02", or, with
+   the refusal's `until` set, "held behind #3170: budget until 18:00".
 
 **`started(candidate)`** adds the candidate to the walk's counts (its role,
 each repo of `adds`, a landing run) and drops its `waiting` entry.
@@ -486,9 +487,15 @@ the refused one has waited `hold_after_s`; from then on, nothing that needs
 a resource it was short of passes it.** Candidates that need none of those
 resources still pass. As runs finish and nothing new takes the short
 resources, the held candidate fits, at the latest when every run ahead of
-it that holds them has finished. A running task is never preempted to
-make room. (Decided by the user, 2026-11-03, with `hold_after_s` 30
-minutes: Rationale.)
+it that holds them has finished -- **for a `room` refusal, and for a
+`budget` one once its `until` has passed. Not for a `measured` one**: when
+memory is short because of something outside the queue (a manual session,
+the container machine's drift), the queue's runs finishing may never free
+it. Every class needs `memory`, so 30 minutes after a `measured` refusal
+the hold stops every start until the host frees memory. That is safe, as an
+`unmeasured` refusal is. A running task is never preempted to make room.
+(Decided by the user, 2026-11-03, with `hold_after_s` 30 minutes, and the
+`measured` consequence kept by the user, 2026-11-04: Rationale.)
 
 **Unmerged changes, counted** (the landing limit's figure, per repo): the
 record's open changes in that repo (`changes` with `merged_at` and
@@ -580,16 +587,27 @@ non-waivable list and today's sweep rule):
 - a review in the item's current round with verdict `changes`;
 - a review in the item's current round with no verdict yet (live), of any
   kind;
+- a review the round requires and nobody has filed: the required kinds come
+  from the item, which the record holds, not from what is filed:
+  `conformance` when the item's `templet` names another item (it builds to
+  an agreed spec), and `second` when its `tier` is 5. A pool approval that
+  lands before the services file one of these is not enough, so the rule
+  holds even when the filing path does not file every review of a round in
+  one event;
 - the item `overruled_at` set;
 - an unanswered question on the item (`questions`, `answered_at` null);
 - a templet: the item's `templet` field names the item itself (it holds the
   spec it builds to: it writes a templet), or the item has a review of kind
   `templet` (the owner's review of a templet, which the user's merge
-  agrees). The first is set when the item is filed, so a templet is known
-  before any review of it is filed, and a pool approval that lands before
-  the owner's review is not enough. The filer sets it: the services' filing
-  path (step 5, #3165) sets it on every spec item it files, and step 5
-  tests that. Until the switch, the legacy landing mode, which reads the
+  agrees). The first is set right after the item is filed (`file_item`
+  takes no `templet`, so the filer follows it with an `edit_item`), before
+  any review of the item can exist, so a templet is known before its
+  review is filed, and a pool approval that lands before the owner's review
+  is not enough. The filer sets it: the services' filing path (step 5,
+  #3165) sets it on every spec item it files, and step 5 tests that. **A
+  spec item's `templet` is its own number; a build item's is the spec
+  item's.** (Not the page front matter's `templet: N`, which names the
+  build issue.) Until the switch, the legacy landing mode, which reads the
   files under `docs/templets/`, does the merging;
 - a live hold on the item.
 
@@ -625,9 +643,9 @@ agreed templet is made.
    are. Nothing else of a parked effort starts: any other `placed`, or
    none, is the ready check as today, and a parked effort's task that
    `landable` does not give is refused with `placed["rule"]` `landing` too.
-   The record's invariant 9 gains a sentence: "... nor does `start_run`
-   start one, but a review `landable` gives, when its `placed` names the
-   rule `landing`."
+   The record's invariant 9 gains a sentence of its own: "`start_run`
+   starts no task of a parked effort either, except a review `landable`
+   gives when its `placed` names the rule `landing`."
 
 ### The commands
 
@@ -677,8 +695,9 @@ What looked reusable but was not:
 - **The lanes** (`launch_lanes`, templet 1376's slot plan, shares,
   reserves, the slow start): capacity, not order (user, 2026-10-29, on
   #3044: lanes stay per repo and harness and schedule by capacity; an
-  effort's priority orders work inside a lane). They are not this page's
-  (Rationale).
+  effort's priority orders work inside a lane). Ceilings are the
+  allocator's resources; floors, reserves, share entitlements and the slow
+  start are dropped, and would be this page's if they return (Rationale).
 - **`night_in_force`**: a settings window read by one function. A window is
   now a schedule clause, and `Settings.night` is one, so the night is
   parsed by the same parser as any task's window.
@@ -717,7 +736,7 @@ What looked reusable but was not:
    nothing is cached between calls.
 10. **Never auto** for a change at risk >= 8 or unscored, flagged by a
     `changes` verdict in its round, with a review of its round not yet
-    given, overruled, with a question open, a templet, under a live hold,
+    given or not yet filed, overruled, with a question open, a templet, under a live hold,
     approved for another head by any review of its round, or with a check
     not green; and a set is `auto` only whole. `classify` is never looser
     than today's rule: every review of the round approves the head.
@@ -824,7 +843,9 @@ database, never passes.
   live hold gives `user` with that reason among `why`; so does a
   conformance review of the round still live (no verdict), and a second
   role's review of the round that approved an older head, each with the pool
-  approval in place; a set with one member not qualifying is `user` whole;
+  approval in place; and so does a tier-5 item with only the pool's
+  approval, and an item building to another item's templet with only the
+  pool's approval (the required review not filed); a set with one member not qualifying is `user` whole;
   empty `merge_rules` gives `user` for all
 - [ ] `quarrylith order show`, `schedule` and `merge` print as the page says,
   exit 2 on a refused schedule or settings, and take `--timing` and
@@ -938,6 +959,16 @@ role's own list decides who takes its next slot. The owner's review agrees
 it is right (the sequence's order is the effort's order), and it is named
 here so it is not a surprise.
 
+**For the user's eyes: a `measured` hold can stop every start.** The hold's
+guarantee (that the held candidate fits once the runs ahead of it finish)
+holds for `room`, and for `budget` once `until` passes, but not for
+`measured`: memory short because of something outside the queue may never
+be freed by the queue's own runs. Every class needs `memory`, so 30 minutes
+after a `measured` refusal the hold stops every start until the host frees
+memory. Decided by the user, 2026-11-04: it stays ("safe, and say so"); it
+is safe, as an `unmeasured` refusal is, and the allocator's drift
+observation says why memory can be short.
+
 **Passing a refused candidate, with a hold after a wait.** The seam leaves
 this page to say what happens behind a candidate the allocator refuses.
 Chosen: a later one that fits may pass it, until it has waited
@@ -1011,7 +1042,9 @@ event, so the exception is the record's, not the order's word.
 `status:reviewed` change, which the board sets when every review of the
 round approved (the pool's, the conformance review when a templet is
 attached, the second role's). So `classify` asks every review of the
-round, not only the kinds a rule names, and bars a review still live.
+round, not only the kinds a rule names, bars a review still live, and bars
+a round whose required review (a conformance review for a build of a
+templet, a second role's at tier 5, both read from the item) is not filed.
 Marking a templet by the item's own `templet` field, set at filing, rather
 than only by its `templet` review, closes the gap where the pool approves
 before the owner's review is filed.
@@ -1053,9 +1086,11 @@ merge happens.
 **Left to later steps, or to other pages:**
 
 - **Lanes** (shares, reserves, profiles, the slow start of long jobs,
-  trilithons): capacity, by the user's decision on #3044. The order gives
-  one sequence that any lane would take in order; whether lanes come back,
-  as the allocator's reservations, is step 3's page's to say.
+  trilithons): capacity, by the user's decision on #3044. Lane ceilings are
+  the allocator's resources (step 3's page). Floors, reserves, share
+  entitlements and the slow start choose between candidates, which is
+  ordering: they are dropped, and would be this page's if they return. The
+  order gives one sequence that any lane would take in order.
 - **Budget pacing and harness fallback** (#2172, #3100's chain): which
   harness and whether its budget allows a start are the allocator's and the
   services'.

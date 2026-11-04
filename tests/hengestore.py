@@ -80,8 +80,12 @@ class Running:
         self.address = f"ipc://{self.folder}/henge.sock"
         self._wait()
 
-    def _wait(self, wait_s=60):
+    def _wait(self, wait_s=60, settled=3):
+        """Until every worker reports `serving` and a `sync` succeeds
+        `settled` times in a row: a worker the router has dropped for a late
+        heartbeat still shows in the report, but fails the sync."""
         end = time.monotonic() + wait_s
+        good = 0
         while time.monotonic() < end:
             if self.proc.poll() is not None:
                 raise RuntimeError(
@@ -95,9 +99,14 @@ class Running:
                     if report.get("workers") and all(
                         v == "serving" for v in report["workers"].values()
                     ):
-                        return
+                        client.sync("probe.journal")
+                        good += 1
+                        if good >= settled:
+                            return
+                    else:
+                        good = 0
                 except errors.HengeError:
-                    pass
+                    good = 0
                 finally:
                     client.close()
             time.sleep(0.1)

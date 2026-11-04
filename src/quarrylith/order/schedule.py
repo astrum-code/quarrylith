@@ -77,19 +77,22 @@ class Schedule:
         return _in_windows(self.windows, _local(at, _zone(self.tz)))
 
     def next_open(self, at):
-        """The first instant >= `at` within a window: `at` itself when it is
-        inside one, or when there is none."""
+        """The first instant >= `at` within a window, whichever clause it is
+        written in: `at` itself when it is inside one, or when there is
+        none."""
         if self.within(at):
             return at
         zone = _zone(self.tz)
         day = _local(at, zone).date()
         for _ in range(_DAYS_TO_AN_OPENING):
-            for start, _end, days in self.windows:
-                if _weekday(day) not in days:
-                    continue
-                opens = _first_instant(datetime.combine(day, _clock(start)), zone)
-                if opens >= at and self.within(opens):
-                    return opens
+            opens = [
+                _first_instant(datetime.combine(day, _clock(start)), zone)
+                for start, _end, days in self.windows
+                if _weekday(day) in days
+            ]
+            opens = [o for o in opens if o >= at and self.within(o)]
+            if opens:
+                return min(opens)
             day += _DAY
         raise ScheduleError("window: never opens")
 

@@ -381,7 +381,7 @@ class HengeRecord(Record):
                 f"{RECORD_SCHEMA_VERSION}: run `quarrylith record migrate`"
             )
         self._ready = True
-        self._recover()
+        self._recover(at_open=True)
         loading = self._fetch(self.S, ["loading"])[0]
         self._loading = loading if isinstance(loading, dict) else None
         writer = {
@@ -736,11 +736,11 @@ class HengeRecord(Record):
         self._sync(why)
         self._put(self.S, ["head"], self._state_up(seq), why=why)
 
-    def _recover(self):
+    def _recover(self, *, at_open=False):
         """At open, and after a commit put met another writer's entry: read
-        `applied` (a), then journal/[a+1] and journal/[a+2]. None: bring `head`
-        up to a. One: redo it whole. Two: another writer is live, and nothing
-        is redone."""
+        `applied` (a), then journal/[a+1] and journal/[a+2]. None: at open,
+        put `applied` again as read, then bring `head` up to a. One: redo it
+        whole. Two: another writer is live, and nothing is redone."""
         self._forget()
         try:
             applied = self._fetch(self.S, ["applied"])
@@ -763,6 +763,11 @@ class HengeRecord(Record):
             # the read of journal/[a+1] was the check: head up to a. A head
             # read at or past a stays as read: the next commit puts head
             self._epoch += 1
+            if at_open:
+                # `applied` was read, not answered to this writer: put it again
+                # with the version read before the writer goes on past it. After
+                # another writer's entry, that writer puts it, and this one none
+                self._put(self.S, ["applied"], self._state_up(a), why="recover")
             self._put(self.S, ["head"], self._state_up(a), why="recover", settle=False)
             return
         try:

@@ -146,8 +146,10 @@ clause   := "cron" MIN HOUR DOM MON DOW
   month 1-31, month 1-12 or `jan`..`dec`, day of week 0-7 (0 and 7 are
   Sunday) or `sun`..`sat`. Each field is `*`, a value, a range `a-b`, a
   list `a,b,...`, or any of them with a step `/n`. When both day of month
-  and day of week are restricted (neither `*`), a day matches if **either**
-  does, as cron does.
+  and day of week are restricted (neither starts with `*`), a day matches if
+  **either** does; otherwise it must match both, as classic cron does. So
+  `*/10` is unrestricted: `0 9 */10 * 1` is every 10th day that is also a
+  Monday.
 - **`window`**: a start and an end in local time, start included, end
   excluded. An end at or before the start crosses midnight (`22:00-06:00`).
   `DAYS` names the days the window **opens** on: `mon-fri`, `sat,sun`,
@@ -156,7 +158,11 @@ clause   := "cron" MIN HOUR DOM MON DOW
 - **`tz`**: an IANA zone (`Europe/Lisbon`), read with `zoneinfo`; `UTC` when
   none is given. Local times are wall-clock times in that zone. A local
   time that does not exist (a spring-forward gap) is skipped, and one that
-  happens twice (fall-back) counts once, at its first instant.
+  happens twice (fall-back) counts once, at its first instant. A window is
+  judged by the wall-clock time of the instant, so one whose start falls in
+  a gap opens at the gap's end (`02:30-04:00` opens at 03:00 on the day 02:30
+  does not exist), and one that lies wholly inside a gap does not open that
+  day.
 - Nothing else is a clause. An empty or null `schedule` is no cron and no
   window: the task runs on its `not_before` and its `loop` alone.
 
@@ -165,7 +171,9 @@ class ScheduleError(ValueError): ...   # names the clause and the fault
 
 @dataclass(frozen=True)
 class Schedule:
-    cron: tuple | None       # the five fields, expanded to sets
+    cron: tuple | None       # a NamedTuple: the five fields expanded to sets
+                             #   (days of week 0-6, Sunday 0), then whether
+                             #   day of month and day of week were written *
     windows: tuple           # ((start_min, end_min, days), ...) in local minutes
     tz: str                  # "UTC" when none is given
 
@@ -173,9 +181,14 @@ class Schedule:
     def next_open(self, at: int) -> int: ...        # the first instant >= at within a window
     def next_fire(self, after: int) -> int | None:  # the first cron minute > after
         ...                                         #   within a window; None: no cron
+    def next_start(self, after: int) -> int | None: ...  # the next window start
+                                                    #   after `after`; None: no window
+    def local_iso(self, at: int) -> str: ...        # `at` in the zone, ISO 8601
 
 def parse(text: str | None) -> Schedule: ...        # ScheduleError on any fault
 def next_not_before(task: dict, *, finished_at: int) -> int | None: ...
+def openings(schedule, after: int, count: int) -> list[int]: ...  # the next
+                                                    #   window openings, for the command
 ```
 
 - `parse` is total over its grammar: every input is a `Schedule` or a
@@ -188,12 +201,13 @@ def next_not_before(task: dict, *, finished_at: int) -> int | None: ...
   allowed. `cron 0 */6 * * *; window 22:00-06:00` from 12:30 fires at 00:00,
   not at 22:00. `next_fire` looks at most 5 years ahead (so `29 2` is
   found); with no fire inside a window in that span it raises
-  `ScheduleError` (`cron: no fire within its window in 5 years`).
+  `ScheduleError` (`cron: no fire within its window in 5 years`; with no
+  window, `cron: no fire in 5 years`).
 - **`next_not_before(task, *, finished_at)`** is what the services write
   into the task's `not_before` after each run (step 5 calls it; the record
   stores it). For a task with a cron: the next fire after `finished_at`.
-  For a loop: `finished_at + interval_s`, moved to the next instant within
-  its window. Both: the later of the two. With neither: `None` (nothing to
+  For a loop (`interval_s` above 0, or `max_attempts` above 1):
+  `finished_at + interval_s`, moved to the next instant within its window. Both: the later of the two. With neither: `None` (nothing to
   set). **Missed fires collapse**: a cron task whose fires passed while it
   could not run (the machine off, the task held) runs once at its next
   chance, never once per missed fire, because `not_before` holds one time
@@ -758,8 +772,8 @@ database, never passes.
 - [ ] `next_fire` of `cron 0 22 * * mon-fri; tz Europe/Lisbon` from a
   Friday 23:00 is Monday 22:00 local; across a spring-forward gap a fire in
   the gap is skipped, and across a fall-back an ambiguous fire comes once
-- [ ] with both day of month and day of week restricted, a day matching
-  either one fires
+- [ ] with both day of month and day of week restricted (neither starts
+  with `*`), a day matching either one fires; `*/10` with a weekday needs both
 - [ ] `window 22:00-06:00 fri` holds Friday 22:00 and Saturday 05:59, and
   not Saturday 06:00 nor Thursday 23:00; two `window` clauses are their
   union; `next_open` gives the next start
@@ -1106,3 +1120,12 @@ merge happens.
 ## History
 
 - 2026-11-03 agreed (merge of this PR, user)
+- 2026-11-03 proposed: a window judged by wall-clock time, so a start in a
+  spring-forward gap opens at the gap's end (this PR)
+- 2026-11-03 proposed: `next_not_before` reads a loop as `interval_s` above 0
+  or `max_attempts` above 1, so the record's default loop is none (this PR)
+- 2026-11-03 proposed: `Schedule.next_start`, `Schedule.local_iso` and
+  `openings`, which `quarrylith order schedule` prints from; the shape of
+  `cron`; and the no-window wording of the five-year error (this PR)
+- 2026-11-04 proposed: a day field that starts with `*` (`*`, `*/10`) is
+  unrestricted, as in classic cron (user decision, 2026-11-04) (this PR)

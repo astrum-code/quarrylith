@@ -1161,6 +1161,351 @@ def test_on_a_mirror_an_open_settles_the_applied_it_reads(monkeypatch, lose):
             again.close()
 
 
+class _ArmAt:
+    """A client that arms `misses` just before it sends the put that
+    `match(space, key, value)` takes, so w1 refuses that put's replicate."""
+
+    def __init__(self, inner, misses, match):
+        self.inner, self.misses, self.match = inner, misses, match
+        self.endpoint = getattr(inner, "endpoint", None)
+
+    def put(self, space, key, value, *, expect=None):
+        if self.match(space, list(key), value):
+            self.misses.arm(space)
+        return self.inner.put(space, key, value, expect=expect)
+
+    def __getattr__(self, op):
+        return getattr(self.inner, op)
+
+
+def _settled_mirror(misses):
+    # the scan never makes w1 whole within the test
+    return in_process_mirror(
+        worker_hook=misses.hook,
+        restart_s=0.3,
+        worker_settings={"scan_pause_ms": 600_000},
+    )
+
+
+def test_an_open_settles_the_head_it_reads(monkeypatch):
+    """templet:3159 -- Henge, the mirror: a writer dies once its put of `head`
+    is answered Unavailable (w1 refused its replicate), so the new `head` is
+    on w0 alone. The next open's recovery reads it from w0 and puts it again
+    with the version read, answered: w1 then holds `applied` and `head` at
+    that seq, and its copy alone is whole."""
+    misses = OneCopyMisses()
+    with _settled_mirror(misses) as made:
+        reads = _steered(monkeypatch, made)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, timeout_s=5.0)
+        rec.init()
+        admitted(rec)
+        item(rec, "first")
+        seq = rec.head() + 1
+
+        def head(space, key, value=None):
+            return space == s["state"] and key == ["head"]
+
+        rec.store = Crashing(_ArmAt(rec.store, misses, head), head, after=True)
+        with pytest.raises(Crash):
+            item(rec, "second")
+        abandon(rec)
+        assert misses.refused == 1
+        assert held_by(made, "w1", s["state"], ["head"]).value == seq - 1
+        reads[s["state"]] = "w0"
+        rec = opened(url, timeout_s=5.0)
+        reads.clear()
+        rec.close()
+        assert held_by(made, "w1", s["state"], ["applied"]).value == seq
+        assert held_by(made, "w1", s["state"], ["head"]).value == seq
+        _whole_on(url, reads, "w1")
+
+
+def test_after_a_commit_conflict_the_next_commit_settles_the_applied_read():
+    """templet:3159 -- Henge, row 6: a writer whose commit put meets another
+    writer's entry recovers, and finds no entry past the `applied` it reads.
+    It stays open, and its next operation puts that `applied` again, as read,
+    before its commit put goes on past it."""
+    fake = FakeStore()
+    clock = Clock()
+    s = henge.spaces("rec")
+    w = fake_record(fake, "w", clock=clock)
+    w.init()
+    admitted(w)
+    item(w, "w's first")
+    x = fake_record(fake, "x", clock=clock)  # the lock bypassed
+    item(x, "x's")
+    a = x._high
+    x.close()
+    with pytest.raises(Unavailable, match=f"seq {a} was taken"):
+        item(w, "w's second")
+    assert w._closed is None and w._high == a
+    start = len(fake.log)
+    item(w, "w's third")
+    mine = [c for c in fake.log[start:] if c[0] == "w" and c[1] == "put"]
+    commit = next(
+        i for i, c in enumerate(mine) if c[2] == s["journal"] and c[3] == [a + 1]
+    )
+    settles = [
+        c
+        for c in mine[:commit]
+        if c[2] == s["state"]
+        and c[3] == ["applied"]
+        and not isinstance(c[4], Exception)
+    ]
+    assert len(settles) == 1, mine
+    assert fake.value(s["state"], ["applied"]) == a + 1
+
+
+def test_on_a_mirror_a_writer_settles_the_applied_read_after_a_commit_conflict(
+    monkeypatch,
+):
+    """templet:3159 -- Henge, the mirror: a second live writer, x, commits seq
+    and dies once its put of `applied` is answered Unavailable, so that
+    `applied` is on w0 alone. w's commit put at seq meets x's entry, and its
+    recovery reads `applied` from w0 with no entry past it. w's next operation
+    puts that `applied` again, answered, before it commits past it. With w
+    dead before its own `applied` put and the leader then lost, an open on w1
+    alone redoes w's operation."""
+    misses = OneCopyMisses()
+    with _settled_mirror(misses) as made:
+        reads = _steered(monkeypatch, made)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        w = opened(url, timeout_s=5.0)
+        w.init()
+        admitted(w)
+        item(w, "w's first")
+        seq = w.head() + 1
+        x = henge.HengeRecord(  # the lock bypassed
+            henge._connect(f"ipc://{made.folder}/henge.sock", 5.0),
+            name,
+            actor="x",
+            via="cli",
+            timeout_s=5.0,
+        )
+        x.clock = Clock()
+
+        def applied(space, key):
+            return space == s["state"] and key == ["applied"]
+
+        misses.arm(s["state"])
+        x.store = Crashing(x.store, applied, after=True)
+        with pytest.raises(Crash):
+            item(x, "x's")
+        abandon(x)
+        assert misses.refused == 1
+        reads[s["state"]] = "w0"
+        with pytest.raises(Unavailable, match=f"seq {seq} was taken"):
+            item(w, "w's second")
+        reads.clear()
+        assert w._closed is None
+        top = seq + 1
+        w.store = Crashing(
+            w.store, lambda space, key: applied(space, key) and w._high == top
+        )
+        with pytest.raises(Crash):
+            item(w, "w's third")
+        abandon(w)
+        assert held_by(made, "w1", s["state"], ["applied"]).value == seq
+        misses.lose(made)
+        again = opened(url, timeout_s=10.0)
+        try:
+            assert again.head() == top
+            assert [i["title"] for i in again.read("items")][-2:] == [
+                "x's",
+                "w's third",
+            ]
+            assert again.check() == []
+            item(again, "after")
+            assert again.check() == []
+        finally:
+            again.close()
+
+
+def _a_dump(made, n):
+    src = opened(f"henge:{made.folder}#{fresh_name('src')}")
+    src.init()
+    admitted(src)
+    for i in range(n):
+        item(src, f"i{i}")
+    dump = src.dump()
+    src.close()
+    return dump
+
+
+def test_on_a_mirror_a_resumed_load_settles_the_loading_it_read(monkeypatch):
+    """templet:3159 -- Henge, the mirror: a loader dies once its put of the
+    load's start is answered Unavailable (w1 refused its replicate), so
+    `loading` is on w0 alone. The next open reads it from w0, and its load of
+    the same dump puts `loading` again, as read, answered, before its first
+    event. With that load stopped part-way and the leader then lost, an open
+    on w1 alone still refuses every other operation, and the load of the same
+    dump finishes."""
+    misses = OneCopyMisses()
+    with _settled_mirror(misses) as made:
+        reads = _steered(monkeypatch, made)
+        dump = _a_dump(made, 6)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, actor="loader", via="load", timeout_s=5.0)
+        rec.init()
+
+        def loading(space, key):
+            return space == s["state"] and key == ["loading"]
+
+        misses.arm(s["state"])
+        rec.store = Crashing(rec.store, loading, after=True)
+        with pytest.raises(Crash):
+            rec.load(dump)
+        abandon(rec)
+        assert misses.refused == 1
+        assert held_by(made, "w1", s["state"], ["loading"]) is None
+        reads[s["state"]] = "w0"
+        rec = opened(url, actor="loader", via="load", timeout_s=5.0)
+        reads.clear()
+        rec.store = Crashing(
+            rec.store, lambda space, key: space == s["journal"] and key == [4]
+        )
+        with pytest.raises(Crash):
+            rec.load(dump)
+        abandon(rec)
+        held = held_by(made, "w1", s["state"], ["loading"])
+        assert held is not None and isinstance(held.value, dict), held
+        misses.lose(made)
+        again = opened(url, actor="loader", via="load", timeout_s=10.0)
+        try:
+            assert again.head() == 3
+            with pytest.raises(Refused, match="load"):
+                item(again, "mid-load")
+            again.load(dump)
+            assert again.head() == len(dump["journal"])
+            assert again.check() == []
+        finally:
+            again.close()
+
+
+def test_on_a_mirror_an_open_settles_the_schema_it_reads(monkeypatch):
+    """templet:3159 -- Henge, the mirror: `init` dies once its put of
+    `schema` is answered Unavailable (w1 refused its replicate), so `schema`
+    is on w0 alone. The next open reads it from w0 and puts it again, as
+    read, answered, before it goes on. With the leader then lost, the record
+    on w1 alone is initialised, and goes on."""
+    misses = OneCopyMisses()
+    with _settled_mirror(misses) as made:
+        reads = _steered(monkeypatch, made)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, timeout_s=5.0)
+
+        def schema_put(space, key, value=None):
+            return space == s["state"] and key == ["schema"]
+
+        rec.store = Crashing(
+            _ArmAt(rec.store, misses, schema_put), schema_put, after=True
+        )
+        with pytest.raises(Crash):
+            rec.init()
+        abandon(rec)
+        assert misses.refused == 1
+        assert held_by(made, "w1", s["state"], ["schema"]) is None
+        reads[s["state"]] = "w0"
+        rec = opened(url, timeout_s=5.0)
+        reads.clear()
+        assert rec.initialised
+        assert held_by(made, "w1", s["state"], ["schema"]) is not None
+        admitted(rec)
+        item(rec, "one")
+        rec.close()
+        misses.lose(made)
+        again = opened(url, timeout_s=10.0)
+        try:
+            assert again.initialised
+            item(again, "two")
+            assert again.check() == []
+            with pytest.raises(Refused, match="exists"):
+                again.init()
+        finally:
+            again.close()
+
+
+@pytest.mark.parametrize("read", ["null", "absent"])
+def test_on_a_mirror_an_open_settles_a_loading_it_goes_on_past(monkeypatch, read):
+    """templet:3159 -- Henge, the mirror: the open goes on past a `loading`
+    that is null or absent, so it puts it again first. `null`: a loader dies
+    once its put of the load's end (null) is answered Unavailable, so w1
+    still holds the load in progress; the next open reads null from w0 and
+    puts it again, answered, and with the leader then lost the record on w1
+    alone takes operations. `absent`: a loader dies once its put of the
+    load's start is answered Unavailable, so w0 alone holds it; an open that
+    reads `loading` absent from w1 puts null `absent`, which the leader
+    refuses, so it does not go on; read from w0, it finds the load in
+    progress, and the load of the same dump finishes."""
+    misses = OneCopyMisses()
+    with _settled_mirror(misses) as made:
+        reads = _steered(monkeypatch, made)
+        dump = _a_dump(made, 3)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, actor="loader", via="load", timeout_s=5.0)
+        rec.init()
+        puts = []
+
+        def nth(space, key):
+            if space == s["state"] and key == ["loading"]:
+                puts.append(key)
+                return len(puts) == (2 if read == "null" else 1)
+            return False
+
+        def armed(space, key, value):
+            if space != s["state"] or key != ["loading"]:
+                return False
+            return value is None if read == "null" else isinstance(value, dict)
+
+        rec.store = Crashing(_ArmAt(rec.store, misses, armed), nth, after=True)
+        with pytest.raises(Crash):
+            rec.load(dump)
+        abandon(rec)
+        assert misses.refused == 1
+        if read == "null":
+            assert isinstance(held_by(made, "w1", s["state"], ["loading"]).value, dict)
+            reads[s["state"]] = "w0"
+            rec = opened(url, timeout_s=5.0)
+            reads.clear()
+            assert held_by(made, "w1", s["state"], ["loading"]).value is None
+            item(rec, "after the load")
+            rec.close()
+            misses.lose(made)
+            again = opened(url, timeout_s=10.0)
+            try:
+                item(again, "after the leader")
+                assert again.check() == []
+            finally:
+                again.close()
+            return
+        assert held_by(made, "w1", s["state"], ["loading"]) is None
+        reads[s["state"]] = "w1"
+        with pytest.raises(Unavailable):
+            opened(url, timeout_s=2.0)
+        reads[s["state"]] = "w0"
+        rec = opened(url, actor="loader", via="load", timeout_s=5.0)
+        reads.clear()
+        try:
+            with pytest.raises(Refused, match="load"):
+                item(rec, "mid-load")
+            rec.load(dump)
+            assert rec.head() == len(dump["journal"])
+            assert rec.check() == []
+        finally:
+            rec.close()
+
+
 # -- the resumable load ------------------------------------------------------------
 
 

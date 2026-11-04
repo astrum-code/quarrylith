@@ -23,7 +23,12 @@ put of the object, or a version read before a check that found
 A check that finds the entry means another writer is live: this one puts
 nothing more and closes. **One put at a time**: each put is sent once the one
 before it is answered, so the store keeps the record's writes in one order and
-a power cut leaves a prefix of them.
+a power cut leaves a prefix of them. **Only past an answer**: the writer goes
+on past a value only once the store has answered a put of it to this writer. A
+value it read instead (its commit put's entry read back, a retry or a redo
+with nothing left to put, the entry a redo starts from) is put again, the same
+value with the version read, before it goes on: on a mirror, an `Unavailable`
+put may be on the leader's copy alone, and a read may come from either.
 
 No read lists a space, and no object is ever deleted: what would be a delete
 is a versioned put of null (`loading`, at a load's end).
@@ -70,6 +75,11 @@ TIMEOUT_S = 30.0
 #: One try of a client call; the client retries it with the same request id
 #: until the record's timeout is spent.
 TRY_MS = 2000
+#: The first pause before the record tries a refused call again; each pause
+#: is the double of the one before, up to `TRY_MS`.
+PAUSE_MS = 10
+#: The store's refusals for good: not tried again.
+FOR_GOOD = ("too_large", "invalid", "forbidden")
 #: A follower's catch-up read of `head` after this long with no note.
 FOLLOW_IDLE_S = 1.0
 #: How many objects the writer keeps in memory, read or put (a journal
@@ -93,8 +103,32 @@ class _StoreDown(Exception):
     """Any other error of the store: it may or may not have done it."""
 
 
+class _ForGood(_StoreDown):
+    """A refusal that trying again will not change (`FOR_GOOD`)."""
+
+
 class _Found(Exception):
     """A check found `journal/[high+1]`: another writer is live."""
+
+
+class _Tries:
+    """The pauses between the tries of a refused call: `PAUSE_MS` first,
+    each the double of the one before, up to `TRY_MS`, none past
+    `deadline`. `over(e)`: no try is left, the deadline passed or `e` is a
+    refusal for good."""
+
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self.next_s = PAUSE_MS / 1000
+
+    def over(self, e):
+        return isinstance(e, _ForGood) or time.monotonic() >= self.deadline
+
+    def pause(self):
+        left = self.deadline - time.monotonic()
+        if left > 0:
+            time.sleep(min(self.next_s, left))
+        self.next_s = min(self.next_s * 2, TRY_MS / 1000)
 
 
 def spaces(name):
@@ -395,14 +429,18 @@ class HengeRecord(Record):
             raise Unavailable(f"the record {self.name} is closed: {self._closed}")
 
     def _call(self, op, *args, **kw):
-        """One call of the store, its errors as `_Conflict` or `_StoreDown`."""
+        """One call of the store, its errors as `_Conflict`, `_ForGood` or
+        `_StoreDown`."""
         try:
             return getattr(self.store, op)(*args, **kw)
         except HengeError as e:
-            if getattr(e, "code", None) == "conflict":
+            code = getattr(e, "code", None)
+            if code == "conflict":
                 raise _Conflict(str(e)) from e
-            if getattr(e, "code", None) == "unavailable":
+            if code == "unavailable":
                 self._recheck = True
+            if code in FOR_GOOD:
+                raise _ForGood(f"{op}: {e}") from e
             raise _StoreDown(f"{op}: {e}") from e
         except (OSError, RuntimeError, TimeoutError, asyncio.TimeoutError) as e:
             self._recheck = True
@@ -486,25 +524,27 @@ class HengeRecord(Record):
             raise _Found(f"journal/[{self._high + 1}] is there")
         self._epoch += 1
 
-    def _put(self, space, key, fn, *, why, fresh=False):
-        """Put `fn(current)` (SKIP: no put) under the guard. On a `Conflict`
-        or any error of the store: a fresh read, a check, and the put again,
-        until the record's timeout. `why` names the put path for its failure:
+    def _put(self, space, key, fn, *, why, fresh=False, settle=True):
+        """Put `fn(current)` (SKIP: no put) under the guard. A SKIP of a
+        value read, not put by this writer, puts that value again with the
+        version read (`settle`), so the writer goes on only past a put
+        answered to it. On a `Conflict` or any error of the store: a pause, a
+        fresh read, a check, and the put again, until the record's timeout (a
+        refusal for good at once). `why` names the put path for its failure:
         "op" past the commit point is `Unknown`, anything else `Unavailable`."""
         deadline = time.monotonic() + self.timeout_s
+        tries = _Tries(deadline)
         row = self._kept.get((space, _ckey(key)))
         if row is None or (fresh and not row[3]):
             row = self._again(space, key, deadline, why)
-        retry = False
         while True:
             new = fn(row[0])
-            try:
-                if new is SKIP:
-                    if retry:
-                        # a retry's fresh read left nothing to put: still
-                        # row 5's check, so a passed writer stops here
-                        self._check_journal()
+            if new is SKIP:
+                if row[3] or row[0] is ABSENT or not settle:
                     return
+                # read, not answered to this writer: the same value again
+                new = row[0]
+            try:
                 if not row[3] and row[2] >= self._epoch:
                     # read after the last check: check now, then put
                     self._check_journal()
@@ -513,22 +553,25 @@ class HengeRecord(Record):
             except _Found as e:
                 self._fail(why, f"{e}: another writer is live", e)
             except (_Conflict, _StoreDown) as e:
-                if time.monotonic() >= deadline:
+                if tries.over(e):
                     self._fail(why, f"the store did not take the put: {e}", e)
+                tries.pause()
                 row = self._again(space, key, deadline, why)
-                retry = True
                 continue
             self._keep(space, key, new, version, True)
             return
 
     def _again(self, space, key, deadline, why):
-        """A fresh read of one object, retried until `deadline`."""
+        """A fresh read of one object, tried again after a pause until
+        `deadline`."""
+        tries = _Tries(deadline)
         while True:
             try:
                 return self._fetch(space, key)
             except _StoreDown as e:
-                if time.monotonic() >= deadline:
+                if tries.over(e):
                     self._fail(why, f"the store did not answer: {e}", e)
+                tries.pause()
 
     def _fail(self, why, message, cause):
         """Stop: past the commit point `Unknown`, else `Unavailable`. A check
@@ -546,14 +589,15 @@ class HengeRecord(Record):
         raise Unavailable(f"the record {self.name}: {message}") from cause
 
     def _sync(self, why):
-        deadline = time.monotonic() + self.timeout_s
+        tries = _Tries(time.monotonic() + self.timeout_s)
         while True:
             try:
                 self._call("sync", self.J)
                 return
             except (_Conflict, _StoreDown) as e:
-                if time.monotonic() >= deadline:
+                if tries.over(e):
                     self._fail(why, f"the sync did not answer: {e}", e)
+                tries.pause()
 
     # -- the commit protocol ------------------------------------------------------
 
@@ -645,35 +689,44 @@ class HengeRecord(Record):
 
     def _commit_put(self, seq, entry):
         """Step 2: `put(journal, [seq], entry, absent)`, the commit point."""
-        deadline = time.monotonic() + self.timeout_s
-        while True:
-            try:
-                version = self._call(
-                    "put", self.J, [seq], entry, expect={"absent": True}
-                )
-                break
-            except _Conflict as e:
-                row = self._again(self.J, [seq], deadline, "op")
-                if row[0] is not ABSENT and same_entry(row[0], entry):
-                    # this writer's own put, retried: committed
-                    version = row[1]
-                    break
-                if row[0] is ABSENT:
-                    if time.monotonic() >= deadline:
-                        self._fail("op", f"the commit put was not taken: {e}", e)
-                    continue
-                # another writer took this seq: recover, and it did not happen
-                self._recover()
-                raise Unavailable(
-                    f"the record {self.name}: seq {seq} was taken by another "
-                    "writer; the operation did not happen"
-                )
-            except _StoreDown as e:
-                if time.monotonic() >= deadline:
-                    self._fail("op", f"the commit put did not answer: {e}", e)
+        version = self._settle(seq, entry, "op")
+        if version is None:
+            # another writer took this seq: recover, and it did not happen
+            self._recover()
+            raise Unavailable(
+                f"the record {self.name}: seq {seq} was taken by another "
+                "writer; the operation did not happen"
+            )
         self._high = seq
         self._epoch += 1
         self._keep(self.J, [seq], entry, version, True)
+
+    def _settle(self, seq, entry, why, version=None):
+        """Put journal/[seq] = `entry` until the store answers the put to
+        this writer: `absent`, or with `version` (as read). On a `Conflict`, a
+        fresh read: absent, the put `absent` again; this entry (a put of it
+        the store applied but did not answer, or one read), the same entry
+        again with the version read; another writer's entry, None. Each try
+        after a pause, until the record's timeout. The answer's version."""
+        tries = _Tries(time.monotonic() + self.timeout_s)
+        expect = {"absent": True} if version is None else {"version": version}
+        while True:
+            try:
+                return self._call("put", self.J, [seq], entry, expect=expect)
+            except _Conflict as e:
+                row = self._again(self.J, [seq], tries.deadline, why)
+                if row[0] is ABSENT:
+                    expect = {"absent": True}
+                elif same_entry(row[0], entry):
+                    expect = {"version": row[1]}
+                else:
+                    return None
+                failed = e
+            except _StoreDown as e:
+                failed = e
+            if tries.over(failed):
+                self._fail(why, f"the commit put was not answered: {failed}", failed)
+            tries.pause()
 
     def _apply(self, seq, plan, why):
         """Steps 3 and 4: the plan's puts, `applied`, one sync, `head`."""
@@ -707,9 +760,10 @@ class HengeRecord(Record):
             )
         self._high = a
         if one[0] is ABSENT:
-            # the read of journal/[a+1] was the check: head up to a
+            # the read of journal/[a+1] was the check: head up to a. A head
+            # read at or past a stays as read: the next commit puts head
             self._epoch += 1
-            self._put(self.S, ["head"], self._state_up(a), why="recover")
+            self._put(self.S, ["head"], self._state_up(a), why="recover", settle=False)
             return
         try:
             event = ev.Event.from_dict(one[0]["event"])
@@ -717,6 +771,14 @@ class HengeRecord(Record):
         except (KeyError, TypeError, ValueError) as e:
             raise Unavailable(f"journal/[{a + 1}] is not an entry: {e}") from e
         self._high = a + 1
+        # the entry was read, not answered to this writer: put again with
+        # the version read, before the redo goes on past it
+        if self._settle(a + 1, one[0], "recover", version=one[1]) is None:
+            self._fail(
+                "recover",
+                f"journal/[{a + 1}] changed under recovery",
+                _Found(f"journal/[{a + 1}] changed"),
+            )
         # fresh reads of every object the redo puts; its first put checks
         # journal/[a+2] after them
         self._forget()

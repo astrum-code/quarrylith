@@ -327,6 +327,9 @@ class HengeRecord(Record):
         self._loading = None
         self._report = {}
         self._recheck = False
+        #: `applied` as a recovery after a step-2 Conflict read it, not yet put
+        #: again: the next commit puts it first ("Only past an answer").
+        self._unsettled = False
         try:
             self._start()
         except _StoreDown as e:
@@ -382,7 +385,19 @@ class HengeRecord(Record):
             )
         self._ready = True
         self._recover(at_open=True)
+        # the open goes on past `schema`, and past a `loading` that is null or
+        # absent: each is put again as read (an absent one null, `absent`)
+        # before it does. A load in progress is put again by the load that
+        # resumes it; every other operation refuses it.
+        self._put(self.S, ["schema"], lambda cur: SKIP, why="open")
         loading = self._fetch(self.S, ["loading"])[0]
+        if not isinstance(loading, dict):
+            loading = self._put(
+                self.S,
+                ["loading"],
+                lambda cur: None if cur is ABSENT else SKIP,
+                why="open",
+            )
         self._loading = loading if isinstance(loading, dict) else None
         writer = {
             "pid": os.getpid(),
@@ -531,7 +546,8 @@ class HengeRecord(Record):
         answered to it. On a `Conflict` or any error of the store: a pause, a
         fresh read, a check, and the put again, until the record's timeout (a
         refusal for good at once). `why` names the put path for its failure:
-        "op" past the commit point is `Unknown`, anything else `Unavailable`."""
+        "op" past the commit point is `Unknown`, anything else `Unavailable`.
+        The value the object holds once answered (or as read, on a SKIP)."""
         deadline = time.monotonic() + self.timeout_s
         tries = _Tries(deadline)
         row = self._kept.get((space, _ckey(key)))
@@ -541,7 +557,7 @@ class HengeRecord(Record):
             new = fn(row[0])
             if new is SKIP:
                 if row[3] or row[0] is ABSENT or not settle:
-                    return
+                    return row[0]
                 # read, not answered to this writer: the same value again
                 new = row[0]
             try:
@@ -559,7 +575,7 @@ class HengeRecord(Record):
                 row = self._again(space, key, deadline, why)
                 continue
             self._keep(space, key, new, version, True)
-            return
+            return new
 
     def _again(self, space, key, deadline, why):
         """A fresh read of one object, tried again after a pause until
@@ -677,6 +693,10 @@ class HengeRecord(Record):
         if event.seq != self._high + 1:
             raise Unavailable(f"seq {event.seq} is not next after {self._high}")
         entry = {"event": event.to_dict(), "priors": priors}
+        if self._unsettled:
+            # the `applied` this commit goes on past was read, not answered
+            self._put(self.S, ["applied"], self._state_up(self._high), why="settle")
+            self._unsettled = False
         try:
             # decide's reads: every object steps 3 and 4 will put
             plan = self._plan(event, priors)
@@ -695,7 +715,8 @@ class HengeRecord(Record):
             self._recover()
             raise Unavailable(
                 f"the record {self.name}: seq {seq} was taken by another "
-                "writer; the operation did not happen"
+                "writer, or by an earlier operation that ended Unknown; this "
+                "operation did not happen"
             )
         self._high = seq
         self._epoch += 1
@@ -740,8 +761,11 @@ class HengeRecord(Record):
         """At open, and after a commit put met another writer's entry: read
         `applied` (a), then journal/[a+1] and journal/[a+2]. None: at open,
         put `applied` again as read, then bring `head` up to a. One: redo it
-        whole. Two: another writer is live, and nothing is redone."""
+        whole. Two: another writer is live, and nothing is redone. After a
+        commit put met another writer's entry, `applied` with nothing to redo
+        is put again by the next commit, before it goes on past it."""
         self._forget()
+        self._unsettled = False
         try:
             applied = self._fetch(self.S, ["applied"])
             self._fetch(self.S, ["head"])
@@ -760,15 +784,21 @@ class HengeRecord(Record):
             )
         self._high = a
         if one[0] is ABSENT:
-            # the read of journal/[a+1] was the check: head up to a. A head
-            # read at or past a stays as read: the next commit puts head
+            # the read of journal/[a+1] was the check: head up to a
             self._epoch += 1
             if at_open:
-                # `applied` was read, not answered to this writer: put it again
-                # with the version read before the writer goes on past it. After
-                # another writer's entry, that writer puts it, and this one none
+                # `applied` and `head` were read, not answered to this writer:
+                # each is put again with the version read before the open goes
+                # on past it
                 self._put(self.S, ["applied"], self._state_up(a), why="recover")
-            self._put(self.S, ["head"], self._state_up(a), why="recover", settle=False)
+            else:
+                # after another writer's entry: this writer puts nothing more
+                # in this operation, and its next commit puts `applied` first.
+                # A head read at or past a stays as read: that commit puts it
+                self._unsettled = True
+            self._put(
+                self.S, ["head"], self._state_up(a), why="recover", settle=at_open
+            )
             return
         try:
             event = ev.Event.from_dict(one[0]["event"])
@@ -946,6 +976,16 @@ class HengeRecord(Record):
                         f"a load of another dump ({self._loading.get('digest')}) "
                         "is in progress: give that dump to finish it"
                     )
+                else:
+
+                    def resumed(cur):
+                        if isinstance(cur, dict) and cur.get("digest") == digest:
+                            return SKIP
+                        raise _Found("the load in progress changed")
+
+                    # row 9, resumed: `loading` as the open read it, put again
+                    # before the load goes on past it
+                    self._put(self.S, ["loading"], resumed, why="load")
                 for event in journal[self._high :]:
                     priors = contract._priors(self._get, event)
                     self._check_entry(event, priors)

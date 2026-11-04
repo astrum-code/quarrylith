@@ -125,6 +125,8 @@ def test_the_cut_counts_live_runs_and_the_instances_of_a_role(backend, record, c
     lone = item(record, "b1", role="beta")
     tick(clock)
     nobody = job(record)
+    tick(clock)
+    nobody_too = job(record)
     settings = Settings(instances={"alpha": 3})
     sequence = sequence_at(record, settings)
     assert sequence.counts["roles"] == {"alpha": 1}
@@ -132,11 +134,11 @@ def test_the_cut_counts_live_runs_and_the_instances_of_a_role(backend, record, c
     walk = Walk(sequence, settings=settings)
     started = drive(walk, sequence)
 
-    assert started == [first, second, lone, f"task {nobody}"]
+    assert started == [first, second, lone, f"task {nobody}", f"task {nobody_too}"]
     assert why_of(walk, third) == "role alpha: 3 of 3 busy"
 
     again = Walk(sequence, settings=Settings())
-    assert drive(again, sequence) == [lone, f"task {nobody}"]
+    assert drive(again, sequence) == [lone, f"task {nobody}", f"task {nobody_too}"]
     assert why_of(again, first) == "role alpha: 1 of 1 busy"
 
 
@@ -217,6 +219,38 @@ def test_the_landing_limit_cuts_new_work_at_the_limit(backend, record, clock):
 
 
 @over_backends
+def test_an_exempt_start_is_not_counted_against_the_limit(backend, record, clock):
+    """templet:3163 -- a start that is exempt from the landing limit adds to
+    no repo's count, as a live run of it would not: the next candidate of the
+    repo still starts."""
+    admitted(record)
+    changes(record, "widgets", 1)
+    review = record.file_item(
+        "review",
+        "rv",
+        "body",
+        role="r1",
+        effort="0001",
+        filed_by="alpha",
+        labels=["repo:widgets"],
+    )
+    tick(clock)
+    resync = job(record, flags=["resync"], labels=["repo:widgets"])
+    tick(clock)
+    new = item(record, "new work", role="r2", labels=["repo:widgets"])
+    tick(clock)
+    more = item(record, "more new work", role="r3", labels=["repo:widgets"])
+    settings = Settings(landing_limit=2)
+    sequence = sequence_at(record, settings)
+    walk = Walk(sequence, settings=settings)
+
+    started = drive(walk, sequence)
+
+    assert started == [review, f"task {resync}", new]
+    assert why_of(walk, more) == "repo widgets: 2 unmerged of 2"
+
+
+@over_backends
 def test_the_landing_limit_is_the_unmerged_changes_plus_work_in_flight(
     backend, record, clock
 ):
@@ -290,6 +324,15 @@ def test_an_item_in_two_repos_is_cut_by_either_and_counts_in_each(
     walk = Walk(sequence, settings=three)
     assert drive(walk, sequence) == [both, gad]
     assert why_of(walk, wide) == "repo widgets: 3 unmerged of 3"
+
+    # both at their limit: the line names both
+    changes(record, "gadgets", 1, "feat/g2")
+    sequence = sequence_at(record, settings)
+    walk = Walk(sequence, settings=settings)
+    assert drive(walk, sequence) == []
+    assert why_of(walk, both) == (
+        "repo gadgets: 2 unmerged of 2; repo widgets: 2 unmerged of 2"
+    )
 
 
 # -- passing, and the holds -----------------------------------------------

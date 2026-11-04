@@ -294,6 +294,15 @@ label (small, standard or deep). A task in such a class with no `harness:`
 label is `unclassified`, naming `harness`. Beside the class's needs, a task
 takes 1 of `lane.<name>` for every lane it is in (below, "Lanes").
 
+`classify` and `needs_of` return the `Refusal` themselves where they refuse
+(`unclassified`, waits false), built by `refuse(task, run_class, needs, shorts,
+*, node)` in `quarrylith.allocator`, which puts the shorts in `CAUSES` order,
+reads `waits` and `until` from them and writes `text`. So `place` returns what
+they return. A task with no `class:` label weighs `standard`; a `class:` value
+that is not small, standard or deep, when the harness has a budget resource, or
+a `harness:` value the document has no row for, is `unclassified`, naming
+`class` or `harness`.
+
 The first classes, in the sample document below:
 
 | class | matches | slices off the host |
@@ -417,6 +426,15 @@ document with the key named:
   descendants), `{pid = N}` or `{process = TEXT}` (every process whose
   command contains it). A `path` is the file or folder the consumer
   occupies on disk.
+- **Units.** A resource is counted in bytes when it is `memory` or `disk` or
+  ends in `.memory` or `.disk` (only these take a size string), in budget
+  units when it is `budget.<provider>`, and in slots otherwise. `harness` is
+  the pseudo-resource of a class, not a resource name.
+- **Required.** `format`, `node`, `drivers`, `[capacity]`, `[budget]`,
+  `[floor]`, `[drift]` and at least one `[[class]]` with `match` and `needs`
+  (`match = {}` for the catch-all). `disk_path` is `"."` when absent. A
+  consumer's `memory = "measure"` needs a `probe`, since `sample_consumer`
+  reads it.
 
 **`"measure"`**, resolved by `resolve` (below) into **figures** that
 `declare` takes as an input:
@@ -1119,3 +1137,7 @@ later: nothing in the effort runs sessions through the queue.
   user's choices"), with the note that the local model's 64k peak does not
   fit at these figures
 - 2026-11-03 agreed (merge of this PR, user)
+- 2026-11-03 proposed: `classify` and `needs_of` return the Refusal, built by
+  `refuse`; a missing `class:` label weighs standard and an unknown one is
+  `unclassified`; units by resource name; the required keys of the document;
+  a measured consumer memory needs a probe (this PR)

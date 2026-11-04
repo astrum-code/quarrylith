@@ -112,3 +112,106 @@ def test_the_allow_list_refuses_what_it_should():
         f"{other}:2: calls im",
     ]
     assert violations(other, "from importlib import import_module")
+
+
+# -- the allocator -------------------------------------------------------------
+
+ALLOCATOR = "quarrylith/allocator/"
+#: What an allocator module may import of quarrylith: itself, and of the record
+#: its contract and its declarations. Nothing else of quarrylith, nor of the
+#: record's backends.
+OWN = "quarrylith.allocator"
+OF_THE_RECORD = {
+    "quarrylith.record",
+    "quarrylith.record.contract",
+    "quarrylith.record.schema",
+}
+
+
+def absolute_names(path, tree):
+    """(line, dotted name) of every import in `tree`, a relative one made
+    absolute against `path` (relative to src/)."""
+    package = path[: -len(".py")].split("/")[:-1]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield node.lineno, alias.name
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module
+            if node.level:
+                parts = package[: len(package) - (node.level - 1)]
+                base = ".".join(parts + ([node.module] if node.module else []))
+            yield node.lineno, base
+            for alias in node.names:
+                yield node.lineno, f"{base}.{alias.name}"
+
+
+def allocator_violations(path, source):
+    """The imports of an allocator module that its allow-list refuses: the
+    standard library, `quarrylith.allocator` and the record's contract and
+    declarations."""
+    tree = ast.parse(source)
+    out = []
+    for line, name in absolute_names(path, tree):
+        top = name.split(".")[0]
+        if top in sys.stdlib_module_names:
+            continue
+        if name == OWN or name.startswith(OWN + ".") or name in OF_THE_RECORD:
+            continue
+        if any(name.startswith(m + ".") for m in OF_THE_RECORD - {"quarrylith.record"}):
+            continue  # a name inside the contract or the declarations
+        out.append(f"{path}:{line}: imports {name}")
+    out += [f"{path}:{line}: {what}" for line, what in dynamic_imports(tree)]
+    return out
+
+
+def test_the_allocator_imports_only_the_standard_library_and_the_record():
+    """templet:3161 -- every module under src/quarrylith/allocator imports
+    only the standard library, itself and quarrylith.record (the record's
+    contract and declarations, not its backends), whether the import is
+    absolute or relative."""
+    files = sorted((SRC / ROOT / "allocator").rglob("*.py"))
+    assert [f.name for f in files][:1] == ["__init__.py"]
+    assert {"seam.py", "document.py", "host.py"} <= {f.name for f in files}
+    found = []
+    for path in files:
+        rel = path.relative_to(SRC).as_posix()
+        found += allocator_violations(rel, path.read_text())
+    assert found == []
+
+
+def test_the_allocator_allow_list_refuses_what_it_should():
+    """templet:3161 -- the check itself: another quarrylith module, the
+    record's backends, a third-party module and a dynamic import are each
+    found, as relative or absolute imports; the standard library, the
+    allocator's own modules and the record's contract and declarations are
+    not."""
+    mod = "quarrylith/allocator/x.py"
+    ok = (
+        "import json, tomllib\n"
+        "from importlib import metadata\n"
+        "from quarrylith.record import contract, schema\n"
+        "from quarrylith.allocator import seam\n"
+        "from . import document\n"
+        "from .seam import Fit\n"
+        "from ..record import schema\n"
+        "from ..record.contract import Record\n"
+    )
+    assert allocator_violations(mod, ok) == []
+    for bad in (
+        "import yaml",
+        "from quarrylith import gauges",
+        "from quarrylith import cli",
+        "import quarrylith.cli",
+        "from quarrylith.gauges import budget_pace",
+        "from quarrylith.record import sqlite",
+        "from quarrylith.record.henge import HengeRecord",
+        "from ..record import sqlite",
+        "from ..record.events import Event",
+        "from .. import gauges",
+        "from ..gauges import budget_pace",
+        "from henge.store.client import Store",
+        "x = __import__('yaml')",
+        "from importlib import import_module\nimport_module('yaml')",
+    ):
+        assert allocator_violations(mod, bad), bad

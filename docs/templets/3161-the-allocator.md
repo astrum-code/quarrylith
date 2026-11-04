@@ -65,6 +65,8 @@ in benchLith `2a8a78e5` (`bin/lith`) guards starts with:
 - the disk floor, `min_free_gb` 20 (a failed reading holds the launch);
 - the budget pacing: 2 runs at a warning, none from 95%, and a stale reading
   holds nothing;
+- one lane, a repo's ceiling of 4 agents (`[launch.lanes]`, `min` 0), and
+  the scheduler's 2 gates at once;
 - lab prune, the process-group kill at run end, and gate timeouts.
 
 There is **no memory guard anywhere**. #3102, a memory guard for local runs,
@@ -102,7 +104,7 @@ flowchart LR
 | module | holds |
 |---|---|
 | `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`; the shared policy: `classify`, `needs_of`, `table_shorts`, `budget_shorts` |
-| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
+| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare`, `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
 | `quarrylith.cli` | gains `quarrylith alloc declare|show|place|measure|consumer` (below) |
 
 The allocator imports the standard library and `quarrylith.record` only, and
@@ -186,7 +188,7 @@ class Fit:
 class Short:
     cause: str            # one of CAUSES
     node: str | None
-    resource: str | None  # None for driver, node, unmeasured
+    resource: str | None  # None for driver, node, unmeasured: see below
     asked: int | None
     free: int | None      # what the table, the measurement or the allowance had
     capacity: int | None
@@ -226,6 +228,28 @@ allocator: task 12 (agent) refused on laptop: memory 2.0 GiB asked, 1.3 GiB free
   rejection, and None while pacing at a warning.
 - `undeclared`, `unclassified`, `driver` and `node`: false. Only a change to
   the document, the node or the task can help.
+
+**A short with `resource` None** names no one resource. With `waits` false
+(`driver`, `node`) the task cannot run on this node at all. With `waits` true
+(`unmeasured`) it means **every resource**: the host's reading is missing or
+stale, so every start on the node would be refused the same way until a
+reading comes, and the order holds everything behind it.
+
+**What the order may rely on.** The order (step 4, `3163-the-order.md`)
+reads these names and fields, and they stay as they are:
+
+- `place(task, *, now)` is the one call. It answers `Fit` or `Refusal`, and
+  both carry `needs`.
+- `Refusal.waits` false means the task never fits on this node short of a
+  change to the document, the node or the task: the order's "never".
+- `{s.resource for s in refusal.shorts}` are the resources it is short of,
+  and a `None` among them is every resource (above).
+- `Refusal.text` is one line, fit for a reason shown to a person.
+- `Refusal.until` is a time after which it may fit, or None.
+
+`headroom` is for the services and the views: what a node can still take.
+So is `until`, when a budget lifts, and the order may also put it in a reason
+("held: budget until 18:00"). The order needs neither to decide.
 
 **What the services do with a Fit** (step 5 builds it): when `fit.needs`
 differs from the task's stored `needs`, they call `edit_task(id,
@@ -267,7 +291,8 @@ task's `harness:<name>` label and the document's `[harness.<name>]` row, to
 `N` of the harness's `slots` resource and `N × weight` of its `budget`
 resource. The weight comes from `[budget].weight` by the task's `class:`
 label (small, standard or deep). A task in such a class with no `harness:`
-label is `unclassified`, naming `harness`.
+label is `unclassified`, naming `harness`. Beside the class's needs, a task
+takes 1 of `lane.<name>` for every lane it is in (below, "Lanes").
 
 The first classes, in the sample document below:
 
@@ -278,7 +303,7 @@ The first classes, in the sample document below:
 | `container` | sandbox `podman` | `podman.memory` 4 GiB, memory 512 MiB, disk 2 GiB |
 | `local` | kind agent or review, label `harness:local` | memory 2 GiB, disk 4 GiB, `harness` 1 (the model's own room is a standing consumer) |
 | `agent` | kind agent or review | memory 2 GiB, disk 4 GiB, `harness` 1 |
-| `gate` | kind gate | memory 3 GiB, disk 4 GiB |
+| `gate` | kind gate | memory 3 GiB, disk 4 GiB, `slots.gate` 1 |
 | `job` | anything else (sweep, job, cell) | memory 512 MiB, disk 512 MiB |
 
 A **proving mission's VM outlives the mission's runs** (checkpoints). It is
@@ -307,6 +332,7 @@ disk = "measure"             # free now + what disk consumers occupy now - floor
 "slots.claude-code" = 4      # today's caps
 "slots.codex" = 3
 "slots.local" = 0            # the local model is not declared yet
+"slots.gate" = 2             # today's gates at once
 "budget.anthropic" = 4       # this node's share; weights of 1 keep today's caps
 "budget.openai" = 3
 lab = 2                      # VMs that are not the smoke's
@@ -355,6 +381,11 @@ memory = "measure"
 probe = { pidfile = "<the yard supervisor's pid file>" }
 why = "the yard: its supervisor, its store and its services"
 
+[[lane]]
+name = "widgets"
+labels = ["repo:widgets"]    # a task carrying any of them is in the lane
+max = 4                      # today's lane ceiling
+
 [[class]]
 name = "vm.smoke"
 match = { sandbox = ["vm"], flags = ["smoke"] }
@@ -373,9 +404,12 @@ document with the key named:
   A class's need is from 1. A capacity is from 0. `"measure"` stands only
   where the sample shows it.
 - **Names.** A consumer's `name` is unique and is its `holder`. A class's
-  `name` is unique.
+  `name` is unique. A lane's `name` is unique.
 - **References.** Every resource a class or consumer names has a capacity.
   Every `harness` row names declared resources.
+- **Lanes.** A lane has `name`, `labels` (a non-empty list of `key:value`)
+  and `max` (from 0). Its resource is `lane.<name>`, whose capacity is its
+  `max`: `[capacity]` may not name a `lane.` resource itself.
 - **Consumers.** A consumer has `name`, `why`, at least one amount
   (`memory`, `disk` or any declared resource), and optionally `probe` and
   `path`.
@@ -384,7 +418,8 @@ document with the key named:
   command contains it). A `path` is the file or folder the consumer
   occupies on disk.
 
-**`"measure"`**, resolved at `declare` and never after:
+**`"measure"`**, resolved by `resolve` (below) into **figures** that
+`declare` takes as an input:
 
 - `memory` capacity: the host's physical memory.
 - `disk` capacity: the work filesystem's free bytes, plus what the disk
@@ -392,20 +427,31 @@ document with the key named:
   0 for one without), less `floor.disk`.
 - a consumer's `memory`: `sample_consumer` over the default window, below.
 
-The resolved figures are written in the document reading, so a later
-`declare` of the same document with the same figures writes nothing.
+The figures are `{"capacity": {resource: amount}, "consumers": {name:
+{resource: amount}}}`, one entry per `"measure"` in the document. They are
+written in the document reading. **A figure, once recorded, is kept**: a
+later `resolve` gives the recorded figure for the same key, and probes again
+only when asked (`fresh=True`, the CLI's `--remeasure`), which is a person's
+act. So a second `alloc declare` of the same document writes nothing on a
+real host, where free bytes move from minute to minute. The measured check
+in `place`, not the declared figure, follows the host as it changes.
 
 ### The laptop plugin: `HostPlacement`
 
 `HostPlacement(record)` fills the seam for one host: the node the declared
 document names. On top of the seam it has:
 
-- **`declare(document, *, now)`**. It brings the record to the document:
+- **`declare(document, *, figures, now)`**. It brings the record to the
+  document, with each `"measure"` taken from `figures` and nothing probed (a
+  `"measure"` with no figure is refused, naming the key). The argument is
+  `figures`, not `measured`, because `hold` already has a `measured` flag.
   - `declare_node(node, drivers, labels=[])`;
-  - `set_capacity` for each resource;
+  - `set_capacity` for each resource, and `lane.<name>` = `max` for each
+    lane;
   - for each consumer, its reservations: `hold(..., measured=False)` when
     it has none, a **replace** when its amount changed (below), and
-    `release` for a consumer the document no longer names;
+    `release` for a consumer the document no longer names, and for the newer
+    of two live holds of one consumer and resource (invariant 8);
   - last, `record_reading("allocator", "document", {...})` with the document
     as data, its `"measure"` figures resolved, and its sha256.
 
@@ -415,6 +461,11 @@ document names. On top of the seam it has:
   between can make a later write refused: `declare` reports what it wrote
   and what it did not, and a second `declare` finishes it. A `set_capacity`
   below what is reserved is the record's refusal, passed on.
+- **`resolve(document, *, fresh=False, now)`** -> figures. For each
+  `"measure"`, the figure the latest `allocator/document` reading recorded
+  for the same key; with none, or with `fresh`, the probe (`probe_memory`,
+  `probe_disk` and `probe_size`, `sample_consumer`). It writes nothing.
+  `alloc declare` is `resolve`, then `declare`.
 - **`place(task, *, now)`**. It reads the latest `allocator/document`
   reading. With none, it refuses `node`. It then classifies, makes the needs
   and checks, in this order, collecting every short:
@@ -500,20 +551,75 @@ the node and an amount per run.
     That is why it is a resource of its own and not the slots: slots are
     the host's processes, the budget is the account's spend, and a local run
     takes a slot and no budget.
-- **`budget_shorts`** reads the latest `readings` row with `source="budget"`
-  whose `value.provider` is the harness's provider. `value` holds `status`
-  (allowed, allowed_warning, rejected), `utilization` (0 to 1) and
-  `resets_at`. A reading older than `budget.max_age_s`, or none, guards
-  nothing, as today. Otherwise:
-  - `rejected`, or `utilization >= stop_at` before `resets_at`: short,
-    `until = resets_at`;
+- **`budget_shorts`** reads the readings with `source="budget"` whose
+  `value.provider` is the harness's provider, and takes **the latest per
+  window**: per (provider, `kind`), since a budget reading's `kind` is its
+  window (five-hour, seven-day), as `budget_pace` keys them. `value` holds
+  `status` (allowed, allowed_warning, rejected), `utilization` (0 to 1) and
+  `resets_at`. A window whose latest reading is older than
+  `budget.max_age_s`, or a provider with none, guards nothing, as today. Each
+  window is judged alone:
+  - `rejected`, or `utilization >= stop_at` before `resets_at`: short until
+    its `resets_at`;
   - `allowed_warning`: short when the provider's live run reservations plus
     this need pass `warning_max` (today's two agents);
   - else: the table's check alone.
 
+  **The provider is short when any window is** (the tighter one counts, as
+  today), with one `budget` Short. Its `until` is the `resets_at` of the
+  window at a stop or a rejection (the latest, when several are), and None
+  when only a warning is short. So a five-hour reading at `allowed` never
+  hides a seven-day reading at `rejected`.
+
   The readings move the **allowance**, never the capacity. A warning would
   otherwise have to `set_capacity` below what running runs hold, which the
   record refuses.
+
+### Lanes
+
+**Lanes are capacity, and this page's** (the user on #3044, 2026-10-29:
+lanes "stay per repo and harness and schedule by capacity; an effort's
+priority only orders work inside a lane"; confirmed for the order's page,
+2026-11-03). #1376's lanes become resources in the table, and each part of
+them is either a resource here or dropped:
+
+- **The per-harness lane is `slots.<harness>`** (above): a harness's runs at
+  once on this node.
+- **A per-repo lane is a `[[lane]]` row**: its `name`, its `labels` (a task
+  whose effective labels carry **any** of them is in the lane, so
+  `["repo:a", "repo:b"]` is a lane over two repos) and its `max`. `declare`
+  sets the capacity `lane.<name>` to `max`, and `needs_of` adds 1 of it for
+  every lane a task is in, beside the class's needs: a task in two lanes
+  takes one of each. A lane at its `max` refuses as `room` on
+  `lane.<name>`, like any resource. This is today's `[launch.lanes]` ceiling
+  (`max`, by `repos`). The order's landing limit (6 unmerged changes per
+  repo) does the rest of what a per-repo lane was for: no repo fills the
+  pool with changes nobody lands.
+- **Floors and reserves are dropped**: a lane's `min`, #1376's `reserve` and
+  a profile's `min_slots`. Each holds room for one lane's ready work against
+  a candidate that fits now, which is a decision between candidates. The
+  seam leaves those to the order (invariant 3). Today's only lane has `min`
+  0, so the switch loses nothing. Room kept for something outside the queue,
+  a slot for the user's own session, say, is a standing consumer:
+  `[[consumer]]` with `"slots.claude-code" = 1`.
+- **A share keeps its ceiling, as `max`**: a quarter of 4 slots is `max =
+  1`. Its other half, a lane under its share going first, is ordering, and
+  the order's strict rank across efforts (the user, 2026-11-03) takes its
+  place.
+- **Long jobs are covered by `lab`, and the slow start is dropped.** A
+  proving mission holds its VM's `lab` slot for the mission's life, as the
+  task's own reservation (above), so `lab = 2` is the long jobs' ceiling
+  (#1376's `max_slots` 2 for `long`), and `lab.smoke` keeps the smoke from
+  waiting behind them. A ceiling on long jobs' harness slots, where one is
+  wanted, is a lane over whatever label marks them. The slow start (a long
+  job beyond its guaranteed slot waits 10 minutes, in case short work comes)
+  is a timer over candidates that are not there yet: ordering in time, not
+  capacity. With the `lab` ceiling, what it protected, short work finding no
+  slot behind a pool of long runs, still holds: a mission runs in its VM, so
+  at most 2 harness slots go to missions at once, whatever the pool.
+- **A trilithon** (a task needing N slots at once) is a task whose `needs`
+  say N. `place` fits it only when N are free together, and `start_run`
+  reserves them whole.
 
 ### The commands
 
@@ -521,7 +627,7 @@ the node and an amount per run.
 
 | command | does |
 |---|---|
-| `alloc declare DOC URL [--dry-run]` | `HostPlacement.declare`. Prints each write, or with `--dry-run` what it would write and every refusal |
+| `alloc declare DOC URL [--dry-run] [--remeasure]` | `resolve` (the recorded figures kept, unless `--remeasure`), then `declare`. Prints each write, or with `--dry-run` what it would write and every refusal |
 | `alloc show URL [--json]` | per node and resource: capacity, the standing consumers, the runs' reservations, free, the measured figure, the drift; the document's sha256 and age |
 | `alloc place URL TASK [--json]` | `place`, now: the Fit or the Refusal's `text` |
 | `alloc measure URL` | `measure`, once |
@@ -595,8 +701,11 @@ What looked reusable but was not:
 - **Henge's `placements` plugin point** (`single`, `mirror`, `ring`) places
   a store's partitions, not tasks on hosts. A separate group,
   `quarrylith.placement`, keeps the two from being confused.
-- **#1342's lanes, shares and reserves** (templet 1376) are ordering. The
-  order (step 4) owns them, and the allocator takes none of their settings.
+- **#1342's lanes in full** (templet 1376's slot plan, `launch_lanes`): its
+  ceilings are taken, as `slots.<harness>`, `[[lane]]` and `lab`, but its
+  floors, reserves, shares' entitlements and the slow start are not ("Lanes",
+  above, says why). They decide between candidates, which the seam leaves to
+  the order.
 
 ## Invariants
 
@@ -622,7 +731,11 @@ What looked reusable but was not:
 7. **Effective needs never lower a task's own.** Per resource, they are at
    least what the task stored.
 8. **One live standing reservation per (node, holder, resource).** `hold`
-   refuses a second. A change is a replace.
+   refuses a second. A change is a replace. The check is `hold`'s, not the
+   record's, so two processes holding at once could both pass. The race is
+   theoretical: standing holds come only from `declare` and `alloc consumer
+   measure --declare`, a person's acts. A duplicate would show in `alloc
+   show`, and the next `declare` releases the newer one.
 9. **The classification is deterministic**: the first class in document
    order whose match holds. The document in force is the one in the record.
 10. **The probes only read.** `ps`, `vm_stat`, `sysctl`, `/proc/meminfo` and
@@ -637,8 +750,10 @@ which pass.
 - [ ] `load_document` reads the sample. Amounts with units become bytes,
   rounded up. A document with an unknown key, a resource outside the
   grammar, a need below 1, a negative capacity, two consumers or two classes
-  of one name, a class or consumer naming a resource with no capacity, or a
-  `"measure"` where none is allowed is refused, with the key named
+  of one name, two lanes of one name, a lane with no `labels`, a
+  `[capacity]` key naming a `lane.` resource, a class or consumer naming a
+  resource with no capacity, or a `"measure"` where none is allowed is
+  refused, with the key named
 - [ ] `classify` takes the first class in document order whose match holds,
   over kind, sandbox, effective labels (a task's label replacing its item's)
   and flags. A task no class matches is refused `unclassified`, with waits
@@ -646,19 +761,25 @@ which pass.
 - [ ] `needs_of` gives, per resource, the larger of the class's and the
   task's own. `harness = 1` becomes one slot of the task's `harness:` harness
   and its budget weight by the task's `class:` label. A class with `harness`
-  and a task with no `harness:` label is `unclassified`, naming `harness`
+  and a task with no `harness:` label is `unclassified`, naming `harness`.
+  A task carrying any of a lane's labels takes 1 of `lane.<name>` beside its
+  class's needs, one per lane it is in, and a task in no lane takes none
 - [ ] `placement_for("host")` gives `HostPlacement` through
   `quarrylith.placement`, and an unknown name raises naming the group and
   the names registered
 - [ ] the allocator's modules import only the standard library and
   `quarrylith.record` (the record's allow-list test, extended)
-- [ ] `declare` of the sample on an empty record makes:
+- [ ] `declare` of the sample on an empty record, with given `figures`,
+  makes:
   - the node with its drivers;
-  - every capacity, with `"measure"` resolved;
+  - every capacity, each `"measure"` from its figure, and `lane.<name>` at
+    each lane's `max`;
   - each consumer's reservations (holder, no task, no run, no end);
-  - the document reading with its sha256.
+  - the document reading with its sha256 and the figures.
 
-  A second `declare` of the same document writes nothing (head unchanged)
+  A second `declare` of the same document and figures writes nothing (head
+  unchanged). A `"measure"` with no figure is refused, naming the key, and
+  the record is unchanged
 - [ ] `declare` of the sample with a consumer's amount changed replaces its
   reservation in one event, and with a consumer removed releases it. A
   document whose consumers do not fit is refused before any write, with a
@@ -670,6 +791,9 @@ which pass.
   is true when the needs fit beside the reservations no run holds, and false
   when they do not: a 5 GiB VM on a table whose standing consumers leave
   4 GiB
+- [ ] a lane at its `max` refuses a task in it as `room` on `lane.<name>`,
+  with waits true, while a task in no lane, of the same class, fits. A task
+  whose `needs` ask 3 slots fits only when 3 are free together
 - [ ] a resource with no capacity row is `undeclared`. A sandbox the node
   does not run is `driver`. With no document declared, the answer is `node`.
   All three have waits false
@@ -692,6 +816,10 @@ which pass.
 - [ ] at `utilization >= stop_at`, or at `rejected`, a run is refused
   `budget` with `until` equal to the reading's `resets_at`. Past
   `resets_at`, the guard lifts with no new reading
+- [ ] the readings are taken per window: with a provider's latest five-hour
+  reading at `allowed`, newer than its latest seven-day reading at
+  `rejected`, a run is refused `budget` with `until` the seven-day
+  `resets_at`. With both windows stopped, `until` is the later `resets_at`
 - [ ] a budget reading older than `budget.max_age_s`, or none, guards
   nothing, and a harness with no budget resource is never refused `budget`
 - [ ] `measure` writes one reading with total and available memory, the
@@ -703,7 +831,7 @@ which pass.
   `floor.memory`, or measured free disk under `floor.disk`, is refused
   `measured`, with waits true, although the table has room
 - [ ] with no host reading within `floor.max_age_s`, `place` refuses
-  `unmeasured`
+  `unmeasured`: one short with `resource` None and waits true
 - [ ] a consumer measured past its declaration by more than the tolerance,
   and measured available memory short of the table's free beyond it, are
   each in the reading's `drift`. Each writes one observation when it begins
@@ -711,6 +839,11 @@ which pass.
   that a `measure` caused
 - [ ] `sample_consumer` over a real process tree (a child process holding
   64 MiB) gives its peak resident size × 1.25, rounded up to 256 MiB
+- [ ] `resolve` of the sample on the test host probes each `"measure"` when
+  the record has no document reading, and after a `declare` with those
+  figures gives the recorded figures again, probing nothing, so a second
+  `resolve` and `declare` on the real host writes nothing (head unchanged).
+  With `fresh=True` it probes again
 - [ ] `quarrylith alloc declare`, `show`, `place`, `measure` and `consumer
   measure` run over a record and print as specified. `show` gives per
   resource the capacity, the standing consumers, the runs, free, the
@@ -731,21 +864,24 @@ Each is one PR that merges alone, in this order. Its tests carry
    - Acceptance: `load_document`; `classify`; `needs_of`; `placement_for`;
      the import allow-list.
    - Aim: tier 3.
-2. **Declaration and the table**: `HostPlacement.declare`, `hold`,
-   `release`, `place` and `headroom` over the table (`room`, `undeclared`,
-   `driver`, `node`). Waits on the record's `replace_reservation` (needs,
-   item 1).
+2. **Declaration and the table**: `HostPlacement.declare` (with given
+   `figures`), `hold`, `release`, `place` and `headroom` over the table
+   (`room`, `undeclared`, `driver`, `node`), lanes included. It probes
+   nothing: its tests pass the figures, and step 4 wires the probes through
+   `resolve`. Waits on the record's `replace_reservation` (needs, item 1).
    - Acceptance: `declare` of the sample; `declare` with a change; `place`
-     fits; `place` past the table; `undeclared`, `driver`, `node`; a Fit
-     then `start_run`; every backend; `hold` with a task; `headroom`.
+     fits; `place` past the table; a lane at its `max`; `undeclared`,
+     `driver`, `node`; a Fit then `start_run`; every backend; `hold` with a
+     task; `headroom`.
    - Aim: tier 3. The concurrency is the record's.
-3. **The budget**: `budget_shorts` and its place in `place` and `headroom`.
-   - Acceptance: the three budget items.
+3. **The budget**: `budget_shorts`, per window, and its place in `place` and
+   `headroom`.
+   - Acceptance: the four budget items.
    - Aim: tier 2.
-4. **The measurement**: the probes, `measure`, the measured check,
-   `unmeasured`, `drift` and its observations, `sample_consumer`.
+4. **The measurement**: the probes, `resolve`, `measure`, the measured
+   check, `unmeasured`, `drift` and its observations, `sample_consumer`.
    - Acceptance: `measure`; `measured`; `unmeasured`; drift;
-     `sample_consumer`.
+     `sample_consumer`; `resolve`.
    - Aim: tier 3. The probes run for real on the test host, read-only (Real
      before fake), and no lab VM is needed.
 5. **The commands**: `quarrylith alloc ...`, with `--timing`, `--debug` and
@@ -763,10 +899,11 @@ Each is one PR that merges alone, in this order. Its tests carry
     coordinator arranges (needs from the record).
   - No other repo. `bin/lith`'s guards and caps stay as they are until the
     switch (#3170).
-- **No order.** Admission, ranking, the review floor (`review_slots`), lanes,
-  shares, reserves and the per-repo landing limit are step 4's (#3163). The
-  allocator gives the order `Refusal.waits`, `until` and `headroom`, and
-  never takes a decision about another candidate.
+- **No order.** Admission, ranking, the review floor (`review_slots`), the
+  per-repo landing limit and any choice between candidates are step 4's
+  (#3163). Lanes are this page's as capacity: ceilings only ("Lanes"). The
+  allocator gives the order `place`'s answer (what it may rely on is under
+  "The answers"), and never takes a decision about another candidate.
 - **No services.** The calls to `place`, `edit_task` and `start_run`, the
   refusal notes, the beat that runs `measure`, and the yard's copy of the
   document are step 5's (#3165).
@@ -782,7 +919,10 @@ Each is one PR that merges alone, in this order. Its tests carry
   capability rings) is its own plugin on this seam (out of scope, #3157).
 - **Nothing internal in `src/` or `tests/`.** quarrylith is public-bound, the
   sample document included: no host, path or name of ours in it. This page
-  lives in `docs/`, which the mirror's `[keep]` list leaves out.
+  lives in `docs/`, which the mirror's `[keep]` list leaves out. The
+  sample's consumer `yard` is the product's own public term, not an internal
+  name, and the polish lint passes it. Renaming it is a change to the
+  fixture alone.
 
 ## Rationale
 
@@ -826,7 +966,16 @@ change, in the document and not in code, sets the slices from those figures.
 Rejected: learning in this step. There are no runs on the new queue yet to
 learn from.
 
-**The desktop reserve: 10 GiB proposed.** macOS's wired and compressed
+**The user's choices (2026-11-03).** The user took the six recommendations
+of this PR unchanged: the desktop reserve at 10 GiB; a measured shortfall
+refuses a start; the first slices as proposed (agent 2 GiB, gate 3, VM 5,
+container 4 of the Podman machine); budget weights of 1; `lab` 2 and
+`lab.smoke` 1; the Podman machine's disk reserved at its full 40 GiB. The
+user also took the note that the local model's 64k peak does not fit at
+these figures (below). Each is a document change if wrong. The paragraphs
+that follow give the reasons.
+
+**The desktop reserve: 10 GiB (the user's choice).** macOS's wired and compressed
 memory is about 4 to 5 GiB. The user's own applications (a browser, an
 editor, chat) take about 5 to 6. The arithmetic on 48 GiB:
 
@@ -899,7 +1048,21 @@ proving cap, "so a smoke never waits behind a long run".
 **The review floor is the order's.** Keeping slots free while a review waits
 means refusing a candidate that fits because of another candidate. The seam
 gives that to the order ("the allocator never skips a candidate on its
-own"), and `headroom` gives the order what it needs to do it.
+own"). The order's floor sorts reviews first and reserves nothing, so it
+reads only `place`'s answers. `headroom` is for the dashboard and the
+services.
+
+**Lanes as ceilings.** The user put lanes on capacity (#3044). A ceiling is
+capacity: it reads only the reservations that exist, so a lane is a resource
+like any other, checked in `start_run`'s one event. A floor, a reserve or a
+share's entitlement says "start this one rather than that one", which needs
+the other candidates, and invariant 3 keeps the allocator from reading them.
+Rejected: a reserve as a standing reservation held by the lane. The lane's
+own tasks could not use it either, since a reservation is room taken, not
+room earmarked. Rejected: room earmarked for a lane's tasks, so other tasks
+see less free. It is a second accounting beside the table, and the record's
+invariant 6 could not check it. Today's only lane has no floor, so nothing
+in force is lost. If floors come back, they are the order's.
 
 **A replace in one event (needs, item 1).** Resizing a standing reservation
 as two operations either needs room for both at once, so a tight host can
@@ -913,9 +1076,12 @@ later: nothing in the effort runs sessions through the queue.
 
 **Left to later steps**:
 
-- the order's use of `waits`, `until` and `headroom` (step 4);
-- the calls, the refusal notes, `measure` on the beat, the yard's document
-  and the sandbox drivers' limits (step 5);
+- the order's use of `place`'s answer: `waits`, the shorts' resources, and
+  `until` in a reason (step 4);
+- the calls, the refusal notes, `measure` on the beat, the yard's document,
+  the sandbox drivers' limits, and today's guards the allocator does not
+  take over, so none is lost at the switch: lab prune, the process-group
+  kill at run end, and the gate timeouts (step 5);
 - the views of allocation and drift (step 7);
 - the slices learned from footprints, and the budget weights from cost (a
   document change, when the figures exist);
@@ -924,4 +1090,7 @@ later: nothing in the effort runs sessions through the queue.
 
 ## History
 
+- 2026-11-03 the user took the six choices as recommended (Rationale, "The
+  user's choices"), with the note that the local model's 64k peak does not
+  fit at these figures
 - 2026-11-03 agreed (merge of this PR, user)

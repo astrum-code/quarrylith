@@ -471,7 +471,8 @@ or None, testing in this order:
    of 1 busy". A candidate with no role is not cut.
 2. **The landing limit.** For each repo in `adds`: that repo's unmerged
    changes, plus starts in this walk that add one there, are at
-   `landing_limit` or past it: "repo widgets: 6 unmerged of 6". Skipped when
+   `landing_limit` or past it: "repo widgets: 6 unmerged of 6" (every repo
+   at its limit is named, joined with "; "). Skipped when
    `landing_limit` is 0 or the candidate is `exempt`.
 3. **The landing tier's cap.** A `landing` candidate, while live landing
    runs plus this walk's landing starts reach `review_slots`.
@@ -483,7 +484,10 @@ or None, testing in this order:
    the refusal's `until` set, "held behind #3170: budget until 18:00".
 
 **`started(candidate)`** adds the candidate to the walk's counts (its role,
-each repo of `adds`, a landing run) and drops its `waiting` entry.
+each repo of `adds` unless the candidate is `exempt`, a landing run) and drops
+its `waiting` entry. An exempt start adds to no repo, as a live run of it is
+not in the count either, so the next candidate of that repo is cut by the
+same figure in this walk as in the next round.
 
 **`refused(candidate, refusal)`** records the allocator's refusal. A
 `never` refusal (`waits` false) is left with its `text`, holds nothing, and
@@ -1140,6 +1144,10 @@ merge happens.
 - 2026-11-04 proposed: "The ready set" reads an item's task as open or
   running, so an item moved back to `ready` while its task runs is left out
   (this PR)
+- 2026-11-04 proposed: `started` adds an exempt candidate to no repo's count,
+  as the count of live runs leaves an exempt run out (this PR)
+- 2026-11-04 proposed: a candidate cut by the landing limit names every repo
+  at its limit, joined with "; " (this PR)
 - 2026-11-04 proposed: `classify` reads an item with no open change, a round
   with no review filed, and a review whose `heads` omit a change as the
   user's, and refuses a number the record does not hold (this PR)

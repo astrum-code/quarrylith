@@ -52,7 +52,7 @@ class Crash(BaseException):
 
 class Crashing:
     """A client that dies at the first put `match(space, key)` takes: before
-    it is sent, or once it is answered."""
+    it is sent, or once it is answered (an error is an answer too)."""
 
     def __init__(self, inner, match, *, after=False):
         self.inner, self.match, self.after = inner, match, after
@@ -64,11 +64,12 @@ class Crashing:
         if hit and not self.after:
             self.fired = True
             raise Crash(f"before {space} {key}")
-        version = self.inner.put(space, key, value, expect=expect)
-        if hit:
-            self.fired = True
-            raise Crash(f"after {space} {key}")
-        return version
+        try:
+            return self.inner.put(space, key, value, expect=expect)
+        finally:
+            if hit:
+                self.fired = True
+                raise Crash(f"after {space} {key}")
 
     def __getattr__(self, op):
         return getattr(self.inner, op)
@@ -1089,6 +1090,72 @@ def test_on_a_mirror_a_commit_read_back_survives_the_leader_lost(monkeypatch):
             assert seqs == list(range(1, again.head() + 1)), seqs
             assert again.get("items", n)["title"] == "second"
             item(again, "third")
+            assert again.check() == []
+        finally:
+            again.close()
+
+
+@pytest.mark.parametrize("lose", [False, True], ids=["no worker lost", "w0 lost"])
+def test_on_a_mirror_an_open_settles_the_applied_it_reads(monkeypatch, lose):
+    """templet:3159 -- Henge, the mirror: a writer dies once its put of
+    `applied` is answered Unavailable (w1 refused its replicate), so the new
+    `applied` is on the leader, w0, alone. The next open's recovery reads it
+    from w0, finds no entry past it, and puts it again with the version read,
+    answered, before the writer goes on past it: w1 never holds `head` past
+    `applied`. With the leader then lost while the next operation's writer
+    dies before its own `applied` put, an open on w1 alone redoes that
+    operation."""
+    misses = OneCopyMisses()
+    with in_process_mirror(
+        worker_hook=misses.hook,
+        restart_s=0.3,
+        # the scan never makes w1 whole within the test
+        worker_settings={"scan_pause_ms": 600_000},
+    ) as made:
+        reads = _steered(monkeypatch, made)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, timeout_s=5.0)
+        rec.init()
+        admitted(rec)
+        item(rec, "first")
+        seq = rec.head() + 1
+
+        def applied(space, key):
+            return space == s["state"] and key == ["applied"]
+
+        misses.arm(s["state"])
+        rec.store = Crashing(rec.store, applied, after=True)
+        with pytest.raises(Crash):
+            item(rec, "second")
+        abandon(rec)
+        assert misses.refused == 1
+        assert held_by(made, "w1", s["state"], ["applied"]).value == seq - 1
+        # the next open's recovery reads state from w0
+        reads[s["state"]] = "w0"
+        rec = opened(url, timeout_s=5.0)
+        reads.clear()
+        assert held_by(made, "w1", s["state"], ["applied"]).value == seq
+        assert held_by(made, "w1", s["state"], ["head"]).value == seq
+        if not lose:
+            rec.close()
+            _whole_on(url, reads, "w1")
+            return
+        rec.store = Crashing(rec.store, applied)
+        with pytest.raises(Crash):
+            item(rec, "third")
+        abandon(rec)
+        misses.lose(made)
+        again = opened(url, timeout_s=10.0)
+        try:
+            assert again.head() == seq + 1
+            assert [i["title"] for i in again.read("items")][-2:] == [
+                "second",
+                "third",
+            ]
+            assert again.check() == []
+            item(again, "fourth")
             assert again.check() == []
         finally:
             again.close()

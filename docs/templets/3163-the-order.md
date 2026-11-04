@@ -146,8 +146,10 @@ clause   := "cron" MIN HOUR DOM MON DOW
   month 1-31, month 1-12 or `jan`..`dec`, day of week 0-7 (0 and 7 are
   Sunday) or `sun`..`sat`. Each field is `*`, a value, a range `a-b`, a
   list `a,b,...`, or any of them with a step `/n`. When both day of month
-  and day of week are restricted (neither `*`), a day matches if **either**
-  does, as cron does.
+  and day of week are restricted (neither starts with `*`), a day matches if
+  **either** does; otherwise it must match both, as classic cron does. So
+  `*/10` is unrestricted: `0 9 */10 * 1` is every 10th day that is also a
+  Monday.
 - **`window`**: a start and an end in local time, start included, end
   excluded. An end at or before the start crosses midnight (`22:00-06:00`).
   `DAYS` names the days the window **opens** on: `mon-fri`, `sat,sun`,
@@ -770,8 +772,8 @@ database, never passes.
 - [ ] `next_fire` of `cron 0 22 * * mon-fri; tz Europe/Lisbon` from a
   Friday 23:00 is Monday 22:00 local; across a spring-forward gap a fire in
   the gap is skipped, and across a fall-back an ambiguous fire comes once
-- [ ] with both day of month and day of week restricted, a day matching
-  either one fires
+- [ ] with both day of month and day of week restricted (neither starts
+  with `*`), a day matching either one fires; `*/10` with a weekday needs both
 - [ ] `window 22:00-06:00 fri` holds Friday 22:00 and Saturday 05:59, and
   not Saturday 06:00 nor Thursday 23:00; two `window` clauses are their
   union; `next_open` gives the next start
@@ -1125,3 +1127,5 @@ merge happens.
 - 2026-11-03 proposed: `Schedule.next_start`, `Schedule.local_iso` and
   `openings`, which `quarrylith order schedule` prints from; the shape of
   `cron`; and the no-window wording of the five-year error (this PR)
+- 2026-11-04 proposed: a day field that starts with `*` (`*`, `*/10`) is
+  unrestricted, as in classic cron (user decision, 2026-11-04) (this PR)

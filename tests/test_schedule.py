@@ -307,10 +307,15 @@ def test_the_day_rule_matches_either_when_both_are_restricted():
         utc(2026, 1, 2),
         utc(2026, 1, 9),
     ]
-    # a step on a day field is a restriction, not a star: every tenth day of
-    # the month (the 1st, 11th, 21st, 31st), or a Monday
-    stepped = fires("cron 0 0 */10 * mon", utc(2026, 1, 1), 5)
-    assert stepped == [
+    # classic cron: a day field that starts with `*` is unrestricted, so
+    # `*/10` with a weekday ANDs (every tenth day that is also a Monday) ...
+    assert fires("cron 0 0 */10 * mon", utc(2026, 1, 1), 3) == [
+        utc(2026, 5, 11),  # the first of 1, 11, 21, 31 that is a Monday
+        utc(2026, 6, 1),
+        utc(2026, 8, 31),
+    ]
+    # ... and a range with a step is restricted, so it ORs
+    assert fires("cron 0 0 1-31/10 * mon", utc(2026, 1, 1), 5) == [
         utc(2026, 1, 5),  # Monday
         utc(2026, 1, 11),  # the 11th is 1 + 10
         utc(2026, 1, 12),  # Monday

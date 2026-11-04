@@ -223,8 +223,8 @@ def _cron(rest):
         days,
         months,
         frozenset(day % 7 for day in weekdays),
-        days_any=fields[2] == "*",
-        weekdays_any=fields[4] == "*",
+        days_any=fields[2].startswith("*"),
+        weekdays_any=fields[4].startswith("*"),
     )
 
 

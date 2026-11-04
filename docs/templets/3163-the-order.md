@@ -594,6 +594,14 @@ or waits whole. A change qualifies under a rule when all hold:
   one reads `green`;
 - the change is not a draft.
 
+Three cases the rules above leave open are read the safe way: an item with
+**no open change** is `user` (an empty set is not whole; the reason is "no
+open change"); a round with **no review filed** is `user` whatever kinds the
+rule names (a rule that names none still needs the round reviewed); and a
+review whose `heads` do not name a change has **not judged** it, so it does
+not approve it. `classify` refuses (`Refused`) a number the record does not
+hold.
+
 And none of these, whatever the rules say (**never auto**, #3044's
 non-waivable list and today's sweep rule):
 
@@ -1132,3 +1140,6 @@ merge happens.
 - 2026-11-04 proposed: "The ready set" reads an item's task as open or
   running, so an item moved back to `ready` while its task runs is left out
   (this PR)
+- 2026-11-04 proposed: `classify` reads an item with no open change, a round
+  with no review filed, and a review whose `heads` omit a change as the
+  user's, and refuses a number the record does not hold (this PR)

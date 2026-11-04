@@ -9,7 +9,7 @@ The parser reads no record and no clock, so nothing here is run over
 named time zone skips, with the reason, on a host with no zone database."""
 
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
@@ -138,15 +138,34 @@ def test_a_schedule_is_a_frozen_value():
 
 
 def test_the_parser_reads_no_clock(monkeypatch):
-    """templet:3163 -- the parser is pure: `now` is always passed in."""
+    """templet:3163 -- the parser is pure: `now` is always passed in. Every
+    clock the module could reach fails the test, and every method that takes
+    an instant runs under it."""
 
     def forbidden(*args, **kw):
         raise AssertionError("the schedule read the clock")
 
+    class NoClockDatetime(datetime):
+        now = utcnow = today = fromtimestamp = utcfromtimestamp = forbidden
+
+    class NoClockDate(date):
+        today = fromtimestamp = forbidden
+
     for name in ("time", "monotonic", "time_ns", "perf_counter"):
         monkeypatch.setattr(time, name, forbidden)
+    monkeypatch.setattr(sch, "datetime", NoClockDatetime)
+    monkeypatch.setattr(sch, "date", NoClockDate)
     schedule = parse("cron 0 22 * * mon-fri; window 20:00-23:00; tz UTC")
-    assert schedule.next_fire(utc(2026, 1, 9, 21)) == utc(2026, 1, 9, 22)
+    at = utc(2026, 1, 9, 21)
+    assert schedule.next_fire(at) == utc(2026, 1, 9, 22)
+    assert schedule.within(at) is True
+    assert schedule.next_open(utc(2026, 1, 9, 12)) == utc(2026, 1, 9, 20)
+    assert schedule.next_open(at) == at
+    assert schedule.next_start(at) == utc(2026, 1, 10, 20)
+    assert schedule.local_iso(at).startswith("2026-01-09T21:00")
+    assert sch.openings(schedule, at, 1) == [utc(2026, 1, 10, 20)]
+    loop = {"max_attempts": 3, "interval_s": 60}
+    assert next_not_before(task("window 20:00-23:00", **loop), finished_at=at)
     assert next_not_before({"schedule": "cron 0 1 * * *"}, finished_at=0)
 
 
@@ -322,6 +341,30 @@ def test_the_day_rule_matches_either_when_both_are_restricted():
         utc(2026, 1, 19),
         utc(2026, 1, 21),  # the 21st
     ]
+    # the weekday side is the same rule: `*/2` there is unrestricted, so it
+    # ANDs with a restricted day of month (a 13th that is a Sunday, Tuesday,
+    # Thursday or Saturday) ...
+    assert fires("cron 0 0 13 * */2", utc(2026, 1, 1), 4) == [
+        utc(2026, 1, 13),  # a Tuesday; February to May's 13ths are not
+        utc(2026, 6, 13),  # a Saturday
+        utc(2026, 8, 13),  # a Thursday
+        utc(2026, 9, 13),  # a Sunday
+    ]
+    # ... and a restricted weekday range with a step ORs
+    assert fires("cron 0 0 13 * 1-6/2", utc(2026, 1, 1), 6) == [
+        utc(2026, 1, 2),  # Friday (5)
+        utc(2026, 1, 5),  # Monday (1)
+        utc(2026, 1, 7),  # Wednesday (3)
+        utc(2026, 1, 9),
+        utc(2026, 1, 12),
+        utc(2026, 1, 13),  # the 13th, a Tuesday
+    ]
+    # both starred with a step: both unrestricted, so both must match
+    assert fires("cron 0 0 */10 * */3", utc(2026, 1, 1), 3) == [
+        utc(2026, 1, 11),  # of 1, 11, 21, 31 and Sunday, Wednesday, Saturday
+        utc(2026, 1, 21),  # a Wednesday
+        utc(2026, 1, 31),  # a Saturday
+    ]
     # the month still gates both
     assert fires("cron 0 0 13 3 fri", utc(2026, 1, 1), 2) == [
         utc(2026, 3, 6),
@@ -374,6 +417,88 @@ def test_next_open_gives_the_next_start():
     assert union.next_open(utc(2026, 1, 5, 10, 0)) == utc(2026, 1, 5, 14, 0)
     assert union.next_open(utc(2026, 1, 5, 15, 0)) == utc(2026, 1, 6, 9, 0)
     assert union.next_open(utc(2026, 1, 9, 15, 0)) == utc(2026, 1, 10, 9, 0)
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        ["window 08:00-09:00", "window 22:00-23:00"],
+        ["window 22:00-23:00", "window 08:00-09:00"],
+    ],
+)
+def test_next_open_is_the_earliest_opening_whatever_the_clause_order(windows):
+    """templet:3163 -- several `window` clauses are their union, so `next_open`
+    is the earliest opening of any of them, however they are written."""
+    schedule = parse("; ".join(windows))
+    # 2026-01-05 is a Monday
+    assert schedule.next_open(utc(2026, 1, 5, 6)) == utc(2026, 1, 5, 8)
+    assert schedule.next_open(utc(2026, 1, 5, 9)) == utc(2026, 1, 5, 22)
+    assert schedule.next_open(utc(2026, 1, 5, 8, 30)) == utc(2026, 1, 5, 8, 30)
+    # past both of the day's: the next day's earlier one
+    assert schedule.next_open(utc(2026, 1, 5, 23)) == utc(2026, 1, 6, 8)
+    # openings and next_start agree with it
+    assert schedule.next_start(utc(2026, 1, 5, 6)) == utc(2026, 1, 5, 8)
+    assert sch.openings(schedule, utc(2026, 1, 5, 6), 3) == [
+        utc(2026, 1, 5, 8),
+        utc(2026, 1, 5, 22),
+        utc(2026, 1, 6, 8),
+    ]
+
+
+@pytest.mark.parametrize(
+    "windows, at, want",
+    [
+        # both on the same day of the week
+        (["window 22:00-23:00 mon", "window 08:00-09:00 mon"], (5, 6), (5, 8)),
+        # the earlier one only on the next day
+        (["window 22:00-23:00 tue", "window 08:00-09:00 tue"], (5, 12), (6, 8)),
+        # the later one is the only one open that day
+        (["window 08:00-09:00 tue", "window 22:00-23:00 mon"], (5, 6), (5, 22)),
+        # a window across midnight, written first: 22:00-02:00 is open at 01:00
+        # and the morning one opens at 08:00
+        (["window 22:00-02:00", "window 08:00-09:00"], (6, 3), (6, 8)),
+        (["window 08:00-09:00", "window 22:00-02:00"], (6, 3), (6, 8)),
+        # the crossing window's evening against a morning one, from the night
+        (["window 22:00-02:00 mon", "window 08:00-09:00"], (5, 6), (5, 8)),
+        (["window 22:00-02:00 mon", "window 08:00-09:00 tue"], (5, 6), (5, 22)),
+    ],
+)
+def test_next_open_over_windows_on_days_and_across_midnight(windows, at, want):
+    """templet:3163 -- the same on named days and across midnight."""
+    schedule = parse("; ".join(windows))
+    assert schedule.next_open(utc(2026, 1, *at)) == utc(2026, 1, *want)
+
+
+def test_next_open_is_the_earliest_across_a_dst_change():
+    """templet:3163 -- a window's start is judged by the wall clock, so the
+    earliest opening is found by instants, not by where the clause stands."""
+    zone("Europe/Berlin")
+    # 29 March 2026: 02:30 is in the gap and opens at 03:00 CEST (01:00Z);
+    # 01:00 CET is 00:00Z, earlier than the clause written first
+    spring = parse("window 02:30-04:00; window 01:00-01:30; tz Europe/Berlin")
+    assert spring.next_open(utc(2026, 3, 28, 23, 0)) == utc(2026, 3, 29, 0, 0)
+    # 25 October: 02:30 happens twice and opens at its first instant (00:30Z);
+    # 01:00 CEST is 23:00Z the evening before, earlier than the clause first
+    autumn = parse("window 02:30-03:30; window 01:00-01:30; tz Europe/Berlin")
+    assert autumn.next_open(utc(2026, 10, 24, 22, 0)) == utc(2026, 10, 24, 23, 0)
+    assert autumn.next_open(utc(2026, 10, 24, 23, 45)) == utc(2026, 10, 25, 0, 30)
+
+
+def test_next_not_before_for_a_loop_takes_the_earliest_opening():
+    """templet:3163 -- a loop that finishes before a morning window waits for
+    the morning, not for an evening window written ahead of it."""
+    loop = {"max_attempts": 3, "interval_s": 60}
+    for text in (
+        "window 22:00-23:00; window 08:00-09:00",
+        "window 08:00-09:00; window 22:00-23:00",
+    ):
+        looped = task(text, **loop)
+        assert next_not_before(looped, finished_at=utc(2026, 1, 5, 6)) == utc(
+            2026, 1, 5, 8
+        )
+        assert next_not_before(looped, finished_at=utc(2026, 1, 5, 23)) == utc(
+            2026, 1, 6, 8
+        )
 
 
 def test_a_window_is_wall_clock_time_in_its_zone():

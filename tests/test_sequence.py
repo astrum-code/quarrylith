@@ -295,10 +295,11 @@ def test_unblocks_then_age(backend, record, clock):
         "review", "review", "body", role="alpha", effort="0001", filed_by="alpha"
     )
     record.file_review(target, 1, "pool", item=review, author="alpha")
-    dependents = {n: item(record, f"after {n}") for n in "pqrstu"}
+    dependents = {n: item(record, f"after {n}") for n in "pqrstuv"}
     block(record, dependents["p"], y)
     block(record, dependents["q"], y)
     block(record, dependents["q"], dependents["p"])
+    block(record, dependents["v"], dependents["p"])
     block(record, dependents["r"], w)
     block(record, dependents["s"], z)
     block(record, dependents["t"], target)
@@ -307,7 +308,7 @@ def test_unblocks_then_age(backend, record, clock):
     got = sequence_of(record, clock, settings=Settings(review_slots=0))
     assert keys(got) == [("item", n) for n in (y, review, w, z, x, i1, i2)]
     by_item = {c.item: c for c in got.candidates}
-    assert by_item[y].unblocks == (dependents["p"], dependents["q"])
+    assert by_item[y].unblocks == tuple(dependents[n] for n in "pqv")
     assert by_item[review].unblocks == (dependents["t"], dependents["u"])
     assert by_item[x].unblocks == ()
 
@@ -691,7 +692,9 @@ def test_a_candidate_carries_what_the_walk_reads(backend, record, clock):
     field = item(record, "field", role="beta")
     both = item(record, "two repos", labels=["repo:widgets", "repo:gadgets"])
     changed = item(record, "has a change", labels=["repo:widgets", "repo:gadgets"])
-    record.open_or_update_change("widgets", "feat/c", "h1", number=changed, by="alpha")
+    record.open_or_update_change(
+        "widgets", "feat/c", "h1", title="t", number=changed, by="alpha"
+    )
     over = item(record, "task over item", labels=["repo:widgets"])
     over_task = task_of(record, over, labels=["repo:gadgets"])
     review = record.file_item(
@@ -742,9 +745,13 @@ def test_counts_are_the_figures_the_walk_starts_from(backend, record, clock):
     started(w1, task_of(record, w1))
     w2 = item(record, "w2", labels=["repo:widgets"])
     started(w2, task_of(record, w2))
-    record.open_or_update_change("widgets", "feat/w2", "h", number=w2, by="alpha")
-    record.open_or_update_change("gadgets", "feat/g", "h", by="alpha")
-    gone = record.open_or_update_change("gadgets", "feat/old", "h", by="alpha")
+    record.open_or_update_change(
+        "widgets", "feat/w2", "h", title="t", number=w2, by="alpha"
+    )
+    record.open_or_update_change("gadgets", "feat/g", "h", title="t", by="alpha")
+    gone = record.open_or_update_change(
+        "gadgets", "feat/old", "h", title="t", by="alpha"
+    )
     record.drop_change(gone, "alpha", "stale")
     rv = record.file_item(
         "review",
@@ -788,7 +795,7 @@ def test_order_show_prints_the_sequence(backend, record, url, clock, capsys):
     out with its reason, then the notes and the counts."""
     r1, r2, a1, resumed = tier_fixture(record, clock)
     effort(record, "0003", rule="alphabetical")
-    job(record, schedule="window 22:00-06:00; tz UTC")
+    job(record, schedule="window 08:00-09:00; tz UTC")
     now = clock()
 
     code, out, err = show(capsys, url, "--now", str(now))

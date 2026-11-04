@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """quarrylith's command line: `quarrylith record
 init|check|dump|load|import|events|gauges URL` and `quarrylith order
-schedule TEXT`.
+schedule TEXT` and `quarrylith order show URL`.
 
 Exit codes: 0 done, 1 `check` found something, 2 refused, 3 the store was
 unavailable (or the outcome is unknown). `load` and `import` refuse a dump or
@@ -10,6 +10,8 @@ makes no file.
 """
 
 import argparse
+import contextlib
+import dataclasses
 import getpass
 import json
 import os
@@ -19,7 +21,12 @@ from pathlib import Path
 
 from . import gauges
 from .order import schedule as schedules
+from .order import sequence as sequences
+from .order import settings as order_settings
 from .record import contract, importing
+
+#: How long a phase may run before a command says so, with its time.
+SLOW_PHASE_S = 5.0
 
 
 def _open(args, **kw):
@@ -210,6 +217,84 @@ def _order_schedule(args):
     return 0
 
 
+@contextlib.contextmanager
+def _phase(name, times):
+    """Run a phase; `times` gets its seconds, and a phase past `SLOW_PHASE_S`
+    is said on stderr with them."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        took = time.perf_counter() - started
+        times[name] = took
+        if took >= SLOW_PHASE_S:
+            print(f"{name}: {took:.1f} s", file=sys.stderr)
+
+
+def _order_settings(path):
+    """The settings in a JSON file (an object of `Settings`' fields), else
+    the defaults. Refused for a file that is not one, or settings with
+    problems."""
+    if path is None:
+        return order_settings.DEFAULT
+    given = _read_json(path, "settings file")
+    names = [f.name for f in dataclasses.fields(order_settings.Settings)]
+    if not isinstance(given, dict):
+        raise contract.Refused(f"the settings file {path} is not a JSON object")
+    unknown = sorted(set(given) - set(names))
+    if unknown:
+        raise contract.Refused(
+            f"the settings file {path} has no field {', '.join(unknown)}: "
+            f"its fields are {', '.join(names)}"
+        )
+    if isinstance(given.get("merge_rules"), list):
+        given["merge_rules"] = tuple(given["merge_rules"])
+    settings = order_settings.Settings(**given)
+    settings.check()
+    return settings
+
+
+def _order_show(args):
+    times = {}
+    with _phase("reading the record", times):
+        settings = _order_settings(args.settings)
+        record = _open(args, readonly=True)
+        try:
+            now = args.now if args.now is not None else record.now_ms()
+            got = sequences.order(record, now=now, settings=settings)
+        finally:
+            record.close()
+    if args.debug:
+        print(f"settings: {settings}", file=sys.stderr)
+        print(
+            f"sequence: {len(got.candidates)} candidates, seq {got.seq}",
+            file=sys.stderr,
+        )
+    with _phase("printing", times):
+        if args.json:
+            print(json.dumps(dataclasses.asdict(got)))
+        else:
+            _print_sequence(got)
+    if args.timing:
+        shown = ", ".join(f"{n} {t * 1000:.1f} ms" for n, t in times.items())
+        print(f"timing: {shown}", file=sys.stderr)
+    return 0
+
+
+def _print_sequence(got):
+    for candidate in got.candidates:
+        print(candidate.why)
+    for entry in got.left:
+        print(f"left: {entry.why}")
+    for note in got.notes:
+        print(f"note: {note}")
+    for name in ("roles", "repos"):
+        shown = ", ".join(f"{k}={v}" for k, v in got.counts[name].items())
+        print(f"count {name}: {shown or 'none'}")
+    for name in ("reviews", "landing"):
+        print(f"count {name}: {got.counts[name]}")
+
+
 def _actor():
     try:
         return getpass.getuser()
@@ -273,6 +358,17 @@ def parser():
     scheduled.add_argument("--timing", action="store_true", help="time per layer")
     scheduled.add_argument("--debug", action="store_true", help="what was parsed")
     scheduled.set_defaults(run=_order_schedule)
+    shown = ordered.add_parser(
+        "show", help="what may start next, and why: the sequence at a time"
+    )
+    shown.add_argument("url", help="sqlite:///path/record.sqlite")
+    shown.add_argument("--actor", default=_actor(), help="who, as you name yourself")
+    shown.add_argument("--now", type=int, help="the time, in ms (default: the clock)")
+    shown.add_argument("--settings", help="a JSON object of the order's settings")
+    shown.add_argument("--json", action="store_true", help="as one JSON object")
+    shown.add_argument("--timing", action="store_true", help="time per layer")
+    shown.add_argument("--debug", action="store_true", help="the settings in force")
+    shown.set_defaults(run=_order_show)
     return top
 
 
@@ -288,7 +384,7 @@ def main(argv=None):
         for problem in e.problems:
             print(f"  {problem}", file=sys.stderr)
         return 2
-    except schedules.ScheduleError as e:
+    except (schedules.ScheduleError, order_settings.SettingsError) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
     except contract.Refused as e:

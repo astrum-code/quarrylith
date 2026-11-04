@@ -351,11 +351,11 @@ def place(record, *, now, settings, task=None, item=None) -> Candidate | Left: .
 this round's walk saw refused `never` (below, "The landing tier"); each is
 left out, `Left` with "never fits: " and that text. None leaves nothing out.
 
-1. **The ready set.** `record.ready(now=now)`. An item with an open task is
-   represented by its task: the task is a candidate when it is in the ready
-   set, and the item alone is never one (else it would start beside its
-   task). An item with no open task is a candidate as itself (`task` None;
-   the services file its task before they start it, step 5).
+1. **The ready set.** `record.ready(now=now)`. An item with an open or
+   running task is represented by its task: the task is a candidate when it
+   is in the ready set, and the item alone is never one (else it would start
+   beside its task). An item with neither is a candidate as itself (`task`
+   None; the services file its task before they start it, step 5).
 2. **Schedules and flags narrow it.** A task whose `schedule` `parse`
    refuses is left out, with the fault. A task outside its schedule's window,
    or flagged `night` and outside `Settings.night`, is left out, with when
@@ -1129,3 +1129,6 @@ merge happens.
   `cron`; and the no-window wording of the five-year error (this PR)
 - 2026-11-04 proposed: a day field that starts with `*` (`*`, `*/10`) is
   unrestricted, as in classic cron (user decision, 2026-11-04) (this PR)
+- 2026-11-04 proposed: "The ready set" reads an item's task as open or
+  running, so an item moved back to `ready` while its task runs is left out
+  (this PR)

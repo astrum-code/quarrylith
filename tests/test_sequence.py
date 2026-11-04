@@ -194,6 +194,56 @@ def test_an_item_with_an_open_task_is_a_candidate_as_its_task(backend, record, c
     assert (later, waits) in left
 
 
+@over_backends
+def test_an_item_whose_task_is_running_is_not_a_candidate(backend, record, clock):
+    """templet:3163 -- an item moved back to `ready` while its task is still
+    running is not a candidate as itself: a second task would start beside
+    the running one. It is left out, and the reason names the running task."""
+    admitted(record)
+    node(record)
+    busy = item(record, "busy")
+    running = task_of(record, busy)
+    run_of(record, running, fence=grant(record, busy))
+    record.move(busy, "ready", "released while its run is live")
+    assert record.get("tasks", running)["state"] == "running"
+    assert record.get("items", busy)["state"] == "ready"
+    assert busy in [i["number"] for i in record.ready(now=clock())["items"]]
+    plain = item(record, "plain")
+
+    got = sequence_of(record, clock)
+    assert keys(got) == [("item", plain)]
+    why = {(e.task, e.item): e.why for e in got.left}
+    assert why[(running, busy)] == f"task {running}: running, so item {busy} waits"
+    found = place(record, now=clock(), settings=DEFAULT, item=busy)
+    assert (found.task, found.item) == (running, busy) and "running" in found.why
+    assert place(record, now=clock(), settings=DEFAULT, task=running) == found
+
+
+@over_backends
+def test_a_left_line_names_its_task_or_item_once(backend, record, clock):
+    """templet:3163 -- a `Left` line starts with the task or item it is
+    about and does not say the name again; a `not before` is a time."""
+    admitted(record)
+    gate = clock() + 3_600_000
+    waits = item(record, "waits")
+    later = task_of(record, waits, not_before=gate)
+    shown = datetime.fromtimestamp(gate / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
+    blocked = item(record, "blocked")
+    block(record, blocked, waits)
+    unadmitted = item(record, "unadmitted", machine=True)
+
+    got = sequence_of(record, clock)
+    why = {(e.task, e.item): e.why for e in got.left}
+    assert why[(later, waits)] == f"task {later}: not before {shown} UTC"
+
+    asked = place(record, now=clock(), settings=DEFAULT, item=blocked)
+    assert asked.why == f"item {blocked}: has a live dep"
+    asked = place(record, now=clock(), settings=DEFAULT, item=unadmitted)
+    assert asked.why == f"item {unadmitted}: not admitted"
+    asked = place(record, now=clock(), settings=DEFAULT, task=later)
+    assert asked.why == f"task {later}: not before {shown} UTC"
+
+
 # -- the tiers ------------------------------------------------------------
 
 
@@ -304,6 +354,12 @@ def test_unblocks_then_age(backend, record, clock):
     block(record, dependents["s"], z)
     block(record, dependents["t"], target)
     block(record, dependents["u"], target)
+    # A dropped item that still waits on `w` is not one `w` unblocks: were it
+    # counted, `w` (4) would come before `y` (3).
+    for n in range(3):
+        gone = item(record, f"dropped {n}")
+        block(record, gone, w)
+        record.move(gone, "dropped", "no longer needed")
 
     got = sequence_of(record, clock, settings=Settings(review_slots=0))
     assert keys(got) == [("item", n) for n in (y, review, w, z, x, i1, i2)]
@@ -311,6 +367,7 @@ def test_unblocks_then_age(backend, record, clock):
     assert by_item[y].unblocks == tuple(dependents[n] for n in "pqv")
     assert by_item[review].unblocks == (dependents["t"], dependents["u"])
     assert by_item[x].unblocks == ()
+    assert by_item[w].unblocks == (dependents["r"],)
 
 
 @over_backends
@@ -611,6 +668,28 @@ def test_the_default_settings_are_valid():
     assert Settings().instances is not Settings().instances
 
 
+def test_settings_are_frozen_copies():
+    """templet:3163 -- what a caller hands in is copied and cannot be changed
+    through the settings; two settings share no rule."""
+    given = {"alpha": 2}
+    rules = [{"name": "wide", "risk_at_most": 9, "reviews": ["pool"]}]
+    settings = Settings(instances=given, merge_rules=rules)
+    given["alpha"] = 5
+    rules[0]["name"] = "changed"
+    rules[0]["reviews"].append("second")
+    assert settings.instances == {"alpha": 2}
+    assert settings.merge_rules[0]["name"] == "wide"
+    assert settings.merge_rules[0]["reviews"] == ["pool"]
+    assert settings.problems() == []
+    with pytest.raises(TypeError):
+        settings.instances["alpha"] = 3
+    with pytest.raises(TypeError):
+        settings.merge_rules[0]["name"] = "changed"
+    assert DEFAULT.merge_rules[0] is not Settings().merge_rules[0]
+    with pytest.raises(TypeError):
+        DEFAULT.merge_rules[0]["risk_at_most"] = 10
+
+
 @pytest.mark.parametrize(
     "bad, field",
     [
@@ -626,6 +705,7 @@ def test_the_default_settings_are_valid():
         ({"night": "window 22-6"}, "night"),
         ({"night": "cron 0 22 * * *"}, "night"),
         ({"night": 5}, "night"),
+        ({"night": "tz UTC"}, "night"),
         ({"merge_rules": ({"risk_at_most": 4, "reviews": ["pool"]},)}, "name"),
         (
             {"merge_rules": ({"name": "x", "risk_at_most": 11, "reviews": ["pool"]},)},
@@ -863,6 +943,9 @@ def test_order_show_takes_timing_and_debug(backend, record, url, clock, capsys):
     code, out, err = show(capsys, url, "--now", now, "--timing", "--debug")
     assert code == 0 and out == plain
     assert "timing:" in err and "settings:" in err
+    timing = next(line for line in err.splitlines() if line.startswith("timing:"))
+    for phase in ("opening the record", "ordering", "printing"):
+        assert phase in timing
 
 
 @over_backends
@@ -875,4 +958,4 @@ def test_order_show_prints_a_slow_phase(
     monkeypatch.setattr(cli, "SLOW_PHASE_S", 0.0)
     code, out, err = show(capsys, url, "--now", str(clock()))
     assert code == 0
-    assert "reading the record" in err and " s" in err
+    assert "opening the record: " in err and "ordering: " in err and " s" in err

@@ -5,7 +5,7 @@ questions and readings; `unsorted` as the record makes it; and what `check()`
 finds of invariants 6 and 7."""
 
 import pytest
-from backends import URLS, admitted, over_backends, url_for
+from backends import URLS, admitted, over_backends, scheme, url_for
 from samples import load_sample
 
 from quarrylith.record import contract, schema
@@ -383,19 +383,27 @@ def test_the_replay_holds_over_the_landing_records_and_a_dump_loads(
 
 
 @over_backends
-def test_unsorted_is_the_records_own_whoever_files_first(opener, clock):
+def test_unsorted_is_the_records_own_whoever_files_first(backend, opener, clock):
     """The `unsorted` effort `file_item` makes is `schema.unsorted_effort`,
-    the same whoever files first: its owner is not the filer's. (One handle
-    at a time: a Henge record has one writer.)"""
-    beta = opener(actor="beta")
-    beta.init()
+    the same whoever files first: its owner is not the filer's. On SQLite
+    both handles are open from the start, so the one opened before the other's
+    write sees it; a Henge record has one writer, so there they take turns."""
+    both = scheme(backend) == "sqlite"
+    if both:
+        alpha = opener(actor="alpha")
+        alpha.init()
+        beta = opener(actor="beta")
+    else:
+        beta = opener(actor="beta")
+        beta.init()
     first = beta.file_item("task", "loose", "", filed_by="beta")
     got = beta.get("efforts", "unsorted")
     assert got == schema.unsorted_effort(clock())
     assert got["owner"] == "record" and got["standing"] == "parked"
-    beta.close()
+    if not both:
+        beta.close()
+        alpha = opener(actor="alpha")
     clock.step()
-    alpha = opener(actor="alpha")
     alpha.file_item("task", "loose too", "", filed_by="alpha")
     assert alpha.get("efforts", "unsorted") == got
     assert alpha.read("effort_links", target=str(first))[0]["effort"] == "unsorted"

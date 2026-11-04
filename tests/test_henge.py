@@ -12,6 +12,7 @@ import itertools
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -364,6 +365,31 @@ def test_one_sync_per_operation_after_its_last_put_and_before_head(single):
     rec.close()
 
 
+def test_ack_and_beat_are_synced_after_their_last_put(single):
+    """templet:3159 -- Henge: `ack` and `beat` are synced, as on SQLite: each
+    ends with one sync(space) after its last put, so a cursor or a beat its
+    caller heard of survives a power cut."""
+    rec = opened(single.url())
+    rec.init()
+    admitted(rec)
+    item(rec, "one")
+    rec.store = spy = Recording(rec.store)
+    ops = [
+        lambda: rec.ack("c", 1),
+        lambda: rec.beat(7),
+        lambda: rec.ack("c", rec.head()),
+        lambda: rec.beat(7),
+    ]
+    for op in ops:
+        spy.calls.clear()
+        op()
+        seen = [c[0] for c in spy.calls]
+        assert seen.count("sync") == 1, spy.calls
+        assert seen[-2:] == ["put", "sync"], spy.calls
+    assert spy.overlapped == 0
+    rec.close()
+
+
 # -- no object deleted ------------------------------------------------------------
 
 
@@ -546,6 +572,7 @@ def small_chunks(monkeypatch):
     """Chunks of 8 keys, split into pieces of 4: a split in a few events."""
     monkeypatch.setattr(henge, "CHUNK_KEYS", 8)
     monkeypatch.setattr(henge, "PIECE_KEYS", 4)
+    monkeypatch.setattr(henge, "JOURNAL_CHUNK", 8, raising=False)
 
 
 def efforts(rec, ids):
@@ -693,6 +720,96 @@ def test_errors_at_the_commit_point_are_resolved_or_unknown():
     assert third.head() == head and third.check() == []
 
 
+def _within(fake, start, timeout_s):
+    """`start()` in a thread: (its result or error, the seconds it took). One
+    still running past ten timeouts loops: every call then fails, which ends
+    it, and the test reports the loop."""
+    out = {}
+    began = time.monotonic()
+    thread = threading.Thread(target=lambda: out.update(r=_capture(start)))
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout_s * 10 + 5)
+    took = time.monotonic() - began
+    if thread.is_alive():
+        fake.fault(lambda *a: True, errors.Unavailable("stopped"), times=10**9)
+        thread.join(30)
+        return "still looping", took
+    return out.get("r"), took
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "record refused",
+        "record conflict",
+        "commit conflict",
+        "ack refused",
+        "open refused",
+        "recovery refused",
+    ],
+)
+def test_a_put_the_store_keeps_refusing_gives_up_at_the_timeout(path):
+    """templet:3159 -- Henge: a put the store keeps refusing, or keeps
+    answering Conflict, while its reads still answer, gives the operation up
+    at the record's timeout: past the commit point Unknown, the record closed
+    (rows 2-5, and the commit put); before it Unavailable (recovery's redo,
+    rows 7-13)."""
+    fake = FakeStore()
+    s = henge.spaces("rec")
+    rec = fake_record(fake, "w")
+    rec.init()
+    admitted(rec)
+    item(rec, "first")
+    rec.ack("c", 1)
+    timeout_s = rec.timeout_s = 0.5
+
+    def puts(space_name, key0=None):
+        m = _in(space_name, key0)
+        return lambda who, op, space, key, value: op == "put" and m(
+            who, space, key, value
+        )
+
+    def refuse(match, exc):
+        fake.fault(match, exc, times=10**9)
+
+    def reopen():
+        return fake_record(fake, "w2", timeout_s=timeout_s)
+
+    want, start = Unknown, lambda: item(rec, "second")
+    if path == "record refused":
+        refuse(puts("rec", "items"), errors.Unavailable("refused"))
+    elif path == "record conflict":
+        refuse(puts("rec", "items"), errors.Conflict("moved"))
+    elif path == "commit conflict":
+        refuse(puts("journal"), errors.Conflict("moved"))
+    elif path == "ack refused":
+        refuse(puts("rec", "cursors"), errors.Unavailable("refused"))
+        want, start = Unavailable, lambda: rec.ack("c", rec.head())
+    elif path == "open refused":
+        rec.close()
+        refuse(
+            _and(puts("state"), lambda w, op, sp, k, v: k == ["writer"]),
+            errors.Unavailable("refused"),
+        )
+        want, start = Unavailable, reopen
+    else:
+        # an entry committed and not applied: the next open redoes it
+        rec.store = Crashing(
+            rec.store, lambda space, key: space == s["journal"], after=True
+        )
+        with pytest.raises(Crash):
+            item(rec, "crashed")
+        abandon(rec)
+        refuse(puts("rec", "items"), errors.Unavailable("refused"))
+        want, start = Unavailable, reopen
+    got, took = _within(fake, start, timeout_s)
+    assert type(got) is want, got
+    assert took < timeout_s + 3, took
+    if want is Unknown:
+        assert rec._closed is not None
+
+
 # -- the resumable load ------------------------------------------------------------
 
 
@@ -810,6 +927,38 @@ def test_a_chunk_splits_past_its_bounds_and_a_read_spans_chunks():
 # -- check()'s Henge findings ----------------------------------------------------------
 
 
+def test_a_chunk_of_keys_that_escape_long_is_measured():
+    """templet:3159 -- Henge: a chunk's 512 KiB are `schema.size`'s, so a
+    chunk of few keys whose text escapes long (a control character counts six
+    bytes) still splits by its bytes."""
+    long = [["\x01" * 256, "\x01" * 256, "\x01" * 250 + f"{i:06d}"] for i in range(470)]
+    assert schema.size(long) > henge.CHUNK_BYTES
+    assert henge.over(long)
+    assert not henge.over(long[:60])
+
+
+def test_the_journal_index_keeps_its_width_whatever_the_split_bound(monkeypatch):
+    """templet:3159 -- Henge: a subject's journal chunk is `seq // 8192`, on
+    disk, whatever bound a record's chunk splits at."""
+    monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
+    monkeypatch.setattr(henge, "PIECE_KEYS", 2)
+    fake = FakeStore()
+    rec = fake_record(fake, "w")
+    rec.init()
+    admitted(rec)
+    n = item(rec, "one")
+    for i in range(10):
+        rec.comment(n, f"c{i}")
+    s = henge.spaces("rec")
+    keys = [k for sp, k in fake.keys() if sp == s["idx"] and k[0] == "journal"]
+    assert {k[-1] for k in keys} == {0}, keys
+    # the item's subject: its filing and its ten comments
+    by = {k[1]: fake.value(s["idx"], k) for k in keys}
+    subject, seqs = max(by.items(), key=lambda p: len(p[1]))
+    assert len(seqs) > 4
+    assert [e.seq for e in rec.events(0, subject=subject)] == seqs
+
+
 def test_check_reports_a_hole_a_record_past_applied_and_a_bad_chunk():
     """templet:3159 -- Henge: check() reports a journal hole, a record past
     applied and an index chunk that disagrees with the records."""
@@ -880,22 +1029,38 @@ def test_no_read_lists_a_space(single):
 
 # -- two live writers, every row of the put table -----------------------------
 
-#: "Every put the writer makes": each row, and the runs that hold one of its
-#: puts back.
-ROWS = {
-    1: "the commit",
-    2: "the event's records",
-    3: "the event's index edits and a split",
-    4: "applied and head",
-    5: "a retry",
-    6: "recovery's redo",
-    7: "the writer, at open",
-    8: "init()",
-    9: "the load's start",
-    10: "the load's events",
-    11: "the load's end",
-    12: "ack",
-    13: "beat",
+#: The record's page, whose table "Every put the writer makes" the runs follow.
+PAGE = Path(__file__).resolve().parents[1] / "docs" / "templets" / "3159-the-record.md"
+
+
+def page_rows():
+    """The put table's rows, read from the page: {n: its put path}."""
+    text = PAGE.read_text(encoding="utf-8")
+    _, _, table = text.partition("**Every put the writer makes**")
+    rows = {}
+    for line in table.splitlines():
+        m = re.match(r"\s*\| (\d+) \| ([^|]+?) \|", line)
+        if m:
+            rows[int(m.group(1))] = m.group(2)
+        elif rows and not line.strip().startswith("|"):
+            break
+    return rows
+
+
+#: How the held writer's operation ends, per row run through `race`: the
+#: error it raises (Unknown past the commit point, else Unavailable), or None
+#: for a success.
+OUTCOMES = {
+    1: Unavailable,
+    2: Unknown,
+    3: Unknown,
+    4: Unknown,
+    5: Unknown,
+    9: Unavailable,
+    10: Unknown,
+    11: None,
+    12: Unavailable,
+    13: Unavailable,
 }
 
 
@@ -1068,6 +1233,7 @@ def race(
     back; the other writer does `during` and commits past it, then the call
     is released."""
     other = "w2" if tag == "w1" else "w1"
+    who = writers.live[tag][0]
     held = writers.fake.hold(match, op=op, late=late)
     result = {}
 
@@ -1087,6 +1253,9 @@ def race(
     held.release()
     thread.join(30)
     assert not thread.is_alive()
+    # the held writer is checked like any other that ended
+    if isinstance(result.get("error"), (Unknown, Unavailable)):
+        writers.ended.append((who, result["error"]))
     writers.monotone()
     return result
 
@@ -1171,7 +1340,8 @@ def _run_row(fake, clock, row, case):
                 _in("state"),
                 lambda w, sp, k, v: k == ["loading"] and v is None,
             )
-        race(writers, "w1", lambda: w1.load(source), match)
+        result = race(writers, "w1", lambda: w1.load(source), match)
+        _ended_as(row, result, w1)
     elif row == 6:
         writers = _setup(fake, clock)
         if case == "two entries":
@@ -1294,9 +1464,25 @@ def _run_row(fake, clock, row, case):
 
             during = beats
 
-        race(writers, "w1", action, match, during=during, touch=row in (2, 3, 5))
+        result = race(
+            writers, "w1", action, match, during=during, touch=row in (2, 3, 5)
+        )
+        _ended_as(row, result, w1)
     writers.interleave(200, seed=row * 1000 + sum(map(ord, str(case))))
     return writers.finish()
+
+
+def _ended_as(row, result, rec):
+    """The held writer's operation ended as the row says: its error's own
+    class (an Unknown is also an Unavailable), or a success; past the commit
+    point, an Unknown leaves the record closed."""
+    want, got = OUTCOMES[row], result.get("error")
+    if want is None:
+        assert got is None, (row, got)
+        return
+    assert type(got) is want, (row, got)
+    if want is Unknown:
+        assert rec._closed is not None, (row, got)
 
 
 def _capture(fn):
@@ -1342,7 +1528,11 @@ RUNS = [
 def test_every_row_of_the_put_table_has_a_run():
     """templet:3159 -- the two-writer test lists the table's rows and fails if
     a row has no run."""
-    assert sorted({row for row, _ in RUNS}) == sorted(ROWS)
+    rows = page_rows()
+    assert sorted(rows) == list(range(1, len(rows) + 1)) and len(rows) >= 13, rows
+    assert sorted({row for row, _ in RUNS}) == sorted(rows)
+    raced = {row for row, _ in RUNS} - {6, 7, 8}
+    assert sorted(OUTCOMES) == sorted(raced)
 
 
 @pytest.mark.parametrize("row,case", RUNS, ids=[f"row{r}-{c}" for r, c in RUNS])
@@ -1482,6 +1672,52 @@ class _Then:
 
     def __getattr__(self, op):
         return getattr(self.first, op)
+
+
+@pytest.mark.parametrize("what", ["chunk", "applied", "head"])
+def test_a_retry_with_nothing_left_to_put_still_checks_the_journal(what):
+    """templet:3159 -- Henge, row 5: a retry whose fresh read leaves nothing
+    to put (another writer put the same value) still checks journal/[seq+1]
+    first; finding it, the writer puts nothing more, closes the record, and
+    the operation raises Unknown."""
+    fake = FakeStore()
+    s = henge.spaces("rec")
+    rec = fake_record(fake, "w")
+    rec.init()
+    admitted(rec)
+    item(rec, "first")
+    match = {
+        "chunk": _and(_in("idx", "items"), lambda w, sp, k, v: k[-1] == 0),
+        "applied": _and(_in("state"), lambda w, sp, k, v: k == ["applied"]),
+        "head": _and(_in("state"), lambda w, sp, k, v: k == ["head"]),
+    }[what]
+    held = fake.hold(_and(_who("w"), match))
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.update(r=_capture(lambda: item(rec, "second")))
+    )
+    thread.start()
+    assert held.reached.wait(30)
+    _, space, key, value, _ = held.call
+    seq = rec._high
+    # another writer has put the same value, and committed the next seq
+    other = fake.client("other")
+    got = other.get(space, key)
+    expect = {"absent": True} if got is None else {"version": got.version}
+    other.put(space, key, value, expect=expect)
+    entry = {"event": "another writer's", "priors": []}
+    other.put(s["journal"], [seq + 1], entry, expect={"absent": True})
+    held.release()
+    thread.join(30)
+    assert isinstance(result["r"], Unknown), result
+    assert rec._closed is not None
+    mine = [c for c in fake.log if c[0] == "w"]
+    found = [
+        i
+        for i, c in enumerate(mine)
+        if c[1] == "get" and c[2] == s["journal"] and c[3] == [seq + 1]
+    ]
+    assert found and [c for c in mine[found[-1] + 1 :] if c[1].startswith("put")] == []
 
 
 def test_monotone_values_keep_their_order_under_a_retry():

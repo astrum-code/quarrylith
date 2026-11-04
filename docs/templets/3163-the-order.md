@@ -609,14 +609,20 @@ hold.
 And none of these, whatever the rules say (**never auto**, #3044's
 non-waivable list and today's sweep rule):
 
-- a `risk` of 8 or more, or none;
+- a `risk` of 8 or more, below 1, or none;
 - a review in the item's current round with verdict `changes`;
 - a review in the item's current round with no verdict yet (live), of any
   kind;
+- a review of a round **after** the item's (`round` > `review_round`) with
+  verdict `changes` or none: the filing path may file it before it moves the
+  item's round, and a verdict already filed must not be ignored ("review N is
+  of round R, after the item's round");
 - a review the round requires and nobody has filed: the required kinds come
   from the item, which the record holds, not from what is filed:
   `conformance` when the item's `templet` names another item (it builds to
-  an agreed spec), and `second` when its `tier` is 5. A pool approval that
+  an agreed spec), and `second` when its `tier` is 5 or more (the record
+  does not bound `tier`, so a tier above the scale reads the strict way, as
+  does a `risk` below 1). A pool approval that
   lands before the services file one of these is not enough, so the rule
   holds even when the filing path does not file every review of a round in
   one event;
@@ -1151,3 +1157,6 @@ merge happens.
 - 2026-11-04 proposed: `classify` reads an item with no open change, a round
   with no review filed, and a review whose `heads` omit a change as the
   user's, and refuses a number the record does not hold (this PR)
+- 2026-11-04 proposed: a review of a round after the item's, with verdict
+  `changes` or none, bars the merge; a tier above 5 needs the second role's
+  review, and a risk below 1 is the user's (this PR)

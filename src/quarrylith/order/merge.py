@@ -19,12 +19,13 @@ waits whole. A change qualifies under a configured rule when:
 - every check on that head reads `green` or `skipped`, one at least `green`;
 - the change is not a draft.
 
-And whatever the rules say, a change is the user's with a risk of 8 or more
-or none; a review of the round asking for changes, or without a verdict yet;
-a review the item requires and nobody has filed (a conformance review when it
-builds to another item's templet, a second role's when its tier is 5); an
-item the user overruled; an open question; a templet (the item holds its own
-spec, or a review of kind `templet` judges it); and a live hold.
+And whatever the rules say, a change is the user's with a risk of 8 or more,
+below 1 or none; a review of the round asking for changes, or without a verdict
+yet, and likewise one filed for a round after the item's; a review the item
+requires and nobody has filed (a conformance review when it builds to another
+item's templet, a second role's when its tier is 5 or more); an item the user
+overruled; an open question; a templet (the item holds its own spec, or a
+review of kind `templet` judges it); and a live hold.
 
 Today's rule, pool approval at a risk of 4 or less, is the one default in
 `Settings.merge_rules`. No rule at all makes every change the user's.
@@ -36,8 +37,11 @@ from ..record import contract
 
 #: Whatever the rules say, a risk at or above this is the user's.
 NEVER_AUTO_RISK = 8
-#: The tier that needs a second role's review.
+#: The tier that needs a second role's review, and every tier above it: the
+#: record does not bound `tier`, so an unbounded one reads the strict way.
 SECOND_ROLE_TIER = 5
+#: The risk scale starts here; a risk below it is no score and is the user's.
+LOWEST_RISK = 1
 
 AUTO, USER = "auto", "user"
 
@@ -74,6 +78,8 @@ class _Item:
             found.append("no risk set")
         elif risk >= NEVER_AUTO_RISK:
             found.append(f"risk {risk} is {NEVER_AUTO_RISK} or more")
+        elif risk < LOWEST_RISK:
+            found.append(f"risk {risk} is below {LOWEST_RISK}")
         if item["overruled_at"] is not None:
             found.append("overruled by the user")
         if item["templet"] == self.number:
@@ -86,11 +92,16 @@ class _Item:
                 )
         found.extend(self._questions())
         found.extend(self._holds())
-        for review in self.in_round:
+        for review in self.reviews:
             name = f"review {review['id']} ({review['kind']})"
-            if review["verdict"] == "changes":
+            verdict, at = review["verdict"], review["round"]
+            if at > self.round and verdict in ("changes", None):
+                found.append(
+                    f"{name} is of round {at}, after the item's round {self.round}"
+                )
+            elif at == self.round and verdict == "changes":
                 found.append(f"{name} asked for changes")
-            elif review["verdict"] is None:
+            elif at == self.round and verdict is None:
                 found.append(f"{name} has no verdict yet")
         found.extend(self._required())
         return found
@@ -115,11 +126,9 @@ class _Item:
                 f"it builds to the templet of item {spec}: no conformance "
                 f"review filed in round {self.round}"
             )
-        if item["tier"] == SECOND_ROLE_TIER and "second" not in filed:
-            found.append(
-                f"tier {SECOND_ROLE_TIER}: no second review filed in "
-                f"round {self.round}"
-            )
+        tier = item["tier"]
+        if tier is not None and tier >= SECOND_ROLE_TIER and "second" not in filed:
+            found.append(f"tier {tier}: no second review filed in round {self.round}")
         return found
 
     # -- what each change must show ------------------------------------------

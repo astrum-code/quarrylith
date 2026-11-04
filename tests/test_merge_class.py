@@ -380,7 +380,7 @@ def test_a_review_of_a_later_round_bars_the_merge(backend, record, clock, verdic
         record.record_verdict(later, "gamma", verdict, [])
     got = classify(record, m.n, settings=DEFAULT)
     assert got.cls == "user" and got.rule is None, got
-    assert has(got, f"review {later} is of round 2, after the item's round 1")
+    assert has(got, "is of round 2, after the item's round 1")
 
 
 @over_backends

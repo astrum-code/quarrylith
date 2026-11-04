@@ -11,13 +11,14 @@ The tiers, in order: the floor (reviews, as many as `review_slots` less the
 admitted efforts' reviews running now), the resumes (work with a live lease),
 then each admitted effort's own order. Inside a tier, candidates sort by their
 effort (`rank`, then `id`), then by the effort's rule, then by key. An item
-with an open task is a candidate as its task, never beside it.
+with an open or running task is a candidate as its task, never beside it.
 
 `place` gives one task or item exactly the place the full order gives it, so a
 start named by hand is never placed differently from a round.
 """
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 
 from ..record import contract, schema
@@ -277,6 +278,24 @@ def _label(task, item):
     return f"task {task['id']}"
 
 
+def _plain(why, subject):
+    """A reason from the record without the `subject` it begins with (the
+    `Left` line names it already), and a `not before` as a time."""
+    for lead, put in (
+        (f"{subject} is ", ""),
+        (f"{subject} has ", "has "),
+        (f"{subject}'s ", "its "),
+    ):
+        if why.startswith(lead):
+            why = put + why[len(lead) :]
+            break
+    return re.sub(
+        r"not before (\d+)",
+        lambda m: f"not before {_stamp(int(m[1])).strftime('%Y-%m-%d %H:%M')} UTC",
+        why,
+    )
+
+
 def _left(task, item, why):
     prefix = f"task {task['id']}" if task is not None else f"item {item['number']}"
     return Left(
@@ -302,26 +321,38 @@ def _sort_key(entry):
 
 def _gather(reading, ready):
     """The ready set as (task, item) pairs: an item with an open task is
-    represented by that task, one with none by itself. What the schedule and
-    the flags keep out, and what a task's item holds back, go to `left`."""
+    represented by that task, one with none by itself. An item whose only
+    tasks are running or not ready is left out, as is whatever the schedule
+    and the flags keep out."""
     record = reading.record
-    open_tasks = {}
-    for task in record.read("tasks", state="open"):
-        if task["number"] is not None:
-            open_tasks.setdefault(task["number"], []).append(task)
+    by_item = {"open": {}, "running": {}}
+    for state, found in by_item.items():
+        for task in record.read("tasks", state=state):
+            if task["number"] is not None:
+                found.setdefault(task["number"], []).append(task)
     pairs, left = [], []
     ready_ids = {t["id"] for t in ready["tasks"]}
     for task in ready["tasks"]:
         item = None if task["number"] is None else record.get("items", task["number"])
         pairs.append((task, item))
     for item in ready["items"]:
-        tasks = open_tasks.get(item["number"])
-        if not tasks:
+        tasks = by_item["open"].get(item["number"], [])
+        running = by_item["running"].get(item["number"], [])
+        if not tasks and not running:
             pairs.append((None, item))
         elif not any(t["id"] in ready_ids for t in tasks):
+            if running:
+                left.append(
+                    _left(
+                        running[0],
+                        item,
+                        f"running, so item {item['number']} waits",
+                    )
+                )
+                continue
             task = tasks[0]
             why = contract._unready(record, task, reading.now)
-            left.append(_left(task, item, f"task {task['id']} is not ready ({why})"))
+            left.append(_left(task, item, _plain(why, f"task {task['id']}")))
     return pairs, left
 
 
@@ -531,11 +562,14 @@ def _unplaced(record, now, task, item):
         if found is None:
             return Left(task, None, f"task {task}: there is no such task")
         why = contract._unready(record, found, now) or "it is not in the ready set"
-        return Left(task, found["number"], f"task {task}: {why}")
+        return Left(
+            task, found["number"], f"task {task}: {_plain(why, f'task {task}')}"
+        )
     found = record.get("items", item)
     if found is None:
         return Left(None, item, f"item {item}: there is no such item")
     why = contract._ineligible(record, found)
     if found["state"] != "ready":
         why = f"item {item} is {found['state']}, not ready"
-    return Left(None, item, f"item {item}: {why or 'it is not in the ready set'}")
+    why = _plain(why or "it is not in the ready set", f"item {item}")
+    return Left(None, item, f"item {item}: {why}")

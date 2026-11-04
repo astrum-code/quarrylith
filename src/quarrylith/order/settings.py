@@ -7,7 +7,9 @@ effect at the next sequence and never touches a running task.
 have problems (`SettingsError`, a `ValueError`). Keeping the last good
 settings is the caller's."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from ..record import schema
 from . import schedule as schedules
@@ -23,6 +25,10 @@ def _whole(value, least):
     return isinstance(value, int) and not isinstance(value, bool) and value >= least
 
 
+def _copy(rule):
+    return {k: list(v) if isinstance(v, (list, tuple)) else v for k, v in rule.items()}
+
+
 @dataclass(frozen=True)
 class Settings:
     review_slots: int = 2  # the floor's size, and the landing tier's cap
@@ -33,6 +39,21 @@ class Settings:
     merge_rules: tuple = (
         {"name": "pool-approved", "risk_at_most": 4, "reviews": ["pool"]},
     )
+
+    def __post_init__(self):
+        """Keep a copy of the maps, read-only: a caller's later change to what
+        it passed, or to a default, never reaches the settings. A value that
+        is not a map is left for `problems()` to name."""
+        if isinstance(self.instances, Mapping):
+            object.__setattr__(
+                self, "instances", MappingProxyType(dict(self.instances))
+            )
+        if isinstance(self.merge_rules, (tuple, list)):
+            rules = tuple(
+                MappingProxyType(_copy(rule)) if isinstance(rule, Mapping) else rule
+                for rule in self.merge_rules
+            )
+            object.__setattr__(self, "merge_rules", rules)
 
     def problems(self):
         """Each fault, one line naming the field; [] when every field is
@@ -49,7 +70,7 @@ class Settings:
         return found
 
     def _instances(self):
-        if not isinstance(self.instances, dict):
+        if not isinstance(self.instances, Mapping):
             return [f"instances: a {{role: n}} map, not {self.instances!r}"]
         return [
             f"instances: role {role!r} has {n!r}, a whole number from 1 is needed"
@@ -68,6 +89,8 @@ class Settings:
             return [f"night: {e}"]
         if parsed.cron is not None:
             return ["night: window clauses only, a cron is not a window"]
+        if not parsed.windows:
+            return ["night: no window clause"]
         return []
 
     def _rules(self):
@@ -75,7 +98,7 @@ class Settings:
             return [f"merge_rules: a list of rules, not {self.merge_rules!r}"]
         found = []
         for i, rule in enumerate(self.merge_rules):
-            if not isinstance(rule, dict):
+            if not isinstance(rule, Mapping):
                 found.append(f"merge_rules[{i}]: a rule is an object, not {rule!r}")
                 continue
             label = f"merge_rules[{i}]"

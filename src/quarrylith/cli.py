@@ -256,14 +256,15 @@ def _order_settings(path):
 
 def _order_show(args):
     times = {}
-    with _phase("reading the record", times):
+    with _phase("opening the record", times):
         settings = _order_settings(args.settings)
         record = _open(args, readonly=True)
-        try:
+    try:
+        with _phase("ordering", times):
             now = args.now if args.now is not None else record.now_ms()
             got = sequences.order(record, now=now, settings=settings)
-        finally:
-            record.close()
+    finally:
+        record.close()
     if args.debug:
         print(f"settings: {settings}", file=sys.stderr)
         print(

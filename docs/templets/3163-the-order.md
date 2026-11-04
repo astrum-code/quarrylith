@@ -89,9 +89,9 @@ flowchart LR
   D["live deps"] -->|"unblocks"| T
   T -->|"one sequence,<br/>each with effort + rule"| W["the walk: per-role cut,<br/>landing limit, holds"]
   S["live settings"] -->|"review_slots, landing_limit,<br/>instances, night, hold_after"| W
-  W -->|"next candidate"| A["the allocator (step 3):<br/>needs, fit or refuse"]
-  A -->|"refused: short resources"| W
-  A -->|"fit: node, needs"| SR["start_run (step 5):<br/>one event, with its reason"]
+  W -->|"next candidate"| A["the allocator (step 3):<br/>place: Fit or Refusal"]
+  A -->|"Refusal: shorts, waits, until"| W
+  A -->|"Fit: node, needs"| SR["start_run (step 5):<br/>one event, with its reason"]
   SR -->|"run.start"| R
   R -->|"changes, reviews,<br/>checks, questions"| M["merge classes:<br/>auto or the user's"]
   M -->|"class + rule"| L["landing (step 6)"]
@@ -112,7 +112,7 @@ passed in.
 | `quarrylith.order.schedule` | `Schedule`, `parse(text)`, `ScheduleError`, `next_not_before(task, *, finished_at)` |
 | `quarrylith.order.settings` | `Settings`, `Settings.problems()`, `DEFAULT` |
 | `quarrylith.order.sequence` | `Candidate`, `Left`, `Sequence`, `RULES`, `order(record, *, now, settings)`, `place(record, *, now, settings, task=None, item=None)`, `effort_order(effort)` |
-| `quarrylith.order.walk` | `Walk`, `Refusal` |
+| `quarrylith.order.walk` | `Walk` |
 | `quarrylith.order.merge` | `MergeClass`, `classify(record, number, *, settings)` |
 | `quarrylith.cli` | `quarrylith order show|schedule|merge` |
 
@@ -171,8 +171,8 @@ class Schedule:
 
     def within(self, at: int) -> bool: ...          # at in a window, or no window
     def next_open(self, at: int) -> int: ...        # the first instant >= at within a window
-    def next_fire(self, after: int) -> int | None:  # the first cron minute > after,
-        ...                                         #   moved into a window; None: no cron
+    def next_fire(self, after: int) -> int | None:  # the first cron minute > after
+        ...                                         #   within a window; None: no cron
 
 def parse(text: str | None) -> Schedule: ...        # ScheduleError on any fault
 def next_not_before(task: dict, *, finished_at: int) -> int | None: ...
@@ -182,6 +182,13 @@ def next_not_before(task: dict, *, finished_at: int) -> int | None: ...
   `ScheduleError` naming what is wrong (`cron: minute 61 is past 59`,
   `window: "22-6" is not HH:MM-HH:MM`, `tz: no zone "Mars/Base"`, `unknown
   clause "every"`, `cron given twice`).
+- **A cron with a window**: the fires outside the window are **skipped**,
+  and `next_fire` takes the next fire inside it. A fire is never moved to
+  the window's start: the cron says when, the window only where a fire is
+  allowed. `cron 0 */6 * * *; window 22:00-06:00` from 12:30 fires at 00:00,
+  not at 22:00. `next_fire` looks at most 5 years ahead (so `29 2` is
+  found); with no fire inside a window in that span it raises
+  `ScheduleError` (`cron: no fire within its window in 5 years`).
 - **`next_not_before(task, *, finished_at)`** is what the services write
   into the task's `not_before` after each run (step 5 calls it; the record
   stores it). For a task with a cron: the next fire after `finished_at`.
@@ -207,8 +214,14 @@ record's labels and flags; the allocator (step 3) reads its own.
 
 | read | from | used for |
 |---|---|---|
-| role | a task's effective `role:` label, else its item's `role` field | the per-role cut |
+| role | a task's effective `role:` label, else its item's `role` field (so an item's `role:` label beats its own `role` field) | the per-role cut |
 | repos | effective `repo:` labels (several on one record) | the landing limit |
+
+**A repo is named the same way** in a `repo:` label and in a change's
+`changes.repo`: the same string, the repo's own name. The landing limit
+joins the two by that string, so a filer or an import that writes one
+writes the other alike (the legacy import takes both from the board, so
+they agree today).
 | `resync` (flag) | the task's or its item's flags | exempt from the landing limit: work that brings an open change up to date with main |
 | `night` (flag) | the task's or its item's flags | the task starts only within `Settings.night` |
 | kind | the task's `kind` field, the item's `kind` field | a review is either one's `review` |
@@ -289,6 +302,7 @@ RULES = ("floor", "resume", "unblocks-then-age", "listed", "landing")
 class Candidate:
     task: int | None          # a ready task, or None: an item with no open task
     item: int | None
+    key: tuple                # ("task", id), else ("item", number): the walk's key
     effort: str               # the effort whose order placed it
     rule: str                 # one of RULES
     tier: int                 # 1 floor, 2 resume, 3 effort order, 4 landing
@@ -314,11 +328,14 @@ class Sequence:
     at: int                   # now
     seq: int                  # the record's seq the reads saw
 
-def order(record, *, now, settings) -> Sequence: ...
+def order(record, *, now, settings, never=None) -> Sequence: ...
 def place(record, *, now, settings, task=None, item=None) -> Candidate | Left: ...
 ```
 
-**`order(record, *, now, settings)`**, inside one `reading()`:
+**`order(record, *, now, settings, never=None)`**, inside one `reading()`.
+`never` is `{candidate key: the allocator's refusal text}`, the candidates
+this round's walk saw refused `never` (below, "The landing tier"); each is
+left out, `Left` with "never fits: " and that text. None leaves nothing out.
 
 1. **The ready set.** `record.ready(now=now)`. An item with an open task is
    represented by its task: the task is a candidate when it is in the ready
@@ -336,8 +353,11 @@ def place(record, *, now, settings, task=None, item=None) -> Candidate | Left: .
    ready read gives only an admitted effort's work.
 4. **The tiers**, in this order:
    1. **floor**: reviews (a task or an item of kind `review`), as many as
-      `review_slots` less the reviews running now (never below 0), taken in
-      the effort order below. The rest of the reviews go on to tier 2 or 3.
+      `review_slots` less the admitted efforts' reviews running now (never
+      below 0), taken in the effort order below. The rest of the reviews go
+      on to tier 2 or 3. A landing run counts only against the landing
+      tier's cap, never against the floor, so live landing reviews never
+      take the floor from admitted ones.
    2. **resume**: a candidate whose item has a live lease (`leases`,
       `released_at` null): work in flight, held by someone, to take up again.
    3. **the effort order**: everything else, rule `listed` or
@@ -368,8 +388,9 @@ rule that placed it**.
 
 **`counts`**: the live figures read in the same `reading()`, from which the
 walk starts: per role, the live runs; per repo, the unmerged changes the
-landing limit counts; the live review runs; the live landing runs (review
-runs whose item or task is linked to no admitted effort).
+landing limit counts; the live review runs of admitted efforts (the
+floor's figure); the live landing runs (review runs whose item or task is
+linked to no admitted effort: the landing cap's figure, and only its).
 
 **`place(record, *, now, settings, task=None, item=None)`** gives one task
 or item as `order` would place it, with its tier, rule, effort and `why`,
@@ -381,12 +402,6 @@ round 6: a named start that skipped the round's rules).
 ### The walk: the per-role cut, the landing limit, the holds
 
 ```python
-@dataclass(frozen=True)
-class Refusal:                      # the allocator's answer, as the walk reads it
-    why: str
-    short: dict | None = None       # {resource: amount it lacked}; None: unknown
-    never: bool = False             # it can never fit on this node
-
 class Walk:
     def __init__(self, sequence, *, settings, waiting=None): ...
     def check(self, candidate, needs=None) -> str | None: ...
@@ -394,20 +409,43 @@ class Walk:
     def refused(self, candidate, refusal) -> None: ...
     left: list                      # [(candidate, why)] in the order checked
     waiting: dict                   # {candidate key: first refused at}; the caller keeps it
+    never: dict                     # {candidate key: refusal text}: refused `never` this walk
+    only_never: bool                # nothing started, and every candidate that
+                                    #   passed rules 1 to 3 (one at least) was
+                                    #   refused `never`
 ```
 
-The services (step 5) compose the order, the walk and the allocator:
+**The refusal is the allocator's.** The walk has no refusal type of its own:
+`refused(candidate, refusal)` takes the allocator's `Refusal` (its page,
+`quarrylith.allocator.Refusal`, with `Short`) and reads four of its
+attributes **by name**, so `quarrylith.order` does not import
+`quarrylith.allocator` and the walk's build step need not wait for the
+allocator's:
+
+| attribute | the walk reads it as |
+|---|---|
+| `refusal.text` | the `why` it leaves the candidate with |
+| `refusal.waits` | `False`: the refusal is **never** (it can never fit, short of a declaration change); `True`: waiting may help |
+| `refusal.shorts[].resource` | the resources the candidate was short of, for its hold; a short with `resource` None (`unmeasured`, waits true) is short of **every** resource |
+| `refusal.until` | named in the hold's `why` when it is set ("held behind #3170: budget until 18:00") |
+
+The services (step 5) compose the order, the walk and the allocator's
+`Placement`, on the seam as the allocator's page has it:
 
 ```
 sequence = order(record, now=now, settings=settings)
 walk = Walk(sequence, settings=settings, waiting=kept)
 for c in sequence.candidates:
-    needs = allocator.needs(c)            # step 3: from class, labels, flags
-    why = walk.check(c, needs)
-    if why: continue                      # walk.left has it
-    answer = allocator.fit(c, needs)      # step 3: fit, or refuse with why
-    if answer.fits: start_run(...); walk.started(c)
+    # an item with no open task (c.task None): its task is filed first
+    answer = placement.place(c.task, now=now)   # Fit or Refusal; both carry needs
+    why = walk.check(c, answer.needs)
+    if why: continue                            # walk.left has it
+    if isinstance(answer, Fit): start_run(...); walk.started(c)
     else: walk.refused(c, answer)
+if walk.only_never:                             # the landing tier, below
+    sequence = order(record, now=now, settings=settings, never=walk.never)
+    walk = Walk(sequence, settings=settings, waiting=walk.waiting)
+    ... the same loop, once ...
 kept = walk.waiting
 ```
 
@@ -424,15 +462,17 @@ or None, testing in this order:
 3. **The landing tier's cap.** A `landing` candidate, while live landing
    runs plus this walk's landing starts reach `review_slots`.
 4. **A hold ahead.** An earlier candidate of this walk is **held** (below)
-   and short of a resource that `needs` names, or short of something it did
-   not name (`short` None), or `needs` is None: "held behind #3170 (memory
-   short since 14:02)".
+   and short of a resource that `needs` names, or short of every resource
+   (a short with `resource` None), or `needs` is None: "held behind #3170:
+   memory short since 14:02", or, with the refusal's `until` set, "held
+   behind #3170: budget until 18:00".
 
 **`started(candidate)`** adds the candidate to the walk's counts (its role,
 each repo of `adds`, a landing run) and drops its `waiting` entry.
 
 **`refused(candidate, refusal)`** records the allocator's refusal. A
-`never` refusal is left with its reason and holds nothing. Any other sets
+`never` refusal (`waits` false) is left with its `text`, holds nothing, and
+goes into `never`. Any other sets
 `waiting[key]` to the sequence's `at` if it has no entry. The candidate is
 **held** when it has waited `hold_after_s` or longer (`at` −
 `waiting[key]`): from then on, in this walk, no later candidate that needs
@@ -447,7 +487,8 @@ a resource it was short of passes it.** Candidates that need none of those
 resources still pass. As runs finish and nothing new takes the short
 resources, the held candidate fits, at the latest when every run ahead of
 it that holds them has finished. A running task is never preempted to
-make room.
+make room. (Decided by the user, 2026-11-03, with `hold_after_s` 30
+minutes: Rationale.)
 
 **Unmerged changes, counted** (the landing limit's figure, per repo): the
 record's open changes in that repo (`changes` with `merged_at` and
@@ -478,11 +519,26 @@ built change, to land it, and never resume or start work there.
   an open change. Nothing else of a parked effort is ever a candidate.
 - **When**: only when tiers 1 to 3 hold no candidate that passes the walk's
   cuts (rules 1 to 3 of `check`, with no starts yet). A candidate the
-  allocator refuses is still admitted work to start, so it does not open the
-  landing tier. The sequence then holds the landing candidates, rule
-  `landing`, sorted as tier 3 is (their parked efforts by `rank` and `id`).
+  allocator refuses for a while (`waits` true) is still admitted work to
+  start, so it does not open the landing tier (the user, 2026-11-03). The
+  sequence then holds the landing candidates, rule `landing`, sorted as
+  tier 3 is (their parked efforts by `rank` and `id`).
+- **A `never` refusal does not keep it shut.** A candidate that can never
+  fit is not admitted work to start. `order` decides tier 4 before any
+  allocator answer exists, so the walk says it: when a walk started nothing
+  and every candidate that passed rules 1 to 3 was refused `never`
+  (`walk.only_never`), the services call `order` once more in the same
+  round with `never=walk.never`. Those candidates are left out, "never
+  fits: ..." with the allocator's text, tiers 1 to 3 then hold none that
+  passes the cuts, and tier 4 opens. The second walk keeps the first's
+  `waiting`. `never` is not kept between rounds: the next round asks the
+  allocator again, so a declaration change is seen at once.
 - **Capped at the review slots**: at most `review_slots` landing runs live
-  at once (the walk's rule 3).
+  at once (the walk's rule 3). Landing runs count only against this cap,
+  never against the floor (tier 1).
+- **Started by `start_run` with `placed["rule"]` `landing`** (needed from
+  the record, below): the record's start accepts a task `landable(now)`
+  gives, checked in the same event, and nothing else of a parked effort.
 
 ### Merge classes
 
@@ -506,10 +562,13 @@ set**: `auto` only when every one of them qualifies, so a set merges whole
 or waits whole. A change qualifies under a rule when all hold:
 
 - the item's `risk` is set and at most the rule's `risk_at_most`;
-- for each review kind the rule names, a review of that kind on the item
-  (`target` = the item), in its current round (`round` = `review_round`),
-  with verdict `approve` and `heads[change]` equal to the change's `head`:
-  the approval binds to the head it saw (templet 2710);
+- **every** review filed on the item (`target` = the item) in its current
+  round (`round` = `review_round`), of any kind, has verdict `approve` and
+  `heads[change]` equal to the change's `head`: the approval binds to the
+  head it saw (templet 2710). So a conformance review, a second role's
+  review or any other review of the round holds the change as today's
+  `status:reviewed` does, not only the kinds the rule names;
+- among them, for each review kind the rule names, one of that kind;
 - every check on `(change, head)` reads `green` or `skipped`, and at least
   one reads `green`;
 - the change is not a draft.
@@ -519,10 +578,19 @@ non-waivable list and today's sweep rule):
 
 - a `risk` of 8 or more, or none;
 - a review in the item's current round with verdict `changes`;
+- a review in the item's current round with no verdict yet (live), of any
+  kind;
 - the item `overruled_at` set;
 - an unanswered question on the item (`questions`, `answered_at` null);
-- a templet: the item has a review of kind `templet` (the owner's review of
-  a templet, which the user's merge agrees);
+- a templet: the item's `templet` field names the item itself (it holds the
+  spec it builds to: it writes a templet), or the item has a review of kind
+  `templet` (the owner's review of a templet, which the user's merge
+  agrees). The first is set when the item is filed, so a templet is known
+  before any review of it is filed, and a pool approval that lands before
+  the owner's review is not enough. The filer sets it: the services' filing
+  path (step 5, #3165) sets it on every spec item it files, and step 5
+  tests that. Until the switch, the legacy landing mode, which reads the
+  files under `docs/templets/`, does the merging;
 - a live hold on the item.
 
 `why` lists every reason that applies, not the first. `merge_rules` empty
@@ -532,20 +600,34 @@ check at the merge, since the record does not hold it.
 
 ### Needs from the record
 
-The order reads the record as it is, but for two things. Each is named here
-for the coordinator, and is made by a build step (below) that proposes it
-on the record's page with a `proposed:` History line, as a change to an
+The order reads the record as it is, but for three things. Each is named
+here for the coordinator, and is made by a build step (below) that proposes
+it on the record's page with a `proposed:` History line, as a change to an
 agreed templet is made.
 
 1. **`landable(*, now)`**, a read beside `ready()`, for the landing tier:
    `{"items": [...], "tasks": [...]}`, the reviews `ready()` leaves out
    only because no effort they are linked to is admitted, linked to at
    least one `parked` effort, whose reviewed item has an open change; in key
-   order. `ready()` and the record's invariant 9 stay as they are.
+   order. `ready()` stays as it is.
 2. **`start_run(..., placed=None)`**: `placed` is `{"effort", "rule",
    "why"}` (strings, `rule` one of `RULES`), carried in the `run.start`
    event's `data`, so the record says why each run started. No new field
    and no schema change: the event is the record. Step 5 passes it.
+3. **`start_run` starts a landing review.** Today `start_run` begins with
+   `_unready` (contract.py, `start_run`), which, for a task with an item,
+   refuses "no effort item N is linked to is admitted": every landing
+   candidate is linked to none, so without this the landing tier could
+   never start a run. With `placed["rule"]` equal to `landing`, `start_run`
+   accepts a task that `landable(now)` gives (the task itself, or the task
+   of an item it gives), **checked in the same event**, instead of the
+   ready check; the lease, fence, node and reservation checks are as they
+   are. Nothing else of a parked effort starts: any other `placed`, or
+   none, is the ready check as today, and a parked effort's task that
+   `landable` does not give is refused with `placed["rule"]` `landing` too.
+   The record's invariant 9 gains a sentence: "... nor does `start_run`
+   start one, but a review `landable` gives, when its `placed` names the
+   rule `landing`."
 
 ### The commands
 
@@ -610,7 +692,9 @@ What looked reusable but was not:
    `landable(now=now)`. Nothing else is ever a candidate.
 2. **Admitted work comes first.** No landing candidate is in a sequence that
    holds a tier 1 to 3 candidate passing the cuts, and a landing candidate
-   is a review, never a resume or new work.
+   is a review, never a resume or new work. A candidate refused `never` is
+   not admitted work to start, so it never keeps the landing tier shut; one
+   refused for a while (`waits` true) does.
 3. **Every candidate names one effort and one rule** of `RULES`, and its
    `why` says both. Every start the services make from a sequence carries
    them (`placed`).
@@ -632,9 +716,11 @@ What looked reusable but was not:
 9. **Settings are live.** Every call reads the settings it is given, and
    nothing is cached between calls.
 10. **Never auto** for a change at risk >= 8 or unscored, flagged by a
-    `changes` verdict in its round, overruled, with a question open, a
-    templet, under a live hold, approved for another head, or with a check
-    not green; and a set is `auto` only whole.
+    `changes` verdict in its round, with a review of its round not yet
+    given, overruled, with a question open, a templet, under a live hold,
+    approved for another head by any review of its round, or with a check
+    not green; and a set is `auto` only whole. `classify` is never looser
+    than today's rule: every review of the round approves the head.
 11. **quarrylith names nothing internal** (the record's invariant 15): no
     role, repo host or yard in `src/`, and the imports on its allow-list.
 
@@ -658,6 +744,11 @@ database, never passes.
 - [ ] `window 22:00-06:00 fri` holds Friday 22:00 and Saturday 05:59, and
   not Saturday 06:00 nor Thursday 23:00; two `window` clauses are their
   union; `next_open` gives the next start
+- [ ] a cron with a window skips the fires outside it:
+  `cron 0 */6 * * *; window 22:00-06:00` from 12:30 gives 00:00, not 18:00
+  and not 22:00, and from 00:30 gives 00:00 the next day (06:00 is the
+  window's end, excluded); `cron 0 12 * * *; window 22:00-06:00` raises
+  `ScheduleError` naming no fire within its window
 - [ ] `next_not_before`: a loop's is the finish plus `interval_s`, moved to
   its window's next opening; a cron task's is the first fire after the
   finish, so fires missed while it could not run give one run, not several
@@ -703,23 +794,38 @@ database, never passes.
 - [ ] passing: a refused candidate is passed by a later one that fits;
   past `hold_after_s` a later candidate needing the resource it was short of
   is held, naming it, while one needing other resources passes; a refusal
-  with `short` None holds every later candidate; a `never` refusal holds
-  nothing; when the held candidate starts, the hold ends; `waiting` drops a
-  candidate no longer in the sequence
+  with a short whose `resource` is None holds every later candidate; a
+  refusal with `until` set names it in the hold's `why`; a `never` refusal
+  (`waits` false) holds nothing and is in `walk.never`; when the held
+  candidate starts, the hold ends; `waiting` drops a candidate no longer in
+  the sequence. The refusals are given as objects with only the allocator's
+  attribute names (`text`, `waits`, `shorts[].resource`, `until`), and
+  `quarrylith.order` imports nothing of `quarrylith.allocator`
 - [ ] the landing tier: with no admitted candidate passing the cuts, a
   parked effort's review of an open change is a candidate, rule `landing`;
   never a parked effort's resume or new work, nor a review whose item has no
-  open change; at most `review_slots` landing runs at once; with an
-  admitted candidate refused by the allocator, no landing candidate
+  open change; at most `review_slots` landing runs at once, and live
+  landing runs leave the floor's `review_slots` whole; with an admitted
+  candidate refused by the allocator with `waits` true, no landing
+  candidate; with every candidate that passed the cuts refused `never`,
+  `walk.only_never` is true and `order(..., never=walk.never)` leaves them
+  out ("never fits: ...") and holds the landing candidates; and
+  `start_run` with `placed` rule `landing` starts the landing review, while
+  a parked effort's non-review task is still refused, with `placed` rule
+  `landing` or without
 - [ ] `Settings.problems()` names each invalid field, and `order`, `Walk`
   and `classify` refuse settings that have problems
 - [ ] `classify`: a pool approval of the change's head in the current round,
   checks green, risk 4, gives `auto` with the rule `pool-approved`; each of
   risk 5, risk 8 under a rule allowing 9, no risk, a `changes` verdict in the
   round, an approval of an older head, a red or pending check, a draft,
-  `overruled_at`, an open question, a `templet` review and a live hold gives
-  `user` with that reason among `why`; a set with one member not qualifying
-  is `user` whole; empty `merge_rules` gives `user` for all
+  `overruled_at`, an open question, a `templet` review, an item whose
+  `templet` names itself (with no review of kind `templet` filed yet) and a
+  live hold gives `user` with that reason among `why`; so does a
+  conformance review of the round still live (no verdict), and a second
+  role's review of the round that approved an older head, each with the pool
+  approval in place; a set with one member not qualifying is `user` whole;
+  empty `merge_rules` gives `user` for all
 - [ ] `quarrylith order show`, `schedule` and `merge` print as the page says,
   exit 2 on a refused schedule or settings, and take `--timing` and
   `--debug`
@@ -733,7 +839,7 @@ step's PR sets `status: built` and the pins, and #3163 closes with it.
 1. **The schedule parser** -- `quarrylith.order.schedule`: `parse`,
    `Schedule`, `next_not_before`; `quarrylith order schedule`.
    Acceptance: `parse` refuses; `next_fire` across a weekend and DST; day
-   of month or week; `window`; `next_not_before`.
+   of month or week; `window`; a cron with a window; `next_not_before`.
    Aim: tier 3.
 2. **The sequence** -- `quarrylith.order.settings` and
    `quarrylith.order.sequence`: `Settings`, `effort_order`, `order`,
@@ -743,19 +849,23 @@ step's PR sets `status: built` and the pins, and #3163 closes with it.
    `unblocks-then-age`; `listed`; efforts by rank; schedules and flags;
    effort and rule named; writes nothing; `place`; `Settings.problems()`.
    Aim: tier 3.
-3. **The walk** -- `quarrylith.order.walk`: `Walk`, `Refusal`, the
-   per-role cut, the landing limit and its count, the holds.
+3. **The walk** -- `quarrylith.order.walk`: `Walk`, the per-role cut, the
+   landing limit and its count, the holds, read from the allocator's
+   `Refusal` by attribute name (so it needs none of the allocator's steps).
    Acceptance: the order before the cut; the landing limit; passing.
    Aim: tier 3.
 4. **What the record gains for the order** -- quarrylith's record:
-   `landable(*, now)` and `start_run(..., placed=)`, each proposed on the
-   record's page (`3159-the-record.md`) with a `proposed:` History line,
-   which the record's conformance review answers. No acceptance item of this
-   page: its tests are the record's, marked `templet:3159`.
+   `landable(*, now)`, `start_run(..., placed=)`, and `start_run` starting a
+   task `landable` gives when `placed` names the rule `landing` (with
+   invariant 9's sentence), each proposed on the record's page
+   (`3159-the-record.md`) with a `proposed:` History line, which the
+   record's conformance review answers. No acceptance item of this page:
+   its tests are the record's, marked `templet:3159`.
    Aim: tier 3.
-5. **The landing tier** -- tier 4 in `order`, from `landable`; the walk's
-   landing cap.
-   Acceptance: the landing tier.
+5. **The landing tier** -- tier 4 in `order`, from `landable`; `never` in
+   `order` and `Walk.never`, `Walk.only_never`; the walk's landing cap.
+   Acceptance: the landing tier (its `start_run` half over step 4's
+   record).
    Aim: tier 3.
 6. **Merge classes** -- `quarrylith.order.merge`: `classify`, `MergeClass`;
    `quarrylith order merge`. It needs only the record, so it may merge
@@ -766,8 +876,14 @@ step's PR sets `status: built` and the pins, and #3163 closes with it.
 **Which step builds what this page leaves:**
 
 - the services that call `order`, the walk and the allocator, write
-  `not_before` from `next_not_before`, keep `waiting`, file an item's task
-  and pass `placed` -- step 5 (#3165);
+  `not_before` from `next_not_before`, keep `waiting`, re-run `order` with
+  `never` when `walk.only_never`, file an item's task, pass `placed`, and
+  set a spec item's `templet` to its own number when filing it -- step 5
+  (#3165);
+- **one open item per effort per shared hand-written page** (a page several
+  efforts edit, edited through one issue per effort) -- step 5 (#3165), the
+  services' filing path: it files an effort's edit of the page into that
+  effort's open item for it, or a new one when there is none;
 - **the regeneration of generated pages at merge** (`docs/ATLAS.md`,
   `PLAN.md` status: regenerated at merge, never in a PR) -- step 6 (#3167),
   the GitHub connector, which performs the merges: it files a `job` task
@@ -800,6 +916,28 @@ step's PR sets `status: built` and the pins, and #3163 closes with it.
 
 ## Rationale
 
+**Decided by the user, 2026-11-03** (the six choices this page put to the
+user, each taken as recommended):
+
+1. **Behind a refused candidate**: pass, then hold after `hold_after_s`.
+2. **Across efforts**: strict rank.
+3. **The landing tier stays shut** while an admitted candidate is only
+   refused (for a while: a `never` refusal does not keep it shut, the
+   owner's review of this page; "The landing tier").
+4. **`hold_after_s` 30 minutes and `review_slots` 2**, both live settings.
+5. **The regeneration of generated pages**: step 6.
+6. **Lanes are capacity, the allocator's** (with the user's #3044
+   decision).
+
+**For the user's eyes: holds make a harness's slots first in, first out.**
+`slots.<harness>` is a resource of the allocator's. So after
+`hold_after_s`, a candidate waiting for a harness slot holds every later
+candidate that needs the same harness's slot: the slots go first in, first
+out, in the sequence's order. That is a change from today, where each
+role's own list decides who takes its next slot. The owner's review agrees
+it is right (the sequence's order is the effort's order), and it is named
+here so it is not a surprise.
+
 **Passing a refused candidate, with a hold after a wait.** The seam leaves
 this page to say what happens behind a candidate the allocator refuses.
 Chosen: a later one that fits may pass it, until it has waited
@@ -817,10 +955,15 @@ needs a resource it was short of passes it. Rejected:
   reserves nothing (the seam), and the time it would fit is not known
   until runs finish.
 
-The hold names its resources from the allocator's refusal (`short`); with
-none named it holds everything behind it, which is strict ordering, safe
-but idle. So the walk asks the allocator's refusal to carry `short` and
-`never` (PR body, for the coordinator). It keeps no state in the record: the
+The hold names its resources from the allocator's refusal (its shorts'
+`resource`); a short with none named (`unmeasured`) holds everything behind
+it, which is strict ordering, safe but idle, and right, since every start
+would be refused `unmeasured` too. The walk reads the allocator's `Refusal`
+rather than a type of its own: the allocator is the producer, its type is
+the richer one, and a mesh placement implements it, so a second type would
+need an adapter the services own. It reads four attributes by name rather
+than importing the allocator, so the walk's build step waits on none of the
+allocator's. It keeps no state in the record: the
 first-refused times are the caller's map, and a scheduler restart restarts
 the clock, which costs at most one more `hold_after_s` of passing.
 
@@ -843,7 +986,9 @@ user admits efforts and ranks them to say what matters, and #3157 is "align
 behind efforts and have control over what we run and why". Interleaving the
 efforts (a fair share) is the rejected alternative: it would start a
 lower-ranked effort's work ahead of a higher one's whenever the turn came
-round. It is for the user to decide (PR body).
+round. The user decided strict rank (2026-11-03). Its risk is a
+lower-ranked effort that never starts; the dashboard (step 7) shows each
+admitted effort's ready-but-unstarted count, so that is seen, not silent.
 
 **The landing tier from a record read.** The record's ready read is the one
 place admission lives (its invariant 9), and this page must not widen it.
@@ -851,8 +996,25 @@ A parked effort's review is outside it by design. So the record gains a
 second, narrow read, `landable`, which gives only reviews of open changes,
 rather than the order re-deriving eligibility from the record's private
 rules. The tier opens only when no admitted candidate passes the cuts: a
-candidate the allocator refuses is still admitted work, so a parked review
-does not take its place.
+candidate the allocator refuses for a while is still admitted work, so a
+parked review does not take its place. A candidate refused `never` is not:
+left counted, one task that no node can run would shut the tier for good.
+The second `order` call with `never` keeps tier 4 decided in one place,
+`order`, rather than the walk adding candidates the sequence did not hold;
+it costs one more pure read, only in a round where nothing else can start.
+The record's start must then accept the landing review, since its own
+ready check refuses a parked effort's work: `placed` rule `landing` names
+the one exception, and the record checks it against `landable` in the same
+event, so the exception is the record's, not the order's word.
+
+**Merges never looser than today.** Today's sweep merges only a
+`status:reviewed` change, which the board sets when every review of the
+round approved (the pool's, the conformance review when a templet is
+attached, the second role's). So `classify` asks every review of the
+round, not only the kinds a rule names, and bars a review still live.
+Marking a templet by the item's own `templet` field, set at filing, rather
+than only by its `templet` review, closes the gap where the pool approves
+before the owner's review is filed.
 
 **The landing limit counts work in flight.** The record's open changes
 alone would let six starts at once each open a seventh. Counting live runs
@@ -867,7 +1029,12 @@ The record keeps `schedule` as text and refuses nothing in it (its
 Boundaries), and a schedule the parser refuses is left out with its fault,
 so the record need not import the order. Rejected: an `every` clause
 (it would say `loop.interval_s` twice), and catching up missed fires one
-by one (a machine back after a week would run a nightly seven times).
+by one (a machine back after a week would run a nightly seven times). A
+cron's fires outside its window are skipped, not moved to the window's
+start: moving them would make fires the cron never named (a noon cron
+running at 22:00), and a cron that fires inside its window is the way to
+say "at the window's start". A loop's interval is a least gap, so moving
+its next time into the window is no new fire.
 
 **Windows gate starts, never runs.** #3157: a running task is never
 preempted. #731's window end ("killed unless `may_run_over`", later
@@ -878,8 +1045,9 @@ and this page does not decide it.
 `sweep_merge_holds` over GitHub's facts. The record holds the same facts
 (reviews with their heads, checks per head, questions, holds, the drafts),
 so the class is a read, and the landing step merges what it says. A
-templet is told by its review of kind `templet`, not by its files, which
-the record does not hold. Mergeability against main is checked where the
+templet is told by the item's `templet` field naming itself, or by its
+review of kind `templet`, not by its files, which the record does not
+hold. Mergeability against main is checked where the
 merge happens.
 
 **Left to later steps, or to other pages:**
@@ -895,9 +1063,9 @@ merge happens.
   window and the `night` flag; its loader, its spend ledger and its overrun
   question are later steps'. This page parses what it writes.
 - **A shared hand-written page edited through one issue per effort**: a
-  rule of filing (one open item per effort per page), not of order. It is
-  for the services' filing path (step 5) or a later step, and needs nothing
-  of this page.
+  rule of filing (one open item per effort per page), not of order. Step 5
+  (#3165), the services' filing path, owns it (Build steps), and it needs
+  nothing of this page.
 - **The regeneration of generated pages**: step 6 (Build steps).
 
 ## History

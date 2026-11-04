@@ -277,10 +277,10 @@ def test_next_fire_on_a_leap_day_and_the_last_day_of_a_month():
 def test_next_fire_looks_five_years_ahead_and_no_further():
     """templet:3163 -- a cron that never fires (the 30th of February) raises
     `ScheduleError`, as does one that falls beyond five years."""
-    with pytest.raises(ScheduleError, match="cron: no fire within 5 years"):
+    with pytest.raises(ScheduleError, match="cron: no fire in 5 years"):
         parse("cron 0 0 30 2 *").next_fire(utc(2026, 1, 1))
     # 2096 is the last leap year before 2104: from just after it, 8 years
-    with pytest.raises(ScheduleError, match="cron: no fire within 5 years"):
+    with pytest.raises(ScheduleError, match="cron: no fire in 5 years"):
         parse("cron 0 0 29 2 *").next_fire(utc(2096, 3, 1))
 
 
@@ -453,7 +453,7 @@ def test_next_not_before_for_a_loop_moves_into_its_window():
 def test_next_not_before_for_a_cron_is_the_first_fire_after_the_finish():
     """templet:3163 -- a cron task's is the first fire after the finish, so
     fires missed while it could not run give one run, not several."""
-    hourly = task("cron 0 * * * *")
+    hourly = {**task("cron 0 * * * *"), "not_before": utc(2026, 1, 5, 3)}
     # the run was due at 03:00 and ran at 10:10, seven fires late; it finishes
     # at 10:15 and the next time is 11:00: one run for the seven, never seven
     assert next_not_before(hourly, finished_at=utc(2026, 1, 5, 10, 15)) == utc(

@@ -175,7 +175,7 @@ USER_CASES = {
     ),
     "an approval of an older head": (
         _move_head,
-        "head",
+        "approved head",
     ),
     "a red check": (_check("red"), "check lint is red"),
     "a pending check": (_check("pending"), "check lint is pending"),
@@ -197,7 +197,7 @@ USER_CASES = {
     ),
     "a second role's review of an older head": (
         lambda m: m.add_review("second", heads={str(m.change): "a0"}),
-        "head",
+        "approved head",
     ),
     "a tier-5 item with only the pool's approval": (
         lambda m: m.rec.edit_item(m.n, tier=5),
@@ -207,6 +207,12 @@ USER_CASES = {
         lambda m: m.rec.edit_item(m.n, templet=item(m.rec, "spec")),
         "conformance",
     ),
+    "a tier above 5 with only the pool's approval": (
+        lambda m: m.rec.edit_item(m.n, tier=6),
+        "second",
+    ),
+    "a risk below 1": (_risk(0), "risk 0"),
+    "a negative risk": (_risk(-3), "risk -3"),
     "a review that did not judge this change": (
         lambda m: m.add_review("second", heads={}),
         "did not judge change",
@@ -311,6 +317,82 @@ def test_only_the_current_round_counts(backend, record, clock):
     record.edit_item(m.n, review_round=2)
     got = classify(record, m.n, settings=DEFAULT)
     assert got.cls == "user" and has(got, "pool")
+
+
+def _next_round(m):
+    """The item moves to its next review round, in which only the pool has
+    approved the change."""
+    m.rec.edit_item(m.n, review_round=m.rec.get("items", m.n)["review_round"] + 1)
+    m.add_review("pool")
+
+
+@over_backends
+@pytest.mark.parametrize(
+    "kind, spoil",
+    [
+        ("conformance", lambda m: m.rec.edit_item(m.n, templet=item(m.rec, "spec"))),
+        ("second", lambda m: m.rec.edit_item(m.n, tier=5)),
+    ],
+)
+def test_a_required_review_must_be_filed_in_the_current_round(
+    backend, record, clock, kind, spoil
+):
+    """templet:3163 -- a conformance review (a build to another item's
+    templet) or a second role's (tier 5) filed and approved in an earlier
+    round does not stand for the current round's: with only the pool's
+    approval there, the item is the user's, and `why` names the kind."""
+    m = ready_to_merge(record, clock)
+    spoil(m)
+    m.add_review(kind)
+    assert classify(record, m.n, settings=DEFAULT).cls == "auto"
+    _next_round(m)
+    got = classify(record, m.n, settings=DEFAULT)
+    assert got.cls == "user" and got.rule is None, got
+    assert has(got, kind) and has(got, "round 2"), got.why
+    m.add_review(kind)
+    assert classify(record, m.n, settings=DEFAULT).cls == "auto"
+
+
+@over_backends
+@pytest.mark.parametrize("tier", [6, 9, 100])
+def test_a_tier_above_the_scale_needs_the_second_role_too(backend, record, clock, tier):
+    """templet:3163 -- the record does not bound `tier`, so a tier at or
+    above 5 reads the strict way: it needs the second role's review."""
+    m = ready_to_merge(record, clock, tier=tier)
+    got = classify(record, m.n, settings=DEFAULT)
+    assert got.cls == "user" and has(got, "second"), got
+    m.add_review("second")
+    assert classify(record, m.n, settings=DEFAULT).cls == "auto"
+
+
+@over_backends
+@pytest.mark.parametrize("verdict", ["changes", None])
+def test_a_review_of_a_later_round_bars_the_merge(backend, record, clock, verdict):
+    """templet:3163 -- a review filed for a round after the item's, with
+    verdict `changes` or still live, bars the merge: the filing path may
+    file it before it moves the item's round. An approval of a later round
+    does not hold the change."""
+    m = ready_to_merge(record, clock)
+    later = record.file_review(
+        m.n, 2, "second", author="alpha", heads={str(m.change): m.head}, filed_by="b"
+    )
+    if verdict is not None:
+        record.record_verdict(later, "gamma", verdict, [])
+    got = classify(record, m.n, settings=DEFAULT)
+    assert got.cls == "user" and got.rule is None, got
+    assert has(got, f"review {later} is of round 2, after the item's round 1")
+
+
+@over_backends
+def test_an_approval_of_a_later_round_does_not_hold_the_change(backend, record, clock):
+    """templet:3163 -- only a live or `changes` review of a later round
+    bars the merge; an approved one is no more than an approval."""
+    m = ready_to_merge(record, clock)
+    later = record.file_review(
+        m.n, 2, "second", author="alpha", heads={str(m.change): m.head}, filed_by="b"
+    )
+    record.record_verdict(later, "gamma", "approve", [])
+    assert classify(record, m.n, settings=DEFAULT).cls == "auto"
 
 
 @over_backends

@@ -224,7 +224,7 @@ allocator: task 12 (agent) refused on laptop: memory 2.0 GiB asked, 1.3 GiB free
   When it is true, the finish of runs alone can make room. When it is false,
   nothing fits until a declaration changes.
 - `measured` and `unmeasured`: always true. Memory frees and a reading comes.
-- `budget`: true. `until` is the reading's `resets_at` at a stop or a
+- `budget`: true, on `resource` `budget.<provider>`. `until` is the reading's `resets_at` at a stop or a
   rejection, and None while pacing at a warning.
 - `undeclared`, `unclassified`, `driver` and `node`: false. Only a change to
   the document, the node or the task can help.
@@ -566,7 +566,9 @@ the node and an amount per run.
   - else: the table's check alone.
 
   **The provider is short when any window is** (the tighter one counts, as
-  today), with one `budget` Short. Its `until` is the `resets_at` of the
+  today), with one `budget` Short, whose `resource` is the harness's
+  `budget.<provider>` (the order's hold reads it, to hold the same
+  provider's later candidates). Its `until` is the `resets_at` of the
   window at a stop or a rejection (the latest, when several are), and None
   when only a warning is short. So a five-hour reading at `allowed` never
   hides a seven-day reading at `rejected`.
@@ -619,7 +621,9 @@ them is either a resource here or dropped:
   is a timer over candidates that are not there yet: ordering in time, not
   capacity. With the `lab` ceiling, what it protected, short work finding no
   slot behind a pool of long runs, still holds: a mission runs in its VM, so
-  at most 2 harness slots go to missions at once, whatever the pool.
+  at most 2 harness slots go to missions at once, whatever the pool. That
+  holds because the services hold a mission's VM before its run starts
+  (step 5): a mission refused its VM never takes a harness slot.
 - **A trilithon** (a task needing N slots at once) is a task whose `needs`
   say N. `place` fits it only when N are free together, and `start_run`
   reserves them whole.
@@ -650,21 +654,24 @@ Every `alloc` command:
 
 ### Needs from the record
 
-The record's page is agreed and not this page's to edit. These are for the
-coordinator (Rationale says why):
+The record's page is agreed and not this page's to edit. Build step 1b
+makes these two, and proposes each on the record's page with a `proposed:`
+History line, as a change to an agreed templet is made (Rationale says why):
 
 1. **`replace_reservation(id, amount, why)` -> id**, one event (`reserve` and
    `reserve.release` in one operation, or a new kind `reserve.replace`). It
    releases a live reservation with no run, and reserves `amount` of the same
    node, resource, holder and task from now with no end. The check is made
    without the old reservation. It is refused whole when the new amount does
-   not fit, and for a reservation a live run holds. Build step 2 waits on it.
+   not fit, and for a reservation a live run holds. Build step 1b makes it;
+   step 2 waits on it.
 2. **A gauge `measured`** in `GAUGES`. Its labels are node, resource and
    holder (`""` for the host), and its unit is the resource's. It is
    computed from the latest `host/measure` reading, beside `capacity`,
    `reserved` and `free`, so the dashboard and a node's peers read drift
-   from the same list. Build step 4's report works without it (the
-   statement, `alloc show`). The gauge is wanted before step 7's views.
+   from the same list. Build step 1b makes it. Step 4's report works without
+   it (the statement, `alloc show`). The gauge is wanted before step 7's
+   views.
 
 ## Reuse
 
@@ -781,7 +788,8 @@ which pass.
   - the document reading with its sha256 and the figures.
 
   A second `declare` of the same document and figures writes nothing (head
-  unchanged). A `"measure"` with no figure is refused, naming the key, and
+  unchanged), the `allocator/document` reading included: `declare` skips it
+  when its sha256 and figures equal the latest reading's. A `"measure"` with no figure is refused, naming the key, and
   the record is unchanged
 - [ ] `declare` of the sample with a consumer's amount changed replaces its
   reservation in one event, and with a consumer removed releases it. A
@@ -867,11 +875,25 @@ Each is one PR that merges alone, in this order. Its tests carry
    - Acceptance: `load_document`; `classify`; `needs_of`; `placement_for`;
      the import allow-list.
    - Aim: tier 3.
+1b. **What the record gains for the allocator**: quarrylith's record:
+   `replace_reservation(id, amount, why)` and the `measured` gauge (needs
+   from the record, items 1 and 2), each proposed on the record's page
+   (`3159-the-record.md`) with a `proposed:` History line, which the
+   record's conformance review answers. No acceptance item of this page: its
+   tests are the record's, marked `templet:3159`.
+   - **Merge order against the order's step 4** (`3163-the-order.md`, "What
+     the record gains for the order"): both edit the record's page and
+     `contract.py`. This step merges first, since step 2 waits on it and the
+     order's step 4 comes later in its own sequence. The order's step 4 then
+     merges `main` in before it merges.
+   - Aim: tier 3.
 2. **Declaration and the table**: `HostPlacement.declare` (with given
    `figures`), `hold`, `release`, `place` and `headroom` over the table
    (`room`, `undeclared`, `driver`, `node`), lanes included. It probes
    nothing: its tests pass the figures, and step 4 wires the probes through
-   `resolve`. Waits on the record's `replace_reservation` (needs, item 1).
+   `resolve`. Waits on step 1b (the record's `replace_reservation`, needs item 1), which
+   merges before it. The order's step 4 merges after 1b, with `main` merged
+   in.
    - Acceptance: `declare` of the sample; `declare` with a change; `place`
      fits; `place` past the table; a lane at its `max`; `undeclared`,
      `driver`, `node`; a Fit then `start_run`; every backend; `hold` with a
@@ -898,8 +920,8 @@ Each is one PR that merges alone, in this order. Its tests carry
 
 - **What the build may touch**: quarrylith's `src/`, `tests/`, package files
   (`pyproject.toml` for the entry point) and `changes/`.
-  - The record's own modules are touched only by a record page change the
-    coordinator arranges (needs from the record).
+  - The record's own modules are touched only by build step 1b (needs from
+    the record).
   - No other repo. `bin/lith`'s guards and caps stay as they are until the
     switch (#3170).
 - **No order.** Admission, ranking, the review floor (`review_slots`), the

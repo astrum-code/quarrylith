@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 3d91643
+    at: d190581
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -557,7 +557,8 @@ the trash, and `_check` takes that as absent). So a late `absent` put could
 bring a deleted object back. With no delete, an object once written stays,
 and a late `absent` put meets `Conflict`. What would be a delete is a
 versioned put of null: `.state ["loading"]`, at a load's end, is the one
-such case.
+such case. (An open also puts `loading` null, `absent`, where it finds none:
+"Only past an answer".)
 
 - **One writer per record.** A record on Henge is written by the one
   process that holds its writer lock. `open_henge(folder, name)`:
@@ -601,15 +602,33 @@ such case.
   answered `Unavailable` ("written here, held by 1 of the 2 copies
   wanted"), and either copy may answer a read. So a value the writer read
   rather than had answered is put again, the same value with the version
-  read, and the writer goes on once that put is answered: the commit put's
-  own entry read back after a `Conflict`, a retry or a redo whose fresh
-  read leaves nothing to put, the entry a redo starts from, and the
-  `applied` an open's recovery reads with no entry past it. The leader
-  ships a whole object to a copy that lacks it, so the answer means both
-  copies hold it. A put of a value read again keeps its content, and a late
-  `absent` put still meets `Conflict`. It costs one put per value read, on
-  the error path, in a redo and at an open with nothing to redo; none on
-  the normal path.
+  read (an absent `loading` is put null, `absent`), and the writer goes on
+  once that put is answered. The table below names every value the writer
+  reads and goes on past, and the put that settles it. The leader ships a
+  whole object to a copy that lacks it, so the answer means both copies
+  hold it. A put of a value read again keeps its content, and a late
+  `absent` put still meets `Conflict`. It costs one put per value read, and
+  none on the normal path: on the error path; in a redo; at an open, four
+  with nothing to redo (`applied`, `head`, `schema` and `loading`) and two
+  with a redo, whose own step 4 puts `applied` and `head`; one when a load
+  resumes; and one before the next commit after a step-2 `Conflict`.
+
+  | value | read at | goes on past it | put again, answered, by |
+  |---|---|---|---|
+  | `.state ["applied"]` | decide; recovery | yes: a commit's seq is `applied` + 1 | decide: the last commit's own step 4. Recovery with nothing to redo: at open, at once; after a step-2 `Conflict`, this writer's next commit, before its commit put. A redo: its own step 4 (rows 4, 6) |
+  | `.state ["head"]` | decide; recovery | no commit: a seq comes from `applied`, and so do a caller's `head()` and `events()` | at open: recovery, put again as read with nothing to redo, or by the redo's step 4 (row 6). After a step-2 `Conflict` none is needed: the next commit puts it with the version read (row 4) |
+  | `.state ["schema"]` | open | yes: the open is `initialised` | the open, after recovery (row 7); `init` puts it `absent` (row 8) |
+  | `.state ["loading"]`, a load in progress | open | only a load of the same dump: every other operation is refused | the resumed load, before its first event; another digest, or none, stops it, and the record closes (row 9) |
+  | `.state ["loading"]`, null or absent | open | yes: every operation | the open, after recovery: null put again, absent put null `absent` (row 7) |
+  | `.state ["writer"]` | open | no | always put, after a fresh read (row 7) |
+  | `journal/[seq]`, step 2's read-back | step 2's `Conflict` | this entry: yes | put again with the version read (row 1). Another entry: recovery, and the operation did not happen |
+  | `journal/[a+1]`, an entry | recovery | yes: the redo | put again with the version read, before the redo (row 6) |
+  | `journal/[high+1]` absent (the check), and recovery's `journal/[a+1]` and `[a+2]` absent | the guard; recovery | yes | none needed: another writer puts nothing past its entry before that entry's put is answered, and both copies hold an answered put |
+  | records, chunks and directories an event puts, a split's new chunks included | decide; a redo's fresh reads | yes | step 3, with the version read; an orphan new chunk, or nothing left to put, is put again as read (rows 2, 3, 5, 6) |
+  | records, chunks and directories read and not put: decide's rules and priors, a directory with no split, a redo's chunks already in range, the load's emptiness check and fold check, a caller's reads | decide; reads | yes | none needed: each was last written by an event at or below `applied`, whose puts were answered before its `applied` was put, or by a redo whose puts were. Once `applied` is settled (above), both copies hold it |
+  | a cursor or a beat, and a new one's `*` chunk | `ack`, `beat` | yes: the larger seq, the later `at` | always a put with the version read, the chunk through the same rule (rows 12, 13) |
+  | a cursor or a beat a caller reads (`cursor()`, `lease()`, `dump()`), and the cursors and beats of the load's emptiness check | reads; the load's start | the writer, no; the load, past an absent one | none. A cursor or a beat on the leader alone is one whose `ack` or `beat` ended `Unavailable`. With the leader lost it reads as before that call, which its `Unavailable` allowed. A load that reads one absent from the second copy goes on: the dump's own rows merge over it, and a row the dump lacks stays |
+
 - **Other processes** may follow the record's events directly: `watch`
   `.state ["head"]` and `get_many` `.journal` up to it, over `henge.sock`,
   and `watch.sock` for the watch. Every other read, and every operation,
@@ -770,7 +789,8 @@ such case.
     entry is never put with another value, so this put needs no check. If
     the read finds nothing (a copy that lacks it answered), the put
     `absent` is sent again. If it holds another entry,
-    another writer took that seq: a gone one's late request, or a live one.
+    another writer took that seq (a gone one's late request, or a live
+    one), or an earlier operation that ended `Unknown` did.
     The writer runs recovery, and the operation raises `Unavailable`: it did
     not happen.
   - **Any other error at step 2** (the store unreachable, a timeout): the
@@ -799,12 +819,16 @@ such case.
     happened, and the next open's recovery finishes it.
 - **Recovery**, at open and after a step-2 `Conflict` with another entry.
   It reads `applied` (call it a), then `journal/[a+1]` and `journal/[a+2]`.
-  - **No entry at a+1:** nothing to redo. At open, it first puts `applied`
-    again as read, with the version read, and goes on once that put is
-    answered ("Only past an answer"); after a step-2 `Conflict` with another
-    writer's entry it puts nothing, as that writer puts `applied` itself.
-    Step 4, through the guard, brings `head` up to a (a crash can fall
-    between the two `.state` puts).
+  - **No entry at a+1:** nothing to redo, and the read of `journal/[a+1]`
+    is the check. At open, it puts `applied` again as read, with the version
+    read, then brings `head` up to a, a `head` read at or past a put again
+    as read (a crash can fall between the two `.state` puts). The open goes
+    on once both are answered ("Only past an answer"). After a step-2
+    `Conflict` with another writer's entry, it only brings `head` up to a
+    where it is below, and puts nothing more in that operation. The writer
+    stays open, and its next commit puts `applied` again as read, answered,
+    before its commit put: the other writer may have died, or ended
+    `Unknown`, with that `applied` on the leader alone.
   - **One entry, at a+1, and none at a+2:** it redoes that entry whole,
     with `high` = a+1. It first puts the entry itself again, with the
     version read, and goes on once that put is answered ("Only past an
@@ -817,8 +841,9 @@ such case.
   - **A second entry, at a+2: another writer is live.** It redoes nothing,
     and raises `Unavailable`: the open is refused, or the operation did not
     happen. A writer commits seq only once the store's `applied` is at least
-    seq − 1 (its own step 4, or its recovery's), and `applied` never moves
-    back. So at rest at most one entry lies past `applied`. A second one
+    seq − 1 (its own step 4, or its recovery's put of it, at open or before
+    its next commit), and `applied` never moves back. So at rest at most
+    one entry lies past `applied`. A second one
     means a writer moved `applied` and committed again during this scan.
     Redoing the older entry over the newer one's values is the tear of
     henge-2's round 4, so recovery never redoes past one entry.
@@ -833,10 +858,10 @@ such case.
   | 3 | the event's index edits and a split, step 3 | chunks, directories; new chunks `absent` | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
   | 4 | `applied` and `head`, step 4, only upward | `.state` | decide's read, or own put | the commit put | `Unknown` |
   | 5 | a retry after an error or `Conflict` at rows 2-4; nothing left to put, the value read put again | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
-  | 6 | recovery's redo of one entry: the entry put again first, then rows 2-4, a split's redo included; nothing left to put, the value read put again; no entry, at open: `applied` put again as read, then `head` | `journal/[a+1]`, then as rows 2-4 | the entry's version as read; fresh read | `journal/[a+2]` (the entry's put needs none); a second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
-  | 7 | `.state ["writer"]`, at open after recovery | `.state` | fresh read | `journal/[head+1]` | `Unavailable`: the open is refused |
+  | 6 | recovery's redo of one entry: the entry put again first, then rows 2-4, a split's redo included; nothing left to put, the value read put again. No entry: at open, `applied` and then `head` put again as read; after a step-2 `Conflict`, `head` only brought up, and `applied` put again as read by the writer's next commit, before its commit put | `journal/[a+1]`, then as rows 2-4; no entry, `.state` | the entry's version as read; fresh read | a redo: `journal/[a+2]` (the entry's put needs none). No entry: recovery's read of `journal/[a+1]` (the next commit's put, read again after an error, `journal/[high+1]`). A second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
+  | 7 | the open, after recovery: `.state ["schema"]` put again as read; `["loading"]` null put again as read, absent put null `absent`; then `["writer"]` | `.state` | fresh read | `journal/[head+1]` | `Unavailable`: the open is refused |
   | 8 | `init()`: `.state ["schema"]`, and `applied` and `head` at 0 | `.state` | `absent` | `journal/[1]` | `Unavailable` |
-  | 9 | the load's start: `.state ["loading"]` with the dump's digest | `.state` | `absent`, or fresh read of a null | `journal/[head+1]` | `Unavailable` |
+  | 9 | the load's start: `.state ["loading"]` with the dump's digest; a resumed load: the `loading` the open read put again as read, before its first event | `.state` | `absent`, or fresh read of a null; resumed, the open's read | `journal/[head+1]`; resumed, the open's check, after its read | `Unavailable`; resumed, with another digest or none, the record closes |
   | 10 | the load's events | rows 1-6 | | | |
   | 11 | the load's end: `loading` put to null, never deleted | `.state` | own put (row 9), or fresh read | `journal/[head+1]` after a fresh read | `Unavailable`: `loading` stays, and the next open goes on with the same dump |
   | 12 | `ack`: a cursor, the larger of read and own; a new one's `*` chunk first | `.rec` `cursors`; `.idx` `[cursors, "*", n]` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
@@ -879,7 +904,11 @@ such case.
   of the dump (sha256 of its canonical encoding). A load stopped part-way
   and opened again refuses every other operation. It goes on from
   `head() + 1` only when given a dump of the same digest, and any other
-  dump is refused. The load's end clears `loading` by a versioned put of
+  dump is refused. Before its first event it puts `loading` again, as the
+  open read it, and goes on once that put is answered ("Only past an
+  answer"); a `loading` that changed meanwhile, to another digest or to
+  none, stops it, and the record closes. The load's end clears `loading`
+  by a versioned put of
   null, never a delete, so a late `absent` put of the load's start meets
   `Conflict` and cannot bring it back (henge-2, round 4).
 - **`check()`** on Henge also reports a journal hole (a seq absent below
@@ -900,7 +929,8 @@ such case.
   refuses at once (a mirror's start, a worker dropped for silence) is not
   hit as fast as the loop turns. A refusal for good (`TooLarge`, `Invalid`,
   `Forbidden`) gives up at once, as the timeout would. The store also
-  answers a role past its rate with `Forbidden`, which passes; the single
+  answers a role past its rate with `Forbidden`, a refusal that passes once
+  the rate allows; the single
   store writes its policy with roles only, so the record never meets one.
 - **`durable`** reads the store's report, `durability(space)`: it is
   `power_safe and ordered`. That is, the `sync` barrier is power-safe
@@ -1424,8 +1454,11 @@ Each item is a test marked `templet:3159`, run over every backend in
   put once (the leader applied it and answered `Unavailable`), the writer
   puts again, answered, the value it read back from the leader before it
   goes on: the commit put's entry, the entry a redo starts from, a chunk
-  whose retry has nothing left to put, and the `applied` an open's recovery
-  reads with no entry past it. With the store's default scan
+  whose retry has nothing left to put, the `applied` and `head` an open's
+  recovery reads with no entry past it, the `applied` a recovery reads
+  after a step-2 `Conflict` (put by the next commit), the `schema` an open
+  reads, a `loading` an open reads null or absent, and the `loading` a
+  resumed load reads. With the store's default scan
   pause and no worker lost, the second copy alone gives `events()` with no
   gap and a clean `check()`; with the leader then lost for good, the record
   on the second copy has no hole below `head`, and goes on
@@ -2187,11 +2220,16 @@ client alone is the dependency (above).
   past a value only once the store has answered a put of it to this
   writer, so the commit put's entry read back after a `Conflict`, a retry
   or a redo whose fresh read leaves nothing to put, the entry a redo
-  starts from, and the `applied` an open's recovery reads with no entry
-  past it are each put again with the version read, answered, before it
-  goes on: a new bullet, and the step-2 `Conflict`, the request-id note,
-  recovery's no entry and one entry, rows 1, 5 and 6, the Boundaries'
-  prefix and `durable`'s prefix argument (this PR)
+  starts from, the `applied` and `head` an open's recovery reads with no
+  entry past it, the `applied` a recovery reads after a step-2 `Conflict`
+  (put by the writer's next commit, before its commit put), the `schema` an
+  open reads, a `loading` an open reads null or absent (an absent one put
+  null, `absent`), and the `loading` a resumed load reads are each put again
+  with the version read, answered, before it goes on: a new bullet with a
+  table of every value the writer reads and goes on past, and the step-2
+  `Conflict`, the request-id note, recovery's no entry and one entry, rows
+  1, 5, 6, 7 and 9, the resumable load, the layout's null `loading`, the
+  Boundaries' prefix and `durable`'s prefix argument (this PR)
 - 2026-11-04 proposed: a call the store refuses at once is tried again
   after a pause, 10 ms doubling up to 2 s, and a refusal for good
   (`TooLarge`, `Invalid`, `Forbidden`) gives up at once, under "The

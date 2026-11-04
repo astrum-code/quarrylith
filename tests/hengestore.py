@@ -14,10 +14,16 @@
   through msgpack as the real store's do (tuples come back as lists). It
   logs every call in order, and can hold back any one put and release it
   later, or answer it `Unavailable` and land it later (a late request).
+- `in_process_mirror(**attributes)`: a mirror run in the test's own process
+  (`Single(folder, mirror=True)`), so a test can make one worker fail with
+  `worker_hook`; `Copy`, a client whose reads one worker's copy answers
+  alone, as the router may hand a read to either copy.
 """
 
 import atexit
+import contextlib
 import itertools
+import json
 import os
 import shutil
 import signal
@@ -147,6 +153,76 @@ def stop_all():
 
 
 atexit.register(stop_all)
+
+
+# -- a mirror in this process -------------------------------------------------
+
+
+@contextlib.contextmanager
+def in_process_mirror(**attributes):
+    """A mirror (`Single(folder, mirror=True)`) in a short folder under /tmp,
+    started in this process with test settings as its attributes
+    (`worker_hook`, `worker_settings`, `restart_s`), stopped after. Skips
+    when no store can run here."""
+    why = missing()
+    if why:
+        pytest.skip(why)
+    from henge.store.serve.single import Single
+
+    root = Path(tempfile.mkdtemp(prefix="qm", dir="/tmp")).resolve()
+    made = Single(root / "m", mirror=True)
+    for name, value in attributes.items():
+        setattr(made, name, value)
+    try:
+        made.start()
+        yield made
+    finally:
+        made.stop()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def mirror_state(made):
+    """`mirror.state` as it is on disk."""
+    return json.loads((Path(made.folder) / "mirror.state").read_text())
+
+
+def held_by(made, worker, space, key):
+    """A blob in `worker`'s copy alone (None if it lacks it), read on that
+    worker's loop: the other copy is not asked."""
+
+    def read():
+        return made.workers[worker].partition(0).get(space, list(key))
+
+    return made.call_on(worker, read)
+
+
+class Copy:
+    """A client whose reads of a space one worker's copy answers alone, as
+    the router may hand a read to either copy of a mirror in `both`: `reads`
+    is {space: worker}, the key None for every other space, read at each
+    call (a test may change it). Every other call goes to `inner`."""
+
+    def __init__(self, inner, made, reads):
+        self.inner, self.made, self.reads = inner, made, reads
+        self.endpoint = getattr(inner, "endpoint", None)
+
+    def _worker(self, space):
+        return self.reads.get(space, self.reads.get(None))
+
+    def get(self, space, key):
+        worker = self._worker(space)
+        if worker is None:
+            return self.inner.get(space, key)
+        return held_by(self.made, worker, space, key)
+
+    def get_many(self, space, keys):
+        worker = self._worker(space)
+        if worker is None:
+            return self.inner.get_many(space, keys)
+        return [held_by(self.made, worker, space, k) for k in keys]
+
+    def __getattr__(self, op):
+        return getattr(self.inner, op)
 
 
 class Refusal(AssertionError):

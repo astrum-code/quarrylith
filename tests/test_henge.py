@@ -21,7 +21,17 @@ from pathlib import Path
 
 import pytest
 from backends import PARTS, Clock, admitted
-from hengestore import FakeStore, Guarded, Refusal, fresh_name, store
+from hengestore import (
+    Copy,
+    FakeStore,
+    Guarded,
+    Refusal,
+    fresh_name,
+    held_by,
+    in_process_mirror,
+    mirror_state,
+    store,
+)
 
 from quarrylith.record import henge, schema
 from quarrylith.record.contract import Refused, Unavailable, Unknown, open_record
@@ -656,8 +666,9 @@ def test_a_crash_after_each_put_of_a_split_is_recovered(single, raw, small_chunk
 
 def test_errors_at_the_commit_point_are_resolved_or_unknown():
     """templet:3159 -- Henge: a Conflict at the commit point that is the
-    writer's own retried put (its entry read back with tuples as lists) goes
-    on as committed; an error at the commit point re-sends the same put and
+    writer's own retried put (its entry read back with tuples as lists) puts
+    the entry again with the version read, and goes on as committed once that
+    put is answered; an error at the commit point re-sends the same put and
     returns the operation's result; a store unreachable past the timeout
     raises Unknown, and the next open finishes an entry that landed."""
     entry = {"event": {"puts": [("items", (1,), {"labels": ("a:b",)})]}, "priors": ()}
@@ -678,8 +689,10 @@ def test_errors_at_the_commit_point_are_resolved_or_unknown():
     assert rec.get("items", n)["title"] == "landed"
     seq = rec.head()
     sent = [c for c in fake.log if c[1] == "put" and c[2] == J and c[3] == [seq]]
-    assert len(sent) == 2
+    # read back, not answered: put again with the version read, and answered
+    assert len(sent) == 3
     assert isinstance(sent[1][4], errors.Conflict)
+    assert not isinstance(sent[2][4], Exception)
     # not landed, twice: re-sent until it lands, and the result returned
     fake.fault(commit, errors.Unavailable("no answer"), times=2)
     m = item(rec, "re-sent")
@@ -810,6 +823,275 @@ def test_a_put_the_store_keeps_refusing_gives_up_at_the_timeout(path):
     assert took >= timeout_s, took
     if want is Unknown:
         assert rec._closed is not None
+
+
+def _counted(fake, op, space_name, key=None, *, exc, tries):
+    """Every `op` of the space (and key) refused with `exc`, each try's time
+    appended to `tries`."""
+    space = henge.spaces("rec")[space_name]
+
+    def match(who, o, sp, k, value):
+        hit = o == op and sp == space and (key is None or k == key)
+        if hit:
+            tries.append(time.monotonic())
+        return hit
+
+    fake.fault(match, exc, times=10**9)
+
+
+@pytest.mark.parametrize("path", ["read", "put", "commit put", "sync"])
+def test_a_store_that_refuses_at_once_is_tried_again_after_a_pause(path, monkeypatch):
+    """templet:3159 -- Henge: a call the store refuses at once is tried again
+    after a pause, each pause the double of the one before, up to `TRY_MS`,
+    until the record's timeout: a read retried, a put, the commit put and the
+    sync. The store is not hit as fast as the loop turns."""
+    monkeypatch.setattr(henge, "TRY_MS", 200)
+    fake = FakeStore()
+    rec = fake_record(fake, "w")
+    rec.init()
+    admitted(rec)
+    item(rec, "first")
+    timeout_s = rec.timeout_s = 1.0
+    tries = []
+    refused = errors.Unavailable("refused at once")
+    start = lambda: item(rec, "second")  # noqa: E731
+    if path == "read":
+        rec.close()
+        _counted(fake, "get", "state", ["writer"], exc=refused, tries=tries)
+        start = lambda: fake_record(fake, "w2", timeout_s=timeout_s)  # noqa: E731
+    elif path == "put":
+        _counted(fake, "put", "rec", exc=refused, tries=tries)
+    elif path == "commit put":
+        _counted(fake, "put", "journal", exc=refused, tries=tries)
+    else:
+        _counted(fake, "sync", "journal", exc=refused, tries=tries)
+    got, took = _within(fake, start, timeout_s)
+    assert isinstance(got, Unavailable), got
+    assert took >= timeout_s, took
+    # the last pause is cut short by the deadline
+    gaps = [b - a for a, b in zip(tries, tries[1:])][:-1]
+    assert 5 <= len(tries) <= 20, (len(tries), gaps)
+    assert gaps[0] < 0.1 and max(gaps) >= 0.15, gaps
+    assert max(gaps) <= 0.2 + 0.25, gaps
+
+
+@pytest.mark.parametrize(
+    "path,exc,want",
+    [
+        ("record put", errors.TooLarge, Unknown),
+        ("commit put", errors.Invalid, Unknown),
+        ("ack", errors.Forbidden, Unavailable),
+        ("read", errors.Forbidden, Unavailable),
+    ],
+)
+def test_a_refusal_for_good_gives_up_at_once(path, exc, want):
+    """templet:3159 -- Henge: a refusal the store gives for good (TooLarge,
+    Invalid, Forbidden) is not tried again: the operation gives up at once,
+    as it would at the timeout (past the commit point Unknown, the record
+    closed; before it Unavailable)."""
+    fake = FakeStore()
+    rec = fake_record(fake, "w")
+    rec.init()
+    admitted(rec)
+    item(rec, "first")
+    timeout_s = rec.timeout_s = 5.0
+    tries = []
+    refused = exc("refused for good")
+    start = lambda: item(rec, "second")  # noqa: E731
+    if path == "record put":
+        _counted(fake, "put", "rec", exc=refused, tries=tries)
+    elif path == "commit put":
+        _counted(fake, "put", "journal", exc=refused, tries=tries)
+    elif path == "ack":
+        _counted(fake, "put", "rec", ["cursors", "c"], exc=refused, tries=tries)
+        start = lambda: rec.ack("c", 1)  # noqa: E731
+    else:
+        rec.close()
+        _counted(fake, "get", "state", ["writer"], exc=refused, tries=tries)
+        start = lambda: fake_record(fake, "w2", timeout_s=timeout_s)  # noqa: E731
+    got, took = _within(fake, start, timeout_s)
+    assert type(got) is want, got
+    assert len(tries) == 1, tries
+    assert took < timeout_s / 2, took
+    if want is Unknown:
+        assert rec._closed is not None
+
+
+# -- the mirror: a put one copy did not take ----------------------------------------
+
+
+class OneCopyMisses:
+    """A mirror's faults: once `arm(space)` is called, w1 refuses the
+    replicate of the next put to that space, so the leader, w0, has applied
+    the put and answers it `Unavailable` ("written here, held by 1 of the 2
+    copies"); `lose(made)` loses w0 for good (its thread raises, and every
+    restart of it fails, as with a faulted volume)."""
+
+    def __init__(self):
+        self.space = None
+        self.refused = 0
+        self._lose = threading.Event()
+        self._lost = threading.Event()
+
+    def arm(self, space):
+        self.space = space.encode()
+
+    def hook(self, made):
+        from henge.core import envelope
+
+        if made.config.name == "w0":
+            if self._lost.is_set():
+                raise RuntimeError("w0: its start made to fail")
+            real_round = made.housekeeping
+            lose = self._lose
+
+            def housekeeping():
+                if lose.is_set():
+                    lose.clear()
+                    raise RuntimeError("w0: made to raise")
+                real_round()
+
+            made.housekeeping = housekeeping
+            return
+        real = made.answer
+
+        async def answer(data, budget=None, by=None):
+            asked = envelope.decode(data)
+            records = (asked.get("args") or {}).get("records") or []
+            space = self.space
+            if (
+                space is not None
+                and asked.get("op") == "replicate"
+                and any(space in bytes(r[0]["k"]) for r in records)
+            ):
+                self.space = None
+                self.refused += 1
+                return envelope.encode(
+                    envelope.failed(
+                        asked.get("id"), errors.Unavailable.code, "made to fail"
+                    )
+                )
+            return await real(data, budget, by)
+
+        made.answer = answer
+
+    def lose(self, made):
+        self._lost.set()
+        self._lose.set()
+        end = time.monotonic() + 30
+        while mirror_state(made).get("worker") != "w1":
+            assert time.monotonic() < end, mirror_state(made)
+            time.sleep(0.05)
+
+
+def _steered(monkeypatch, made):
+    """Every record opened from here reads through `Copy`: the map returned
+    says which worker's copy answers a space's reads alone."""
+    reads = {}
+    inner = henge._connect
+    monkeypatch.setattr(henge, "_connect", lambda a, t: Copy(inner(a, t), made, reads))
+    return reads
+
+
+def _whole_on(url, reads, worker):
+    """The record as `worker`'s copy alone holds it: events() from 0 has no
+    gap up to head, and check() is clean."""
+    reads.clear()
+    reads[None] = worker
+    reader = opened(url)
+    try:
+        seqs = [e.seq for e in reader.events(0)]
+        assert seqs == list(range(1, reader.head() + 1)), seqs
+        assert reader.check() == []
+    finally:
+        reader.close()
+        reads.clear()
+
+
+@pytest.mark.parametrize("path", ["commit read-back", "redo's entry", "skipped chunk"])
+def test_on_a_mirror_the_writer_goes_on_only_past_puts_answered_to_it(
+    path, monkeypatch
+):
+    """templet:3159 -- Henge, the mirror: w1 refuses the replicate of one put
+    once, so the leader w0 applied it and answered it Unavailable. The writer
+    reads the value back from w0 -- the commit put's own entry, the entry a
+    redo starts from, or a chunk whose retry has nothing left to put -- and
+    puts it again with the version read, answered, before it goes on. With
+    the store's default scan pause and no worker lost, w1's copy alone then
+    gives events() with no gap and a clean check()."""
+    misses = OneCopyMisses()
+    with in_process_mirror(worker_hook=misses.hook) as made:
+        reads = _steered(monkeypatch, made)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, timeout_s=1.0)
+        rec.init()
+        admitted(rec)
+        item(rec, "first")
+        seq = rec.head() + 1
+        if path == "commit read-back":
+            reads[s["journal"]] = "w0"
+            misses.arm(s["journal"])
+            item(rec, "second")
+        elif path == "redo's entry":
+            # the read-back answered by w1, which lacks it: the operation
+            # is Unknown; the next open reads the entry from w0 and redoes it
+            reads[s["journal"]] = "w1"
+            misses.arm(s["journal"])
+            with pytest.raises(Unknown):
+                item(rec, "second")
+            reads[s["journal"]] = "w0"
+            rec = opened(url, timeout_s=1.0)
+        else:
+            reads[s["idx"]] = "w0"
+            misses.arm(s["idx"])
+            item(rec, "second")
+        assert misses.refused == 1
+        assert rec.head() == seq
+        rec.close()
+        # read before any later put of the same object ships it to w1 whole
+        assert held_by(made, "w1", s["journal"], [seq]) is not None
+        _whole_on(url, reads, "w1")
+
+
+def test_on_a_mirror_a_commit_read_back_survives_the_leader_lost(monkeypatch):
+    """templet:3159 -- Henge, the mirror: the commit put answered Unavailable
+    (w1 refused its replicate) and read back from the leader, w0, is put
+    again with the version read before the operation returns; w0 then lost
+    for good, the record on w1 alone has no hole below head, and goes on."""
+    misses = OneCopyMisses()
+    with in_process_mirror(
+        worker_hook=misses.hook,
+        restart_s=0.3,
+        # the scan never makes w1 whole within the test
+        worker_settings={"scan_pause_ms": 600_000},
+    ) as made:
+        reads = _steered(monkeypatch, made)
+        name = fresh_name("m")
+        s = henge.spaces(name)
+        url = f"henge:{made.folder}#{name}"
+        rec = opened(url, timeout_s=10.0)
+        rec.init()
+        admitted(rec)
+        item(rec, "first")
+        reads[s["journal"]] = "w0"
+        misses.arm(s["journal"])
+        n = item(rec, "second")
+        assert misses.refused == 1
+        rec.close()
+        reads.clear()
+        misses.lose(made)
+        again = opened(url, timeout_s=10.0)
+        try:
+            assert again.check() == []
+            seqs = [e.seq for e in again.events(0)]
+            assert seqs == list(range(1, again.head() + 1)), seqs
+            assert again.get("items", n)["title"] == "second"
+            item(again, "third")
+            assert again.check() == []
+        finally:
+            again.close()
 
 
 # -- the resumable load ------------------------------------------------------------
@@ -1173,11 +1455,16 @@ class Writers:
         dump = reader.dump()
         reader.close()
         # a writer that ended in Unknown or Unavailable put nothing after its
-        # last read that found a journal entry it had not put
+        # last read that found a journal entry it had not put (a put the
+        # store refused is not one it put)
         J = self.s["journal"]
         for who, error in self.ended:
             mine = [c for c in self.fake.log if c[0] == who]
-            put_seqs = {tuple(c[3]) for c in mine if c[1] == "put" and c[2] == J}
+            put_seqs = {
+                tuple(c[3])
+                for c in mine
+                if c[1] == "put" and c[2] == J and not isinstance(c[4], Exception)
+            }
             found = [
                 i
                 for i, c in enumerate(mine)

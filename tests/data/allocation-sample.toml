@@ -1,0 +1,101 @@
+# The allocation document of one host: its capacity, the consumers that stand
+# on it and the run classes that slice it. Widgets is a neutral repo name.
+format = 1
+node = "laptop"
+drivers = ["harness", "podman", "process", "vm"]
+disk_path = "."              # the filesystem the work lives on (the caller's path)
+
+[capacity]
+memory = "measure"           # the host's physical memory, read at declare
+disk = "measure"             # free now + what disk consumers occupy now - floor.disk
+"slots.claude-code" = 4
+"slots.codex" = 3
+"slots.local" = 0            # the local model is not declared yet
+"slots.gate" = 2
+"budget.anthropic" = 4       # this node's share of the account
+"budget.openai" = 3
+lab = 2                      # VMs that are not the smoke's
+"lab.smoke" = 1              # the smoke never waits behind a long run
+"podman.memory" = "14GiB"    # the container machine's allotment less its own system
+
+[harness.claude-code]
+slots = "slots.claude-code"
+budget = "budget.anthropic"
+[harness.codex]
+slots = "slots.codex"
+budget = "budget.openai"
+[harness.local]
+slots = "slots.local"        # no provider budget
+
+[budget]
+weight = { small = 1, standard = 1, deep = 1 }
+warning_max = 2              # weight live on a provider at a warning
+stop_at = 0.95
+max_age_s = 900              # an older reading guards nothing
+
+[floor]
+memory = "4GiB"              # measured available memory kept free
+disk = "20GiB"
+max_age_s = 180              # a host reading older than this: unmeasured
+
+[drift]
+tolerance = 0.10             # measured past declared by more than this: reported
+
+[[consumer]]
+name = "desktop"
+memory = "10GiB"
+why = "the operating system and the user's own applications"
+
+[[consumer]]
+name = "podman-machine"
+memory = "15.4GiB"
+disk = "40GiB"
+path = "machine/disk.img"
+probe = { process = "machine-hypervisor" }
+why = "the container machine: 15.4 GiB, 8 CPUs, a 40 GiB sparse disk"
+
+[[consumer]]
+name = "yard"
+memory = "measure"
+probe = { pidfile = "yard/supervisor.pid" }
+why = "the yard: its supervisor, its store and its services"
+
+[[lane]]
+name = "widgets"
+labels = ["repo:widgets"]    # a task carrying any of them is in the lane
+max = 4
+
+[[class]]
+name = "vm.smoke"
+match = { sandbox = ["vm"], flags = ["smoke"] }
+needs = { memory = "5GiB", disk = "10GiB", "lab.smoke" = 1 }
+
+[[class]]
+name = "vm"
+match = { sandbox = ["vm"] }
+needs = { memory = "5GiB", disk = "10GiB", lab = 1 }
+
+[[class]]
+name = "container"
+match = { sandbox = ["podman"] }
+needs = { "podman.memory" = "4GiB", memory = "512MiB", disk = "2GiB" }
+
+[[class]]
+name = "local"
+match = { kind = ["agent", "review"], labels = ["harness:local"] }
+needs = { memory = "2GiB", disk = "4GiB", harness = 1 }
+
+[[class]]
+name = "agent"
+match = { kind = ["agent", "review"] }
+needs = { memory = "2GiB", disk = "4GiB", harness = 1 }
+
+[[class]]
+name = "gate"
+match = { kind = ["gate"] }
+needs = { memory = "3GiB", disk = "4GiB", "slots.gate" = 1 }
+
+[[class]]
+name = "job"
+match = {}
+needs = { memory = "512MiB", disk = "512MiB" }

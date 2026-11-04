@@ -59,6 +59,9 @@ CHUNK_KEYS = 8192
 CHUNK_BYTES = 512 * 1024
 PIECE_KEYS = 4096
 PIECE_BYTES = 256 * 1024
+#: A subject's journal chunk is `seq // JOURNAL_CHUNK`: on-disk layout, apart
+#: from the bound a record's chunk splits at.
+JOURNAL_CHUNK = 8192
 #: The most keys one `get_many` takes (henge's `MANY`).
 MANY = 1000
 #: How long the record waits for the store before it gives an operation up:
@@ -192,9 +195,18 @@ def over(keys):
     max_keys, max_bytes = CHUNK_KEYS, CHUNK_BYTES
     if len(keys) > max_keys:
         return True
-    # a short chunk cannot pass the bytes: a key is at most a few parts of
-    # 256 bytes each
-    return len(keys) * 1100 > max_bytes and schema.size(keys) > max_bytes
+    # a short chunk cannot pass the bytes: measured only once its keys could
+    if not keys or len(keys) * (_key_size_max(keys[0]) + 1) + 2 <= max_bytes:
+        return False
+    return schema.size(keys) > max_bytes
+
+
+def _key_size_max(key):
+    """The most `schema.size` can give a key of `key`'s shape: an `int` part
+    20 characters, a `str` part its `key_bytes`, each a control character
+    escaped as six, in its quotes; the commas and brackets."""
+    text = 2 + 6 * schema.LIMITS["key_bytes"]
+    return 1 + len(key) + sum(20 if schema.is_int(p) else text for p in key)
 
 
 def pieces(keys):
@@ -483,11 +495,16 @@ class HengeRecord(Record):
         row = self._kept.get((space, _ckey(key)))
         if row is None or (fresh and not row[3]):
             row = self._again(space, key, deadline, why)
+        retry = False
         while True:
             new = fn(row[0])
-            if new is SKIP:
-                return
             try:
+                if new is SKIP:
+                    if retry:
+                        # a retry's fresh read left nothing to put: still
+                        # row 5's check, so a passed writer stops here
+                        self._check_journal()
+                    return
                 if not row[3] and row[2] >= self._epoch:
                     # read after the last check: check now, then put
                     self._check_journal()
@@ -495,8 +512,11 @@ class HengeRecord(Record):
                 version = self._call("put", space, key, new, expect=expect)
             except _Found as e:
                 self._fail(why, f"{e}: another writer is live", e)
-            except (_Conflict, _StoreDown):
+            except (_Conflict, _StoreDown) as e:
+                if time.monotonic() >= deadline:
+                    self._fail(why, f"the store did not take the put: {e}", e)
                 row = self._again(space, key, deadline, why)
+                retry = True
                 continue
             self._keep(space, key, new, version, True)
             return
@@ -557,7 +577,7 @@ class HengeRecord(Record):
         if ix[0] == "journal":
             by = collections.defaultdict(dict)
             for c, (seq, inside) in edits.items():
-                by[seq // CHUNK_KEYS][c] = (seq, inside)
+                by[seq // JOURNAL_CHUNK][c] = (seq, inside)
             out = []
             for n, e in sorted(by.items()):
                 key = ix_key(ix, n)
@@ -632,19 +652,18 @@ class HengeRecord(Record):
                     "put", self.J, [seq], entry, expect={"absent": True}
                 )
                 break
-            except _Conflict:
+            except _Conflict as e:
                 row = self._again(self.J, [seq], deadline, "op")
                 if row[0] is not ABSENT and same_entry(row[0], entry):
                     # this writer's own put, retried: committed
                     version = row[1]
                     break
                 if row[0] is ABSENT:
+                    if time.monotonic() >= deadline:
+                        self._fail("op", f"the commit put was not taken: {e}", e)
                     continue
                 # another writer took this seq: recover, and it did not happen
-                try:
-                    self._recover()
-                except Unavailable:
-                    raise
+                self._recover()
                 raise Unavailable(
                     f"the record {self.name}: seq {seq} was taken by another "
                     "writer; the operation did not happen"
@@ -866,7 +885,7 @@ class HengeRecord(Record):
                     self._store(event, priors)
                 for kind in sorted(kept):
                     for row in dump["bookkeeping"].get(kind, []):
-                        self._bookkeep(kind, schema.validate(kind, row))
+                        self._bookkeep(kind, schema.validate(kind, row), sync=False)
                 for kind, v in RECORDS.items():
                     if v.journaled and self._read(kind, {}, None, False, None) != dump[
                         "records"
@@ -955,7 +974,7 @@ class HengeRecord(Record):
                 seqs = list(range(cursor + 1, last + 1))
             else:
                 ix = ("journal", subject, None)
-                chunks = list(range(cursor // CHUNK_KEYS, top // CHUNK_KEYS + 1))
+                chunks = list(range(cursor // JOURNAL_CHUNK, top // JOURNAL_CHUNK + 1))
                 rows = self._look_many(self.I, [ix_key(ix, n) for n in chunks])
                 seqs = sorted(
                     {
@@ -981,10 +1000,13 @@ class HengeRecord(Record):
     def _changed(self):
         return self._high
 
-    def _bookkeep(self, kind, row):
+    def _bookkeep(self, kind, row, *, sync=True):
         """A cursor or a beat, no event: its `*` index first, then the record,
-        each through the guard (an own put, or a fresh read and a check). A
-        cursor takes the larger seq, a beat the later time."""
+        each through the guard (an own put, or a fresh read and a check), then
+        one sync, as SQLite's commit is, so a cursor never steps back across a
+        power cut. A cursor takes the larger seq, a beat the later time. A
+        load's rows need no sync of their own: an unsynced one is lost only
+        with the load's end, and the next open goes on with the same dump."""
         key = schema.key_of(kind, row)
         rkey = [kind, *key]
         cur = self._kept.get((self.R, _ckey(rkey)))
@@ -1006,6 +1028,8 @@ class HengeRecord(Record):
             return dict(row)
 
         self._put(self.R, rkey, merge, why="bookkeep", fresh=True)
+        if sync:
+            self._sync("bookkeep")
 
     @contextlib.contextmanager
     def _snapshot(self):
@@ -1102,7 +1126,7 @@ class HengeRecord(Record):
                             )
             for subject, want in sorted(subjects.items()):
                 ix = ("journal", subject, None)
-                chunks = range(0, top // CHUNK_KEYS + 1)
+                chunks = range(0, top // JOURNAL_CHUNK + 1)
                 rows = self._fetch_many(self.I, [ix_key(ix, n) for n in chunks])
                 have = sorted(s for row in rows if row[0] is not ABSENT for s in row[0])
                 if have != want:

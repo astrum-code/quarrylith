@@ -572,7 +572,7 @@ def small_chunks(monkeypatch):
     """Chunks of 8 keys, split into pieces of 4: a split in a few events."""
     monkeypatch.setattr(henge, "CHUNK_KEYS", 8)
     monkeypatch.setattr(henge, "PIECE_KEYS", 4)
-    monkeypatch.setattr(henge, "JOURNAL_CHUNK", 8, raising=False)
+    monkeypatch.setattr(henge, "JOURNAL_CHUNK", 8)
 
 
 def efforts(rec, ids):

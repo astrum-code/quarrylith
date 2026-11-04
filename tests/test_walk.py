@@ -582,6 +582,30 @@ def test_the_cut_comes_before_the_hold(backend, record, clock):
 
 
 @over_backends
+def test_the_checks_come_in_order_role_limit_hold(backend, record, clock):
+    """templet:3163 -- a candidate that fails several checks says the first
+    of: its role is busy, its repo is at the limit, a hold is ahead."""
+    admitted(record)
+    changes(record, "widgets", 1)
+    running(record, "widgets", "alpha")
+    held = item(record, "held", role="r0")
+    tick(clock)
+    busy = item(record, "busy role", role="alpha", labels=["repo:widgets"])
+    tick(clock)
+    full = item(record, "full repo", role="r1", labels=["repo:widgets"])
+    record.edit_effort("0001", order={"rule": "listed", "items": [held, busy, full]})
+    settings = Settings(landing_limit=2)
+    sequence = sequence_at(record, settings)
+    walk = Walk(sequence, settings=settings, waiting={("item", held): NOON - HOUR})
+    one, two, three = sequence.candidates
+
+    assert walk.check(one, {"memory": 1}) is None
+    walk.refused(one, refusal("memory"))
+    assert walk.check(two, {"memory": 1}) == "role alpha: 1 of 1 busy"
+    assert walk.check(three, {"memory": 1}) == "repo widgets: 2 unmerged of 2"
+
+
+@over_backends
 def test_the_walk_refuses_settings_with_problems(backend, record, clock):
     """templet:3163 -- `Walk` refuses a `Settings` that has problems."""
     listed(record, clock, 1)

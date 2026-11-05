@@ -360,8 +360,6 @@ def test_measured_skips_what_it_cannot_read(record, clock):
     host(record)
     host(record, name="gone")
     record.retire_node("gone")
-    measure(record, clock, node="gone")
-    measure(record, clock, node="nowhere")
     record.record_reading("host", "measure", {"memory_available": 5})
     record.record_reading("host", "measure", ["not", "a", "dict"])
     measure(
@@ -375,6 +373,10 @@ def test_measured_skips_what_it_cannot_read(record, clock):
             "worse": {"memory": [1]},
         },
     )
+    # the newest readings are the ones to skip
+    measure(record, clock, node="gone")
+    measure(record, clock, node="nowhere")
+    record.record_reading("host", "measure", {"memory_available": 5})
     assert measured(record, clock()) == {
         series(node="n1", resource="memory", holder="podman"): 1900,
     }

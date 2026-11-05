@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from backends import PARTS, admitted, over_backends, scheme
+from backends import PARTS, admitted, one_writer, over_backends
 
 from quarrylith import cli
 from quarrylith.order.sequence import RULES, effort_order, order, place
@@ -100,13 +100,6 @@ def tick(clock):
 
 def keys(sequence):
     return [c.key for c in sequence.candidates]
-
-
-def one_writer(backend, record):
-    """A Henge record has one writer, so there another handle takes its turn:
-    the test's record is closed before it opens (SQLite holds both)."""
-    if scheme(backend) != "sqlite":
-        record.close()
 
 
 def sequence_of(rec, clock, **kw):

@@ -50,6 +50,13 @@ def scheme(backend):
     return backend.split("-", 1)[0]
 
 
+def one_writer(backend, record):
+    """A Henge record has one writer, so there another handle takes its turn:
+    the test's record is closed before it opens (SQLite holds both)."""
+    if scheme(backend) != "sqlite":
+        record.close()
+
+
 def url_for(backend, folder):
     make = URLS.get(backend)
     if make is None:

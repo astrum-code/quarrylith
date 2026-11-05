@@ -2093,6 +2093,81 @@ def test_a_load_stopped_part_way_goes_on_with_the_same_dump(single, tmp_path):
     rec.close()
 
 
+def _dump_of_two(single):
+    source = opened(single.url())
+    source.init()
+    admitted(source)
+    n = item(source, "i0")
+    source.comment(n, "c0")
+    source.ack("follower", 1)
+    dump = source.dump()
+    source.close()
+    return dump
+
+
+def test_a_load_that_returned_is_synced_after_loading_is_put_to_null(single):
+    """templet:3159 -- Henge, row 11: a load's end puts `loading` to null and
+    then syncs once, so a load that returned survives a power cut as a load
+    that ended, with the bookkeeping rows it put without a sync of their own."""
+    dump = _dump_of_two(single)
+    rec = opened(single.url(), actor="loader", via="load")
+    rec.init()
+    rec.store = spy = Recording(rec.store)
+    rec._forget()
+    rec.load(dump)
+    state = henge.spaces(rec.name)["state"]
+    ends = [i for i, c in enumerate(spy.calls) if c == ("put", state, ["loading"])]
+    syncs = [i for i, c in enumerate(spy.calls) if c[0] == "sync"]
+    assert ends and syncs
+    assert syncs[-1] > ends[-1], spy.calls
+    assert spy.calls[-1][0] == "sync", spy.calls
+    assert spy.overlapped == 0
+    rec.close()
+
+
+def test_a_load_whose_closing_sync_fails_is_unavailable_and_goes_on(single):
+    """templet:3159 -- Henge, row 11: a sync at the load's end that is not
+    answered gives `Unavailable`, open, and the handle still reads the load as
+    in progress; the next open reads the record the load put."""
+    dump = _dump_of_two(single)
+    url = single.url()
+    rec = opened(url, actor="loader", via="load", timeout_s=0.5)
+    rec.init()
+
+    class NoSyncAtTheEnd:
+        def __init__(self, inner):
+            self.inner, self.armed = inner, False
+            self.endpoint = getattr(inner, "endpoint", None)
+
+        def put(self, space, key, value, *, expect=None):
+            out = self.inner.put(space, key, value, expect=expect)
+            if list(key) == ["loading"] and value is None:
+                self.armed = True
+            return out
+
+        def sync(self, space):
+            if self.armed:
+                raise errors.Unavailable("down")
+            return self.inner.sync(space)
+
+        def __getattr__(self, op):
+            return getattr(self.inner, op)
+
+    rec.store = NoSyncAtTheEnd(rec.store)
+    with pytest.raises(Unavailable):
+        rec.load(dump)
+    assert rec._loading is not None
+    assert rec._closed is None
+    rec.close()
+    again = opened(url, actor="loader", via="load")
+    try:
+        assert again._loading is None
+        assert again.dump() == dump
+        assert again.check() == []
+    finally:
+        again.close()
+
+
 # -- chunks -------------------------------------------------------------------------
 
 

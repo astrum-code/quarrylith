@@ -596,11 +596,19 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   (`MirrorPlacement.write_ack`, and henge-store-serve's
   `test_a_request_s_own_write_ack_is_not_honoured_on_a_mirror`): a put is
   answered OK only once both copies hold it.
-- **One store, proven; a mirror, not yet.** The record is built and tested
-  for one store, and the services run it on one. On a mirror it is not
-  proven, and nothing in the queue uses it there until the mirror's
-  follow-up lands. `durable` reports the store's barrier and order, true on
-  a mirror too, and does not say otherwise.
+- **One store, tested; a mirror, not proven.** The record is built for one
+  store, and the services run it on one. On one store the suite runs the
+  whole contract and a writer's crash at each put, as an exception in the
+  writer's own process; it kills no process, restarts no store under the
+  record and cuts no power. Those were run once, by one reviewer (henge-2,
+  round 5 of step 6), on a real `henge single` and not by the suite: 380
+  power cuts under operations and mid-load, and 160 `kill -9`s of a writer,
+  a loader or the store, with no answered operation lost. The same review's
+  cut at the moment a load returned found the gap that a load's closing
+  sync (row 11) now closes. On a mirror the record is not proven, and
+  nothing in the queue uses it there until the mirror's follow-up lands.
+  `durable` reports the store's barrier and order, true on a mirror too, and
+  does not say otherwise.
   - **What is fixed.** Review found, one round after another, values the
     writer went on past while they sat on the leader's copy alone. Each one
     found is now put again before the writer goes on, and is in the table
@@ -611,17 +619,43 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
     that is the point.
   - **Why that is not proof.** The findings came one round at a time, and
     the last ones were in values the table's first form called safe. The
-    suite steers its reads; only two reviewers' probes have let the router
-    choose the copy.
-  - **What the follow-up holds.** Tests in the suite with the router choosing
-    the copy. An open's first `sync` after a leader is lost, tried once and
-    refused while the router still names that worker. The time a value on
-    the leader alone costs: about 60 s of refused opens at the store's
-    default scan pause. What the store is asked for, so a settle takes one
-    put (a re-send of a reply that asks for a retry, a caller's own request
-    id, a read the leader answers, a code of its own for a rate refusal).
-    Any later finding that only breaks on a mirror goes there too, and not
-    into this step (user, 2026-11-04).
+    suite's fault tests steer their reads, and its whole contract also runs
+    on a mirror with the router choosing, with no fault; only one
+    reviewer's probes (henge-2's) have run a fault with the router choosing
+    the copy.
+  - **What the follow-up holds**, all of it: no issue holds it yet, so this
+    page is where it is kept.
+    - **On a mirror.** Tests in the suite with the router choosing the copy.
+      A power cut and a `kill -9` under the record on a mirror: nothing has
+      run them. The time a value on the leader alone costs: about 60 s of
+      refused opens at the store's default scan pause. What the store is
+      asked for, so a settle takes one put (a re-send of a reply that asks
+      for a retry, a caller's own request id, a read the leader answers, a
+      code of its own for a rate refusal). A record a resumed load refused
+      stays stuck, loudly, until a hand repair; and on a mirror a resumed
+      load can refuse a record that is the dump's, when its journal read
+      lacks an entry the writer put. An open that reads `schema` from the
+      copy lacking it says there is no record. An open can be refused with
+      no other writer, when recovery's read misses an orphan and the
+      guard's check finds it (one retry). After a step-2 `Conflict`, `head`
+      on the second copy can lead `applied` until the next commit, and
+      `check()` then reports them unequal. A mirror `alone` reads `durable`,
+      with `degraded` in its report. The read may land on the same copy
+      every retry (inferred, not traced). A mirror opens silently, with
+      nothing to tell the caller; the refusal for a store without `sync`
+      ends "(a single-node store or a mirror can)". Any later finding that
+      only breaks on a mirror goes there too, and not into this step (user,
+      2026-11-04).
+    - **On one store, not mirror-only.** Power cuts and `kill -9`s have no
+      home in the suite, so nothing keeps them true. They need the store's
+      `FaultyDisk`, which is in the store's tests and cannot be imported
+      here; henge-2's round 5 probes (a power cut under operations, at a
+      load's end, and `kill -9` of a writer, a loader and the store) are
+      the start, and each takes minutes, so it may belong in a pipeline
+      step.
+    - **For the services' step.** An open during a store's restart is
+      refused at once (see "The record's timeout"); whether a service's
+      start should ride out a restart is that step's to say.
 - **Only past an answer.** The writer goes on past a value only once the
   store has answered a put of it to this writer. On a mirror, a put that
   the second copy did not take in time is applied by the leader and
@@ -895,9 +929,9 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   | 6 | recovery's redo of one entry: the entry put again first, then rows 2-4, a split's redo included, and a directory with no split left put again as read before its chunks; nothing left to put, the value read put again. No entry: at open, `applied` and then `head` put again as read; after a step-2 `Conflict`, `head` only brought up, and `applied` put again as read by the writer's next commit, before its commit put | `journal/[a+1]`, then as rows 2-4; no entry, `.state` | the entry's version as read; fresh read | a redo: `journal/[a+2]` (the entry's put needs none). No entry: recovery's read of `journal/[a+1]` (the next commit's put, read again after an error, `journal/[high+1]`). A second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
   | 7 | the open, after recovery: `.state ["schema"]` put again as first read; `["loading"]` null put again as read, absent put null `absent`; then `["writer"]` | `.state` | `schema`: the open's first read (read again absent after an error, `absent`); the others, fresh read | `journal/[head+1]` | `Unavailable`: the open is refused |
   | 8 | `init()`: `.state ["schema"]`, and `applied` and `head` at 0 | `.state` | `absent` | `journal/[1]` | `Unavailable` |
-  | 9 | the load's start: `.state ["loading"]` with the dump's digest; a resumed load: the `loading` the open read put again as read, then the record's events compared with the dump's, before its first event | `.state` | the open's own put, `absent`, or fresh read of a null; resumed, the open's read | `journal/[head+1]`, before the put; resumed, the open's check, after its read | `Unavailable`, and the record closes. A start put that fails closes it too, since `loading` may be there. Resumed: another digest or none closes it; events that are not the dump's are `Refused`, and `loading` stays |
+  | 9 | the load's start: `.state ["loading"]` with the dump's digest; a resumed load: the `loading` the open read put again as read, then the record's events compared with the dump's, before its first event | `.state` | the open's own put, `absent`, or fresh read of a null; resumed, the open's read | `journal/[head+1]`, before the put; resumed, the open's check, after its read | `Unavailable`; the record closes if the check finds an entry, and a check whose read gets no answer leaves it open, since nothing was sent. A start put that fails closes it too, since `loading` may be there. Resumed: another digest or none closes it; events that are not the dump's are `Refused`, and `loading` stays |
   | 10 | the load's events | rows 1-6 | | | |
-  | 11 | the load's end: `loading` put to null, never deleted | `.state` | own put (row 9), or fresh read | `journal/[head+1]` after a fresh read | `Unavailable`: `loading` stays, and the next open goes on with the same dump |
+  | 11 | the load's end: `loading` put to null, never deleted, then one `sync` | `.state` | own put (row 9), or fresh read | `journal/[head+1]` after a fresh read | `Unavailable`. A put that fails leaves `loading` as it was, and the next open goes on with the same dump. A sync that is not answered leaves it null with the handle open and still reading the load as in progress; the record is whole, and the next open reads it so, or as a load in progress if a power cut took the null put, which the same dump finishes. The sync also covers the bookkeeping rows the load put without one |
   | 12 | `ack`: a cursor, the larger of read and own; a new one's `*` directory, as read if it has no split, and chunk first | `.rec` `cursors`; `.idx` `[cursors, "*", n]` and `"dir"` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
   | 13 | `beat`: a beat, the later `at`; a new one's `*` directory, as read if it has no split, and chunk first | `.rec` `beats`; `.idx` `[beats, "*", n]` and `"dir"` | own put, or fresh read | `journal/[head+1]` after a fresh read | `Unavailable` |
 
@@ -959,14 +993,21 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
 - **`backup(dir)`** writes the record's `dump()` as one JSON file, `0600`
   from its creation, in `dir` (`0700`).
 - **The record's timeout**, `timeout_s` (30 s; tests shorten it), is how
-  long the record waits for the store at one put, read or sync before it
-  gives an operation up: past the commit point that is `Unknown`, before it
+  long the record waits for the store at one put or sync, or at the read
+  inside a retry of one of them, before it gives an operation up: past the commit point that is `Unknown`, before it
   `Unavailable`. An open or an operation with several blocked puts can take
   one timeout for each. The client tries a call every 2 s, with the same request id, for that long.
-  A call the store refuses at once is tried again after a pause, 10 ms
+  A put, the commit put or a sync that the store refuses at once, and the
+  read inside a retry of one of them, is tried again after a pause, 10 ms
   first and each the double of the one before, up to 2 s, so a store that
   refuses at once (a mirror's start, a worker dropped for silence) is not
-  hit as fast as the loop turns. A refusal for good (`TooLarge`, `Invalid`,
+  hit as fast as the loop turns. **Not retried:** an open (its reads and its
+  `sync`), an operation's reads before its commit, a new `ack`'s read, a
+  caller's read and a load's emptiness check. While a store restarts (the
+  store's `RESTART_S`, 10 s by default) each is refused at once with
+  `Unavailable`, on one store too, before anything is committed, and the
+  handle stays usable; a service that starts then is refused, not waited
+  for. A refusal for good (`TooLarge`, `Invalid`,
   `Forbidden`) gives up at once, as the timeout would. The store also
   answers a role past its rate with `Forbidden`, a refusal that passes once
   the rate allows; the single
@@ -1503,11 +1544,14 @@ Each item is a test marked `templet:3159`, run over every backend in
   gap and a clean `check()`; with the leader then lost for good, the record
   on the second copy has no hole below `head`, and goes on. These tests steer
   reads to one copy, and are not the proof the mirror's follow-up holds ("One
-  store, proven; a mirror, not yet")
-- [ ] Henge: a call the store refuses at once is tried again after a pause,
-  each the double of the one before, up to `TRY_MS`, until the timeout (a
-  read, a put, the commit put and the sync); a refusal for good
-  (`TooLarge`, `Invalid`, `Forbidden`) gives up at once
+  store, tested; a mirror, not proven")
+- [ ] Henge: a put, the commit put or a sync that the store refuses at once,
+  and the read inside a retry of one of them, is tried again after a pause,
+  each the double of the one before, up to `TRY_MS`, until the timeout; an
+  open, an operation's reads before its commit, a new `ack`'s read, a
+  caller's read and a load's emptiness check are not, and each is
+  `Unavailable` at once; a refusal for good (`TooLarge`, `Invalid`,
+  `Forbidden`) gives up at once
 - [ ] Henge: a load stopped part-way continues from `head() + 1` at the
   next open when given the same dump, refuses a different dump, and refuses
   every other operation until it ends
@@ -2287,6 +2331,13 @@ client alone is the dependency (above).
   before it puts, and a resumed load refuses a record whose events are not the
   dump's: row 9, the resumable load and an acceptance item. The record's timeout
   is per put, read or sync (this PR)
+- 2026-11-04 proposed: a load's end syncs once after `loading` is put to
+  null (row 11, so a load that returned survives a power cut); the heading
+  and paragraph "One store, tested; a mirror, not proven" say what the suite
+  and the reviews showed; the follow-up list is whole on the page; what the
+  record's timeout retries and what it refuses at once, on one store too
+  (under "The record's timeout" and its acceptance item); row 9's cell for a
+  check whose read gets no answer (this PR)
 - 2026-11-04 proposed: a call the store refuses at once is tried again
   after a pause, 10 ms doubling up to 2 s, and a refusal for good
   (`TooLarge`, `Invalid`, `Forbidden`) gives up at once, under "The

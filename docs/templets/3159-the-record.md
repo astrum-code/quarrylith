@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 739440f
+    at: 484c2bc
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -427,7 +427,10 @@ lease. `finish_run` is not: it records the outcome, releases the run's
 reservations and touches nothing of the item. So a run whose lease was
 released and granted again still frees what it held.
 
-**`MOVES`** is every state pair of the legacy board's `bin/lith::MOVES`. It
+**`MOVES`** is every state pair of the legacy board's `bin/lith::MOVES`, and
+`in-review` to `blocked`, which the legacy board lacks: a hand-over that no
+next run of the author could cure ends there, with the item seen (the
+connector's page, `3167-the-github-connector.md`, "From the record"). It
 leaves out that table's who and when columns, which are policy and go to
 `authorize`. `authorize` is given the records before and after, so a
 condition such as "an open change" or "merged" is the caller's to check.
@@ -437,7 +440,7 @@ condition such as "an open change" or "merged" is the caller's to check.
 | triage | ready |
 | ready, blocked | claimed |
 | claimed | blocked, in-review, ready |
-| ready | blocked |
+| ready, in-review | blocked |
 | blocked | ready |
 | in-review | reviewed |
 | reviewed | merge-ready |
@@ -492,9 +495,11 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
     fold, the limits and the links, not the reservations.
   - `check()` also reports invariant 16 broken: a run's `pgid` changed by an
     event other than `run.pgid`, set by a `run.pgid` when it already held
-    one or when the run was finished, or set to anything but an int above
-    1. A run first written by an event other than `run.start` (an import)
-    keeps the group it came with. `load` does not check this either.
+    one, when the run was finished or when no `run.start` wrote the run, or
+    set to anything but an int above 1. A run first written by an event of
+    kind `import` keeps the group it came with, and one imported with a
+    group below 2 is reported. No other kind brings a group. `load` does not
+    check this either.
 - **A shared record is durable.** `open_record(..., shared=True)` is
   refused on a backend whose `durable` is false, unless it is given
   `allow_undurable=True` (tests and the bench only).
@@ -1048,7 +1053,10 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   usable; a service that starts then is refused, not waited for. "At once"
   is the record's own: a real store answered each within milliseconds but
   for the load's emptiness check, at about 2 s, the client's first interval
-  (henge-2's probe, round 5). A refusal for good (`TooLarge`, `Invalid`,
+  (henge-2's probe, round 5, for five of the six; the review of quarrylith#21
+  measured the sixth, a resumed load's read, at 0.019 s, though a resumed load
+  started in the window rode it out in 2.4 s, its first call being a retried
+  put). A refusal for good (`TooLarge`, `Invalid`,
   `Forbidden`) gives up at once, as the timeout would. The store also
   answers a role past its rate with `Forbidden`, a refusal that passes once
   the rate allows; the single store writes its policy with roles only, so
@@ -1477,7 +1485,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   item with a live hold; a must-fix machine-filed item is in it at once
 - [ ] `MOVES` holds exactly the pairs of the table above, which the test
   holds inline (among them a reopen from done or dropped, claimed to done,
-  and in-review to done); a move not in it is refused, and `move(...,
+  and in-review to done and to blocked, which replays and which `check()`
+  reports nothing of, on every backend); a move not in it is refused, and `move(...,
   expect=)` with a stale state is refused
 - [ ] `authorize` returning a reason refuses the operation with it
 - [ ] a second `grant` on an item with a live lease held by another is
@@ -1515,7 +1524,9 @@ Each item is a test marked `templet:3159`, run over every backend in
   empty record on any backend, the same and clean
 - [ ] `check()` reports a `pgid` set twice (the same group too), changed by
   another kind, set on a finished run, set to no group, or brought by a
-  `run.start`; a run an import brought with a group is clean
+  `run.start`, a run first written by a `run.phase` or a `run.pgid` with a
+  group, or an import with a group below 2; a run an import brought with a
+  group is clean
 - [ ] a dump written before `acting` and `run.pgid` loads on every backend,
   and a SQLite file written before them opens with no migration; each is
   clean, and its live run then takes a group
@@ -1660,8 +1671,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   and every other item to `unsorted`
 - [ ] export: its document over the fixture board equals the sample import
   document step 4 ships (a copy kept in benchLith's tests)
-- [ ] export: `bin/lith::MOVES`' state pairs equal quarrylith's `MOVES`,
-  read from the quarrylith submodule's source (a literal, by `ast`, never
+- [ ] export: `bin/lith::MOVES`' state pairs equal quarrylith's `MOVES` but
+  for `in-review` to `blocked`, which only quarrylith's has, read from the quarrylith submodule's source (a literal, by `ast`, never
   an import); skipped with the reason when the submodule is not checked
   out
 - [ ] import: the report's pulled and left counts per table equal the rows
@@ -2464,3 +2475,12 @@ client alone is the dependency (above).
   "at once" says what a real store measured; the follow-up list gains the
   directory's bound, rows 6 and 7, and the order's commands on a held record
   (this PR)
+- 2026-11-05 proposed: `("in-review", "blocked")` in `MOVES`, the connector's
+  page's need (`3167-the-github-connector.md`, "From the record", item 1): a
+  hand-over that no next run of the author could cure leaves the item
+  `in-review`, where the pair was refused, and `ready` then `blocked` has a
+  window a round could resume the author in. The table, the `MOVES` note and
+  the export acceptance item say it; `check()` is stricter on `pgid`: only a
+  run first written by an `import` is exempt, one imported with a group below 2
+  is reported, and a run first written by a `run.pgid` is reported too (the
+  review of quarrylith#21, round 1) (this PR)

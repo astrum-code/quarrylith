@@ -1,0 +1,1062 @@
+{
+ "bookkeeping": {
+  "beats": [
+   {
+    "at": 1700000013000,
+    "run": 2
+   }
+  ],
+  "cursors": [
+   {
+    "at": 1700000014000,
+    "consumer": "follower",
+    "seq": 2
+   }
+  ]
+ },
+ "format": 1,
+ "journal": [
+  {
+   "actor": "alpha",
+   "at": 1700000001000,
+   "data": {
+    "id": "0001",
+    "standing": "admitted"
+   },
+   "kind": "effort.file",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:efforts"
+     ],
+     {
+      "key": "next:efforts",
+      "value": 2
+     }
+    ],
+    [
+     "efforts",
+     [
+      "0001"
+     ],
+     {
+      "budget": {},
+      "concluded_at": null,
+      "created_at": 1700000001000,
+      "evidence": {},
+      "gates": {},
+      "id": "0001",
+      "inputs": {},
+      "order": {
+       "rule": "unblocks-then-age"
+      },
+      "outcome": null,
+      "owner": "owner-a",
+      "slug": "e0001",
+      "standing": "admitted",
+      "statement": "Do the thing",
+      "title": "Effort 0001",
+      "tools": {}
+     }
+    ]
+   ],
+   "seq": 1,
+   "subject": "effort:0001",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000002000,
+   "data": {
+    "efforts": [
+     "0001"
+    ],
+    "kind": "task",
+    "number": 1,
+    "state": "ready"
+   },
+   "kind": "item.file",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:items"
+     ],
+     {
+      "key": "next:items",
+      "value": 2
+     }
+    ],
+    [
+     "items",
+     [
+      1
+     ],
+     {
+      "admitted": true,
+      "closed_at": null,
+      "created_at": 1700000002000,
+      "filed_by": "alpha",
+      "flags": [],
+      "kind": "task",
+      "labels": [],
+      "must_fix": false,
+      "number": 1,
+      "overruled_at": null,
+      "parent": null,
+      "review_round": 0,
+      "risk": null,
+      "role": "alpha",
+      "source": "local",
+      "source_ref": null,
+      "state": "ready",
+      "templet": null,
+      "tier": null,
+      "title": "a task",
+      "updated_at": 1700000002000
+     }
+    ],
+    [
+     "item_text",
+     [
+      1
+     ],
+     {
+      "body": "its body",
+      "number": 1
+     }
+    ],
+    [
+     "effort_links",
+     [
+      "0001",
+      "item",
+      "1"
+     ],
+     {
+      "at": 1700000002000,
+      "by": "alpha",
+      "effort": "0001",
+      "kind": "item",
+      "target": "1",
+      "unlinked_at": null
+     }
+    ]
+   ],
+   "seq": 2,
+   "subject": "item:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000003000,
+   "data": {
+    "change": null,
+    "id": 1,
+    "mark": null,
+    "number": 1
+   },
+   "kind": "comment",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:comments"
+     ],
+     {
+      "key": "next:comments",
+      "value": 2
+     }
+    ],
+    [
+     "comments",
+     [
+      1
+     ],
+     {
+      "at": 1700000003000,
+      "body": "a comment",
+      "change": null,
+      "id": 1,
+      "mark": null,
+      "number": 1,
+      "ref": null,
+      "source_ref": null,
+      "who": "alpha"
+     }
+    ]
+   ],
+   "seq": 3,
+   "subject": "item:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000004000,
+   "data": {
+    "drivers": [
+     "process"
+    ],
+    "labels": [
+     "zone:a"
+    ],
+    "name": "n1"
+   },
+   "kind": "node.declare",
+   "puts": [
+    [
+     "nodes",
+     [
+      "n1"
+     ],
+     {
+      "declared_at": 1700000004000,
+      "drivers": [
+       "process"
+      ],
+      "labels": [
+       "zone:a"
+      ],
+      "name": "n1",
+      "retired_at": null
+     }
+    ]
+   ],
+   "seq": 4,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000005000,
+   "data": {
+    "amount": 3,
+    "node": "n1",
+    "resource": "slots"
+   },
+   "kind": "capacity.set",
+   "puts": [
+    [
+     "capacity",
+     [
+      "n1",
+      "slots"
+     ],
+     {
+      "amount": 3,
+      "at": 1700000005000,
+      "declared_by": "alpha",
+      "node": "n1",
+      "resource": "slots",
+      "unit": "slots"
+     }
+    ]
+   ],
+   "seq": 5,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000006000,
+   "data": {
+    "effort": "0001",
+    "id": 1,
+    "kind": "job",
+    "number": null
+   },
+   "kind": "task.file",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:tasks"
+     ],
+     {
+      "key": "next:tasks",
+      "value": 2
+     }
+    ],
+    [
+     "tasks",
+     [
+      1
+     ],
+     {
+      "attempts": 0,
+      "created_at": 1700000006000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 1,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "open",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ]
+   ],
+   "seq": 6,
+   "subject": "task:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000007000,
+   "data": {
+    "attempt": 1,
+    "fence": null,
+    "holder": "alpha",
+    "node": "n1",
+    "reservations": [
+     1
+    ],
+    "run": 1,
+    "task": 1
+   },
+   "kind": "run.start",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:runs"
+     ],
+     {
+      "key": "next:runs",
+      "value": 2
+     }
+    ],
+    [
+     "tasks",
+     [
+      1
+     ],
+     {
+      "attempts": 1,
+      "created_at": 1700000006000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 1,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "running",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ],
+    [
+     "runs",
+     [
+      1
+     ],
+     {
+      "attempt": 1,
+      "branch": null,
+      "cost": {},
+      "expect_until": 1700000067000,
+      "fence": null,
+      "finished_at": null,
+      "footprint": {},
+      "harness": {},
+      "holder": "alpha",
+      "id": 1,
+      "node": "n1",
+      "outcome": null,
+      "pgid": null,
+      "phase": "started",
+      "phase_at": 1700000007000,
+      "reason": null,
+      "sandbox": "process",
+      "started_at": 1700000007000,
+      "task": 1
+     }
+    ],
+    [
+     "meta",
+     [
+      "next:reservations"
+     ],
+     {
+      "key": "next:reservations",
+      "value": 2
+     }
+    ],
+    [
+     "reservations",
+     [
+      1
+     ],
+     {
+      "amount": 1,
+      "from_at": 1700000007000,
+      "holder": "alpha",
+      "id": 1,
+      "node": "n1",
+      "released_at": null,
+      "resource": "slots",
+      "run": 1,
+      "task": 1,
+      "until_at": null,
+      "why": null
+     }
+    ]
+   ],
+   "seq": 7,
+   "subject": "run:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000008000,
+   "data": {
+    "phase": "running",
+    "run": 1,
+    "task": 1
+   },
+   "kind": "run.phase",
+   "puts": [
+    [
+     "runs",
+     [
+      1
+     ],
+     {
+      "attempt": 1,
+      "branch": null,
+      "cost": {},
+      "expect_until": 1700000068000,
+      "fence": null,
+      "finished_at": null,
+      "footprint": {},
+      "harness": {},
+      "holder": "alpha",
+      "id": 1,
+      "node": "n1",
+      "outcome": null,
+      "pgid": null,
+      "phase": "running",
+      "phase_at": 1700000008000,
+      "reason": null,
+      "sandbox": "process",
+      "started_at": 1700000007000,
+      "task": 1
+     }
+    ]
+   ],
+   "seq": 8,
+   "subject": "run:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000009000,
+   "data": {
+    "outcome": "done",
+    "released": [
+     1
+    ],
+    "run": 1,
+    "task": 1
+   },
+   "kind": "run.finish",
+   "puts": [
+    [
+     "runs",
+     [
+      1
+     ],
+     {
+      "attempt": 1,
+      "branch": null,
+      "cost": {},
+      "expect_until": 1700000068000,
+      "fence": null,
+      "finished_at": 1700000009000,
+      "footprint": {},
+      "harness": {},
+      "holder": "alpha",
+      "id": 1,
+      "node": "n1",
+      "outcome": "done",
+      "pgid": null,
+      "phase": "running",
+      "phase_at": 1700000008000,
+      "reason": "finished",
+      "sandbox": "process",
+      "started_at": 1700000007000,
+      "task": 1
+     }
+    ],
+    [
+     "reservations",
+     [
+      1
+     ],
+     {
+      "amount": 1,
+      "from_at": 1700000007000,
+      "holder": "alpha",
+      "id": 1,
+      "node": "n1",
+      "released_at": 1700000009000,
+      "resource": "slots",
+      "run": 1,
+      "task": 1,
+      "until_at": null,
+      "why": "finished"
+     }
+    ],
+    [
+     "tasks",
+     [
+      1
+     ],
+     {
+      "attempts": 1,
+      "created_at": 1700000006000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 1,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "open",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ]
+   ],
+   "seq": 9,
+   "subject": "run:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000010000,
+   "data": {
+    "effort": "0001",
+    "id": 2,
+    "kind": "job",
+    "number": null
+   },
+   "kind": "task.file",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:tasks"
+     ],
+     {
+      "key": "next:tasks",
+      "value": 3
+     }
+    ],
+    [
+     "tasks",
+     [
+      2
+     ],
+     {
+      "attempts": 0,
+      "created_at": 1700000010000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 2,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "open",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ]
+   ],
+   "seq": 10,
+   "subject": "task:2",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000011000,
+   "data": {
+    "attempt": 1,
+    "fence": null,
+    "holder": "alpha",
+    "node": "n1",
+    "reservations": [
+     2
+    ],
+    "run": 2,
+    "task": 2
+   },
+   "kind": "run.start",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:runs"
+     ],
+     {
+      "key": "next:runs",
+      "value": 3
+     }
+    ],
+    [
+     "tasks",
+     [
+      2
+     ],
+     {
+      "attempts": 1,
+      "created_at": 1700000010000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 2,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "running",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ],
+    [
+     "runs",
+     [
+      2
+     ],
+     {
+      "attempt": 1,
+      "branch": null,
+      "cost": {},
+      "expect_until": 1700000071000,
+      "fence": null,
+      "finished_at": null,
+      "footprint": {},
+      "harness": {},
+      "holder": "alpha",
+      "id": 2,
+      "node": "n1",
+      "outcome": null,
+      "pgid": null,
+      "phase": "started",
+      "phase_at": 1700000011000,
+      "reason": null,
+      "sandbox": "process",
+      "started_at": 1700000011000,
+      "task": 2
+     }
+    ],
+    [
+     "meta",
+     [
+      "next:reservations"
+     ],
+     {
+      "key": "next:reservations",
+      "value": 3
+     }
+    ],
+    [
+     "reservations",
+     [
+      2
+     ],
+     {
+      "amount": 1,
+      "from_at": 1700000011000,
+      "holder": "alpha",
+      "id": 2,
+      "node": "n1",
+      "released_at": null,
+      "resource": "slots",
+      "run": 2,
+      "task": 2,
+      "until_at": null,
+      "why": null
+     }
+    ]
+   ],
+   "seq": 11,
+   "subject": "run:2",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000012000,
+   "data": {
+    "phase": "running",
+    "run": 2,
+    "task": 2
+   },
+   "kind": "run.phase",
+   "puts": [
+    [
+     "runs",
+     [
+      2
+     ],
+     {
+      "attempt": 1,
+      "branch": null,
+      "cost": {},
+      "expect_until": 1700000072000,
+      "fence": null,
+      "finished_at": null,
+      "footprint": {},
+      "harness": {},
+      "holder": "alpha",
+      "id": 2,
+      "node": "n1",
+      "outcome": null,
+      "pgid": null,
+      "phase": "running",
+      "phase_at": 1700000012000,
+      "reason": null,
+      "sandbox": "process",
+      "started_at": 1700000011000,
+      "task": 2
+     }
+    ]
+   ],
+   "seq": 12,
+   "subject": "run:2",
+   "via": "cli"
+  }
+ ],
+ "records": {
+  "capacity": [
+   {
+    "amount": 3,
+    "at": 1700000005000,
+    "declared_by": "alpha",
+    "node": "n1",
+    "resource": "slots",
+    "unit": "slots"
+   }
+  ],
+  "change_text": [],
+  "changes": [],
+  "checks": [],
+  "comments": [
+   {
+    "at": 1700000003000,
+    "body": "a comment",
+    "change": null,
+    "id": 1,
+    "mark": null,
+    "number": 1,
+    "ref": null,
+    "source_ref": null,
+    "who": "alpha"
+   }
+  ],
+  "deps": [],
+  "effort_links": [
+   {
+    "at": 1700000002000,
+    "by": "alpha",
+    "effort": "0001",
+    "kind": "item",
+    "target": "1",
+    "unlinked_at": null
+   }
+  ],
+  "efforts": [
+   {
+    "budget": {},
+    "concluded_at": null,
+    "created_at": 1700000001000,
+    "evidence": {},
+    "gates": {},
+    "id": "0001",
+    "inputs": {},
+    "order": {
+     "rule": "unblocks-then-age"
+    },
+    "outcome": null,
+    "owner": "owner-a",
+    "slug": "e0001",
+    "standing": "admitted",
+    "statement": "Do the thing",
+    "title": "Effort 0001",
+    "tools": {}
+   }
+  ],
+  "holds": [],
+  "imports": [],
+  "item_text": [
+   {
+    "body": "its body",
+    "number": 1
+   }
+  ],
+  "items": [
+   {
+    "admitted": true,
+    "closed_at": null,
+    "created_at": 1700000002000,
+    "filed_by": "alpha",
+    "flags": [],
+    "kind": "task",
+    "labels": [],
+    "must_fix": false,
+    "number": 1,
+    "overruled_at": null,
+    "parent": null,
+    "review_round": 0,
+    "risk": null,
+    "role": "alpha",
+    "source": "local",
+    "source_ref": null,
+    "state": "ready",
+    "templet": null,
+    "tier": null,
+    "title": "a task",
+    "updated_at": 1700000002000
+   }
+  ],
+  "leases": [],
+  "left": [],
+  "merges": [],
+  "meta": [
+   {
+    "key": "next:comments",
+    "value": 2
+   },
+   {
+    "key": "next:efforts",
+    "value": 2
+   },
+   {
+    "key": "next:items",
+    "value": 2
+   },
+   {
+    "key": "next:reservations",
+    "value": 3
+   },
+   {
+    "key": "next:runs",
+    "value": 3
+   },
+   {
+    "key": "next:tasks",
+    "value": 3
+   }
+  ],
+  "nodes": [
+   {
+    "declared_at": 1700000004000,
+    "drivers": [
+     "process"
+    ],
+    "labels": [
+     "zone:a"
+    ],
+    "name": "n1",
+    "retired_at": null
+   }
+  ],
+  "pulled": [],
+  "questions": [],
+  "readings": [],
+  "reservations": [
+   {
+    "amount": 1,
+    "from_at": 1700000007000,
+    "holder": "alpha",
+    "id": 1,
+    "node": "n1",
+    "released_at": 1700000009000,
+    "resource": "slots",
+    "run": 1,
+    "task": 1,
+    "until_at": null,
+    "why": "finished"
+   },
+   {
+    "amount": 1,
+    "from_at": 1700000011000,
+    "holder": "alpha",
+    "id": 2,
+    "node": "n1",
+    "released_at": null,
+    "resource": "slots",
+    "run": 2,
+    "task": 2,
+    "until_at": null,
+    "why": null
+   }
+  ],
+  "reviews": [],
+  "run_text": [],
+  "runs": [
+   {
+    "attempt": 1,
+    "branch": null,
+    "cost": {},
+    "expect_until": 1700000068000,
+    "fence": null,
+    "finished_at": 1700000009000,
+    "footprint": {},
+    "harness": {},
+    "holder": "alpha",
+    "id": 1,
+    "node": "n1",
+    "outcome": "done",
+    "pgid": null,
+    "phase": "running",
+    "phase_at": 1700000008000,
+    "reason": "finished",
+    "sandbox": "process",
+    "started_at": 1700000007000,
+    "task": 1
+   },
+   {
+    "attempt": 1,
+    "branch": null,
+    "cost": {},
+    "expect_until": 1700000072000,
+    "fence": null,
+    "finished_at": null,
+    "footprint": {},
+    "harness": {},
+    "holder": "alpha",
+    "id": 2,
+    "node": "n1",
+    "outcome": null,
+    "pgid": null,
+    "phase": "running",
+    "phase_at": 1700000012000,
+    "reason": null,
+    "sandbox": "process",
+    "started_at": 1700000011000,
+    "task": 2
+   }
+  ],
+  "statements": [],
+  "tasks": [
+   {
+    "attempts": 1,
+    "created_at": 1700000006000,
+    "effort": "0001",
+    "ended_at": null,
+    "flags": [],
+    "id": 1,
+    "kind": "job",
+    "labels": [],
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "needs": {
+     "slots": 1
+    },
+    "not_before": null,
+    "number": null,
+    "sandbox": "process",
+    "schedule": null,
+    "state": "open",
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    }
+   },
+   {
+    "attempts": 1,
+    "created_at": 1700000010000,
+    "effort": "0001",
+    "ended_at": null,
+    "flags": [],
+    "id": 2,
+    "kind": "job",
+    "labels": [],
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "needs": {
+     "slots": 1
+    },
+    "not_before": null,
+    "number": null,
+    "sandbox": "process",
+    "schedule": null,
+    "state": "running",
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    }
+   }
+  ]
+ }
+}

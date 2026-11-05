@@ -983,6 +983,19 @@ class OneCopyMisses:
         while mirror_state(made).get("worker") != "w1":
             assert time.monotonic() < end, mirror_state(made)
             time.sleep(0.05)
+        # the file comes before the router's own view: until that follows, a
+        # sync names w0 and is refused, and a record's open tries it only once
+        client = Store.connect(f"ipc://{made.folder}/henge.sock")
+        try:
+            while True:
+                try:
+                    client.sync("quarrylith.lose.journal")
+                    return
+                except errors.Unavailable:
+                    assert time.monotonic() < end, "no sync answered after the loss"
+                    time.sleep(0.05)
+        finally:
+            client.close()
 
 
 def _steered(monkeypatch, made):

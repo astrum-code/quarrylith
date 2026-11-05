@@ -129,6 +129,34 @@ def free(record, *, now, window_ms):
     )
 
 
+def measured(record, *, now, window_ms):
+    """Per node, resource and holder, the latest `host/measure` reading of
+    the node: the host's available memory and free disk (holder `""`), and
+    each consumer's figure of a resource (its resident use). A reading that
+    names no live node, and a figure that is not a number, are skipped; the
+    reading's age is the allocator's to judge, not the gauge's."""
+    live = {n["name"] for n in record.read("nodes") if n["retired_at"] is None}
+    found = {}
+    for reading in record.read("readings", source="host", kind="measure", desc=True):
+        value = _dict(reading["value"])
+        node = value.get("node")
+        if not isinstance(node, str) or node not in live or node in found:
+            continue
+        found[node] = value
+        if len(found) == len(live):
+            break
+    out = {}
+    for node, value in found.items():
+        for resource, key in (("memory", "memory_available"), ("disk", "disk_free")):
+            if _number(value.get(key)):
+                out[(node, resource, "")] = value[key]
+        for holder, figures in _dict(value.get("consumers")).items():
+            for resource, amount in _dict(figures).items():
+                if _number(amount):
+                    out[(node, resource, holder)] = amount
+    return _series(("node", "resource", "holder"), out)
+
+
 def queue_depth(record, *, now, window_ms):
     counts = {}
 
@@ -328,6 +356,14 @@ GAUGES = (
         ("node", "resource"),
         "capacity less what is reserved, from now on",
         free,
+    ),
+    Gauge(
+        "measured",
+        "the resource's",
+        ("node", "resource", "holder"),
+        "a node's latest measured figure: the host's available (holder empty), "
+        "or a holder's use",
+        measured,
     ),
     Gauge(
         "queue_depth",

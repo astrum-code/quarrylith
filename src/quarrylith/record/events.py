@@ -47,6 +47,7 @@ EVENT_KINDS = (
     "capacity.set",
     "reserve",
     "reserve.release",
+    "reserve.replace",
     "run.start",
     "run.phase",
     "run.finish",

@@ -34,8 +34,14 @@ def host(record, memory=4096, name="n1"):
     return name
 
 
-def live(record, **match):
-    return record.read("reservations", live=True, **match)
+def live(record, resource=None, holder=None, **match):
+    """The live reservations, read by node, task or run and filtered here by
+    resource or holder."""
+    return [
+        r
+        for r in record.read("reservations", live=True, **match)
+        if resource in (None, r["resource"]) and holder in (None, r["holder"])
+    ]
 
 
 def replay(record):
@@ -331,8 +337,8 @@ def test_measured_reads_the_latest_measure_reading_of_each_node(record, clock):
     rows = gauges.by_name("measured").compute(
         contract_only(record), now=clock(), window_ms=MIN
     )
-    keys = [tuple(sorted(lab.items())) for lab, _ in rows]
-    assert keys == sorted(keys)
+    keys = [(lab["node"], lab["resource"], lab["holder"]) for lab, _ in rows]
+    assert keys == sorted(keys) and len(keys) == 7
 
 
 @over_backends

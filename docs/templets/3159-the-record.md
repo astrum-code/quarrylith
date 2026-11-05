@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: d3af808
+    at: f133c50
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -308,7 +308,10 @@ class Event:
   `review.file`, `review.verdict`, `review.read`, `merge`, `comment`,
   `question.ask`, `question.answer`, `statement`, `hold.set`, `hold.lift`,
   `reading`, `meta.set`, `note`, `import`. A new kind is a change to this
-  page.
+  page. The schema version does not move for a kind, so an older build
+  still opens, replays, checks and writes a record that holds `reserve.replace`;
+  what it cannot do is `load` a dump of that record, which it refuses at the
+  kind.
 - **`apply(view, event)`** writes `event.puts` into `view`, in order, by
   key. Nothing else. It reads no clock, no counter and no other record.
   Every rule is decided before the event exists, so applying one event
@@ -2368,10 +2371,11 @@ client alone is the dependency (above).
   `write_ack` (`MirrorPlacement.write_ack`), cited where the page warned
   against a space declaring `write_ack: 1` (this PR)
 - 2026-11-05 proposed: `replace_reservation(id, amount, why)` and its event
-  kind `reserve.replace` (a kind added to the journal, which every copy of
-  the record must know), with the allocator's declaration as its use: the
-  allocation row, `EVENT_KINDS`, invariant 6 and two acceptance items. A
-  record written before the kind loads and replays as it did (this PR)
+  kind `reserve.replace` (a kind added to the journal: an older build
+  still opens and writes the record, but cannot load a dump of it), with
+  the allocator's declaration as its use: the allocation row,
+  `EVENT_KINDS`, invariant 6 and two acceptance items. A record written
+  before the kind loads and replays as it did (this PR)
 - 2026-11-05 proposed: the gauge `measured` (labels node, resource, holder),
   computed from the latest `host/measure` reading of each live node, which
   names its node in `value.node`: a row in the gauges table and an acceptance

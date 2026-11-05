@@ -1683,6 +1683,35 @@ def test_on_a_mirror_a_redo_settles_a_directory_it_reads_with_no_split_left(
             again.close()
 
 
+def test_a_redo_puts_the_directory_it_reads_before_the_chunk_it_shrinks(small_chunks):
+    """templet:3159 -- Henge, row 6: a directory read with no split left is put
+    again before the old chunk shrinks, so no copy holds the shrunk chunk
+    without the directory that lists the keys it lost."""
+    fake = FakeStore()
+    clock = Clock()
+    s = henge.spaces("rec")
+    w = fake_record(fake, "w", clock=clock)
+    w.init()
+    efforts(w, [f"e{i:02d}" for i in range(10, 18)])
+    ix = ("efforts", "*", None)
+    dkey = henge.ix_key(ix, "dir")
+    w.store = Crashing(
+        w.store, lambda space, key: space == s["idx"] and key == dkey, after=True
+    )
+    with pytest.raises(Crash):
+        efforts(w, ["e18"])
+    abandon(w)
+    start = len(fake.log)
+    after = fake_record(fake, "after", clock=clock)
+    after.close()
+    puts = [
+        c[3]
+        for c in fake.log[start:]
+        if c[0] == "after" and c[1] == "put" and c[2] == s["idx"]
+    ]
+    assert puts.index(dkey) < puts.index(henge.ix_key(ix, 0))
+
+
 def test_on_a_mirror_a_redo_does_not_go_on_when_a_retry_reads_the_directory_absent(
     monkeypatch, small_chunks
 ):

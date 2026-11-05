@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """quarrylith's command line: `quarrylith record
 init|check|dump|load|import|events|gauges URL` and `quarrylith order
-schedule TEXT` and `quarrylith order show URL`.
+schedule TEXT`, `quarrylith order show URL` and `quarrylith order merge URL
+NUMBER`.
 
 Exit codes: 0 done, 1 `check` found something, 2 refused, 3 the store was
 unavailable (or the outcome is unknown). `load` and `import` refuse a dump or
@@ -20,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import gauges
+from .order import merge as merges
 from .order import schedule as schedules
 from .order import sequence as sequences
 from .order import settings as order_settings
@@ -282,6 +284,32 @@ def _order_show(args):
     return 0
 
 
+def _order_merge(args):
+    times = {}
+    with _phase("opening the record", times):
+        settings = _order_settings(args.settings)
+        record = _open(args, readonly=True)
+    try:
+        with _phase("classifying", times):
+            got = merges.classify(record, args.number, settings=settings)
+    finally:
+        record.close()
+    if args.debug:
+        print(f"settings: {settings}", file=sys.stderr)
+        print(f"class: {got}", file=sys.stderr)
+    with _phase("printing", times):
+        if got.cls == merges.AUTO:
+            print(f"#{args.number}: auto (rule {got.rule})")
+        else:
+            print(f"#{args.number}: user")
+            for line in got.why:
+                print(f"why: {line}")
+    if args.timing:
+        shown = ", ".join(f"{n} {t * 1000:.1f} ms" for n, t in times.items())
+        print(f"timing: {shown}", file=sys.stderr)
+    return 0
+
+
 def _print_sequence(got):
     for candidate in got.candidates:
         print(candidate.why)
@@ -372,6 +400,16 @@ def parser():
     shown.add_argument("--timing", action="store_true", help="time per layer")
     shown.add_argument("--debug", action="store_true", help="the settings in force")
     shown.set_defaults(run=_order_show)
+    merged = ordered.add_parser(
+        "merge", help="an item's merge class: auto, or the user's, and why"
+    )
+    merged.add_argument("url", help="sqlite:///path/record.sqlite")
+    merged.add_argument("number", type=int, help="the item's number")
+    merged.add_argument("--actor", default=_actor(), help="who, as you name yourself")
+    merged.add_argument("--settings", help="a JSON object of the order's settings")
+    merged.add_argument("--timing", action="store_true", help="time per layer")
+    merged.add_argument("--debug", action="store_true", help="the settings and class")
+    merged.set_defaults(run=_order_merge)
     return top
 
 

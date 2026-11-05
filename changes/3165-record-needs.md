@@ -1,0 +1,3 @@
+bump: minor
+- `Record.acting(actor, via)`: operations in the span are that actor's, through that via, in place of those fixed at open, so one writer can serve many callers: `authorize` sees the caller, and the event and the data name them; the span holds the record's lock, so `events(wait=)` inside it is refused
+- `Record.run_pgid(id, pgid)` sets a live run's process group, once, in a new event kind, `run.pgid`; a group is an int above 1, and `check()` reports one not set that way. A record written before this opens and replays with no migration; a dump holding `run.pgid` does not load into an older copy

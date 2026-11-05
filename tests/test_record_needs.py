@@ -297,6 +297,72 @@ def test_the_rule_on_a_number_follows_the_spans_via(opener):
         item(rec, "numbered", number=41)
 
 
+@over_backends
+def test_the_rule_on_a_number_reads_the_via_of_its_own_thread(opener):
+    """templet:3159 -- the rule reads the via under the record's lock: with
+    a span of `import` open on one thread, another thread's `file_item(number=)`
+    is refused, as with no span, and files nothing."""
+    rec = opener(actor="scheduler", via="service")
+    rec.init()
+    admitted(rec)
+    begun, got = threading.Event(), {}
+
+    def other():
+        begun.set()
+        try:
+            got["n"] = item(rec, "the other thread's", number=4242)
+        except Exception as e:  # reported below
+            got["error"] = e
+
+    thread = threading.Thread(target=other)
+    head = rec.head()
+    with rec.acting("importer", "import"):
+        thread.start()
+        assert begun.wait(10)
+        time.sleep(0.3)
+        assert "n" not in got and "error" not in got  # it waits for the span
+        assert item(rec, "the span's", number=40) == 40
+    thread.join(10)
+    assert "n" not in got, f"filed as number {got['n']}"
+    assert isinstance(got.get("error"), Refused), got
+    assert rec.get("items", 4242) is None
+    assert rec.head() == head + 1
+
+
+@over_backends
+def test_another_threads_wait_is_not_refused_by_a_span_and_so_waits_for_it(opener):
+    """templet:3159 -- the refusal of a wait is for the thread that holds the
+    span: a follower's `events(wait=)` on another thread, while a request holds
+    one, is not refused. It waits for the span to end and then for its time,
+    and an inner span does not end the outer one's refusal."""
+    rec = opener(actor="scheduler", via="service")
+    rec.init()
+    admitted(rec)
+    head = rec.head()
+    begun, got = threading.Event(), {}
+
+    def follower():
+        begun.set()
+        try:
+            got["events"] = rec.events(head, wait=0.5)
+        except Exception as e:  # reported below
+            got["error"] = e
+
+    thread = threading.Thread(target=follower)
+    with rec.acting("runner:a", "cli"):
+        thread.start()
+        assert begun.wait(10)
+        time.sleep(0.3)
+        assert "events" not in got and "error" not in got  # held back, not refused
+        with rec.acting("runner:a", "cli"):
+            pass
+        with pytest.raises(Refused, match="inside acting"):
+            rec.events(head, wait=5)
+    thread.join(10)
+    assert "error" not in got, got.get("error")
+    assert got["events"] == []
+
+
 # -- a run's process group --------------------------------------------------------
 
 
@@ -463,26 +529,32 @@ def _append(dump, kind, run, **fields):
     return dump
 
 
-def _started_with_a_group(dump, run):
+def _started_with_a_group(dump, run, group=4321):
     """`dump` as if its `run.start` of `run` had set a group, and it had kept
     it."""
     for raw in dump["journal"]:
         for kind, key, value in raw["puts"]:
             if kind == "runs" and key == [run]:
-                value["pgid"] = 4321
+                value["pgid"] = group
     for row in dump["records"]["runs"]:
         if row["id"] == run:
-            row["pgid"] = 4321
+            row["pgid"] = group
     return dump
 
 
-def _imported_with_a_group(dump, run):
-    """`dump` as if an import had brought `run`, with its group."""
-    dump = _started_with_a_group(dump, run)
+def _first_written_by(dump, run, kind, group=4321):
+    """`dump` as if an event of `kind`, not the `run.start`, had first written
+    `run`, with its group."""
+    dump = _started_with_a_group(dump, run, group)
     for raw in dump["journal"]:
         if raw["kind"] == "run.start" and raw["data"]["run"] == run:
-            raw["kind"] = "import"
+            raw["kind"] = kind
     return dump
+
+
+def _imported_with_a_group(dump, run, group=4321):
+    """`dump` as if an import had brought `run`, with its group."""
+    return _first_written_by(dump, run, "import", group)
 
 
 FINDINGS = {
@@ -524,6 +596,28 @@ FINDINGS = {
         lambda d, live, _: _started_with_a_group(d, live),
         "its pgid changed by a run.start",
     ),
+    "a run first written by a run.phase, with a group": (
+        lambda d, live, _: _first_written_by(d, live, "run.phase"),
+        "its pgid changed by a run.phase",
+    ),
+    "a run first written by a run.pgid, with a group": (
+        lambda d, live, _: _first_written_by(d, live, "run.pgid"),
+        "no run.start wrote",
+    ),
+    **{
+        f"a run first written by a run.phase, with group {g}": (
+            lambda d, live, _, g=g: _first_written_by(d, live, "run.phase", g),
+            "its pgid changed by a run.phase",
+        )
+        for g in (1, 0, -5)
+    },
+    **{
+        f"an import of group {g}": (
+            lambda d, live, _, g=g: _imported_with_a_group(d, live, g),
+            "its pgid imported as",
+        )
+        for g in (1, 0, -5)
+    },
 }
 
 

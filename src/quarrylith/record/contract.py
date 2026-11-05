@@ -57,7 +57,7 @@ MOVES = frozenset().union(
     _pairs(["triage"], ["ready"]),
     _pairs(["ready", "blocked"], ["claimed"]),
     _pairs(["claimed"], ["blocked", "in-review", "ready"]),
-    _pairs(["ready"], ["blocked"]),
+    _pairs(["ready", "in-review"], ["blocked"]),
     _pairs(["blocked"], ["ready"]),
     _pairs(["in-review"], ["reviewed"]),
     _pairs(["reviewed"], ["merge-ready"]),
@@ -1186,13 +1186,14 @@ class Record(abc.ABC):
         (made, parked, if it is not there). A machine-filed item is filed
         unadmitted unless it is a must-fix. `number` is taken only by an
         import. Returns the number."""
-        if number is not None and self.via != "import":
-            raise Refused("an item's number is given only by an import")
         try:
             labels, flags = sorted(labels), sorted(flags)
         except TypeError:
             raise Refused("labels and flags are lists of str") from None
         with self._operation("file_item", "item.file") as op:
+            # read under the lock: a span's via is this thread's own here
+            if number is not None and self.via != "import":
+                raise Refused("an item's number is given only by an import")
             if number is not None:
                 number = _key("items", [number])[0]
                 if op.get("items", [number]) is not None:
@@ -2571,7 +2572,7 @@ def _run_findings(dump):
 
 def _pgid_findings(journal):
     """A run's `pgid` is set once: by a `run.pgid`, on a live run, to a group
-    above 1. A run an import brought keeps the group it came with."""
+    above 1. Only a run an import brought comes with a group, and keeps it."""
     findings = []
     held = {}
     for raw in journal:
@@ -2579,15 +2580,20 @@ def _pgid_findings(journal):
             if kind != "runs":
                 continue
             id, pgid = key[0], value.get("pgid")
-            if id not in held and raw["kind"] != "run.start":
+            at = f"run {id}, event {raw['seq']}"
+            if id not in held and raw["kind"] == "import":
                 held[id] = pgid
+                if pgid is not None and (not schema.is_int(pgid) or pgid < 2):
+                    findings.append(f"{at}: its pgid imported as {pgid!r}")
                 continue
+            first = id not in held
             was = held.get(id)
             held[id] = pgid
-            at = f"run {id}, event {raw['seq']}"
             if raw["kind"] != "run.pgid":
                 if pgid != was:
                     findings.append(f"{at}: its pgid changed by a {raw['kind']}")
+            elif first and pgid is not None:
+                findings.append(f"{at}: its pgid set on a run no run.start wrote")
             elif was is not None:
                 findings.append(f"{at}: its pgid set again, {was} to {pgid}")
             elif value.get("finished_at") is not None:

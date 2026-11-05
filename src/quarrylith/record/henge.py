@@ -25,13 +25,13 @@ nothing more and closes. **One put at a time**: each put is sent once the one
 before it is answered, so the store keeps the record's writes in one order and
 a power cut leaves a prefix of them. **Only past an answer**: the writer goes
 on past a value only once the store has answered a put of it to this writer. A
-value it read instead (its commit put's entry read back, a retry or a redo
-with nothing left to put, the entry a redo starts from) is put again, the same
-value with the version read, before it goes on: on a mirror, an `Unavailable`
-put may be on the leader's copy alone, and a read may come from either.
+value it read instead is put again, the same value with the version read,
+before it goes on: on a mirror, an `Unavailable` put may be on the leader's copy
+alone, and a read may come from either. The backend is built and tested for one
+store; on a mirror it is not proven yet.
 
 No read lists a space, and no object is ever deleted: what would be a delete
-is a versioned put of null (`loading`, at a load's end).
+is a versioned put of null (`loading`, at a load's end or at an open).
 """
 
 import asyncio
@@ -69,8 +69,9 @@ PIECE_BYTES = 256 * 1024
 JOURNAL_CHUNK = 8192
 #: The most keys one `get_many` takes (henge's `MANY`).
 MANY = 1000
-#: How long the record waits for the store before it gives an operation up:
-#: past the commit point that is `Unknown`, before it `Unavailable`.
+#: How long the record waits for the store at one put, read or sync before it
+#: gives an operation up: past the commit point that is `Unknown`, before it
+#: `Unavailable`.
 TIMEOUT_S = 30.0
 #: One try of a client call; the client retries it with the same request id
 #: until the record's timeout is spent.
@@ -389,7 +390,17 @@ class HengeRecord(Record):
         # absent: each is put again as read (an absent one null, `absent`)
         # before it does. A load in progress is put again by the load that
         # resumes it; every other operation refuses it.
-        self._put(self.S, ["schema"], lambda cur: SKIP, why="open")
+        # `schema` is the value the open went on past, with the version it first
+        # read, which recovery's check came after. A retry that reads it absent
+        # puts it `absent`, and the leader's copy refuses that.
+        read = row[0]
+        self._keep(self.S, ["schema"], read, row[1], False)
+        self._put(
+            self.S,
+            ["schema"],
+            lambda cur: read if cur is ABSENT else SKIP,
+            why="open",
+        )
         loading = self._fetch(self.S, ["loading"])[0]
         if not isinstance(loading, dict):
             loading = self._put(
@@ -567,7 +578,11 @@ class HengeRecord(Record):
                 expect = {"absent": True} if row[1] is None else {"version": row[1]}
                 version = self._call("put", space, key, new, expect=expect)
             except _Found as e:
-                self._fail(why, f"{e}: another writer is live", e)
+                self._fail(
+                    why,
+                    f"{e}: another writer is live, or an earlier operation's entry",
+                    e,
+                )
             except (_Conflict, _StoreDown) as e:
                 if tries.over(e):
                     self._fail(why, f"the store did not take the put: {e}", e)
@@ -591,10 +606,11 @@ class HengeRecord(Record):
 
     def _fail(self, why, message, cause):
         """Stop: past the commit point `Unknown`, else `Unavailable`. A check
-        that found another writer's entry, or an operation past its commit
-        point, closes the record: it puts nothing more."""
+        that found another writer's entry, an operation past its commit point,
+        or a load's start that may be on the store closes the record: it puts
+        nothing more, and the next open reads what is there."""
         self._forget()
-        if why in ("op", "recover") or isinstance(cause, _Found):
+        if why in ("op", "recover", "load start") or isinstance(cause, _Found):
             self._closed = message
             self._shut()
         if why == "op":
@@ -668,6 +684,11 @@ class HengeRecord(Record):
                 if row[0] not in (ABSENT, None) and row[0] != filtered(row[0], rng[n]):
                     plain.append((self.I, ix_key(ix, n), _chunk_fn(rng[n], {})))
         if not splits:
+            if directory and (redo or not RECORDS[ix[0]].journaled):
+                # a redo's directory may be its crashed try's, and a cursor's or
+                # a beat's no event's: on the leader's copy alone, so put again
+                # as read before the chunks that need it
+                return [(self.I, dkey, _dir_fn([]))] + plain
             return plain
         top = max([0] + [n for n, _ in directory])
         news, listed, shrunk = [], [], []
@@ -968,8 +989,10 @@ class HengeRecord(Record):
                             return SKIP
                         raise _Found("another load started")
 
-                    # row 9: absent, or a fresh read of a null
-                    self._put(self.S, ["loading"], start, why="load", fresh=True)
+                    # row 9: the open's own put, absent, or a fresh read of a
+                    # null, after a check
+                    self._check_journal()
+                    self._put(self.S, ["loading"], start, why="load start", fresh=True)
                     self._loading = loading
                 elif self._loading.get("digest") != digest:
                     raise Refused(
@@ -986,6 +1009,7 @@ class HengeRecord(Record):
                     # row 9, resumed: `loading` as the open read it, put again
                     # before the load goes on past it
                     self._put(self.S, ["loading"], resumed, why="load")
+                    self._holds_only_the_dump(journal)
                 for event in journal[self._high :]:
                     priors = contract._priors(self._get, event)
                     self._check_entry(event, priors)
@@ -1013,6 +1037,22 @@ class HengeRecord(Record):
             except _StoreDown as e:
                 raise Unavailable(f"the store at {self._where()}: {e}") from e
         self._wake()
+
+    def _holds_only_the_dump(self, journal):
+        """A resumed load goes on from `high`, so the record's events up to it
+        are the dump's. Any other is refused, before an event is committed."""
+        seqs = list(range(1, self._high + 1))
+        rows = self._look_many(self.J, [[s] for s in seqs], keep=False)
+        for seq, row in zip(seqs, rows):
+            if (
+                seq > len(journal)
+                or row[0] is ABSENT
+                or not same_entry(row[0]["event"], journal[seq - 1].to_dict())
+            ):
+                raise Refused(
+                    f"the record's events are not the dump's, at seq {seq}: "
+                    "the load commits nothing, and stays in progress"
+                )
 
     # -- the store's primitives -----------------------------------------------
 

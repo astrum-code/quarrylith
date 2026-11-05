@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from backends import PARTS, admitted, over_backends
+from backends import PARTS, admitted, one_writer, over_backends
 
 from quarrylith import cli
 from quarrylith.order.sequence import RULES, effort_order, order, place
@@ -593,8 +593,10 @@ def test_the_order_writes_nothing(backend, record, clock):
 def test_a_read_only_handle_orders(backend, record, opener, clock):
     """templet:3163 -- a handle opened read-only gives the same sequence."""
     tier_fixture(record, clock)
+    expected = sequence_of(record, clock)
+    one_writer(backend, record)
     reader = opener(readonly=True)
-    assert order(reader, now=clock(), settings=DEFAULT) == sequence_of(record, clock)
+    assert order(reader, now=clock(), settings=DEFAULT) == expected
 
 
 @over_backends
@@ -877,10 +879,11 @@ def test_order_show_prints_the_sequence(backend, record, url, clock, capsys):
     effort(record, "0003", rule="alphabetical")
     job(record, schedule="window 08:00-09:00; tz UTC")
     now = clock()
+    got = order(record, now=now, settings=DEFAULT)
+    one_writer(backend, record)
 
     code, out, err = show(capsys, url, "--now", str(now))
     assert code == 0
-    got = order(record, now=now, settings=DEFAULT)
     lines = out.splitlines()
     assert lines[: len(got.candidates)] == [c.why for c in got.candidates]
     assert any(line.startswith("left: ") and "window" in line for line in lines)
@@ -897,17 +900,19 @@ def test_order_show_json_and_settings(backend, record, url, clock, capsys, tmp_p
     now = clock()
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"review_slots": 3}))
+    expected = order(record, now=now, settings=Settings(review_slots=3))
+    head = record.head()
+    one_writer(backend, record)
 
     code, out, _ = show(
         capsys, url, "--now", str(now), "--json", "--settings", str(path)
     )
     assert code == 0
     doc = json.loads(out)
-    expected = order(record, now=now, settings=Settings(review_slots=3))
     assert [c["key"] for c in doc["candidates"]] == [list(k) for k in keys(expected)]
     assert [c["why"] for c in doc["candidates"]] == [c.why for c in expected.candidates]
     assert doc["counts"] == expected.counts
-    assert doc["at"] == now and doc["seq"] == record.head()
+    assert doc["at"] == now and doc["seq"] == head
 
 
 @over_backends
@@ -938,6 +943,7 @@ def test_order_show_takes_timing_and_debug(backend, record, url, clock, capsys):
     stdout as it was; a phase past the slow bound is printed with its time."""
     tier_fixture(record, clock)
     now = str(clock())
+    one_writer(backend, record)
     _, plain, _ = show(capsys, url, "--now", now)
 
     code, out, err = show(capsys, url, "--now", now, "--timing", "--debug")
@@ -955,6 +961,7 @@ def test_order_show_prints_a_slow_phase(
     """templet:3163 -- a phase that takes longer than the bound is printed
     with its elapsed time."""
     tier_fixture(record, clock)
+    one_writer(backend, record)
     monkeypatch.setattr(cli, "SLOW_PHASE_S", 0.0)
     code, out, err = show(capsys, url, "--now", str(clock()))
     assert code == 0

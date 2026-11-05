@@ -10,7 +10,7 @@ integers; nothing here reads a clock."""
 import json
 
 import pytest
-from backends import admitted, over_backends
+from backends import admitted, one_writer, over_backends
 
 from quarrylith import cli
 from quarrylith.order.merge import MergeClass, classify
@@ -622,10 +622,10 @@ def test_classify_writes_nothing_and_reads_only_the_contract(backend, record, cl
 def test_a_read_only_handle_classifies(backend, record, opener, clock):
     """templet:3163 -- a handle opened read-only gives the same class."""
     m = ready_to_merge(record, clock)
+    expected = classify(record, m.n, settings=DEFAULT)
+    one_writer(backend, record)
     reader = opener(readonly=True)
-    assert classify(reader, m.n, settings=DEFAULT) == classify(
-        record, m.n, settings=DEFAULT
-    )
+    assert classify(reader, m.n, settings=DEFAULT) == expected
 
 
 # -- the command ----------------------------------------------------------
@@ -642,6 +642,7 @@ def test_order_merge_prints_auto_with_its_rule(backend, record, url, clock, caps
     """templet:3163 -- `order merge URL NUMBER` prints the item's class, and
     for `auto` the rule."""
     m = ready_to_merge(record, clock)
+    one_writer(backend, record)
     code, out, err = merge(capsys, url, str(m.n))
     assert code == 0 and err == ""
     assert out.splitlines() == [f"#{m.n}: auto (rule pool-approved)"]
@@ -652,10 +653,11 @@ def test_order_merge_prints_every_reason(backend, record, url, clock, capsys):
     """templet:3163 -- for `user`, one `why:` line per reason."""
     m = ready_to_merge(record, clock, risk=6)
     _draft(m)
+    got = classify(record, m.n, settings=DEFAULT)
+    one_writer(backend, record)
     code, out, err = merge(capsys, url, str(m.n))
     assert code == 0 and err == ""
     lines = out.splitlines()
-    got = classify(record, m.n, settings=DEFAULT)
     assert lines[0] == f"#{m.n}: user"
     assert lines[1:] == [f"why: {line}" for line in got.why]
     assert len(lines) >= 3
@@ -668,6 +670,7 @@ def test_order_merge_reads_the_settings_file(
     """templet:3163 -- `--settings FILE` is a JSON object of `Settings`'
     fields, its `merge_rules` a list of rules."""
     m = ready_to_merge(record, clock, risk=6)
+    one_writer(backend, record)
     path = tmp_path / "settings.json"
     rules = [{"name": "wider", "risk_at_most": 7, "reviews": ["pool"]}]
     path.write_text(json.dumps({"merge_rules": rules}))
@@ -686,6 +689,7 @@ def test_order_merge_refuses_what_is_not_whole(
     problems, an unknown field, a file that is not there, and an item the
     record does not hold."""
     m = ready_to_merge(record, clock)
+    one_writer(backend, record)
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"merge_rules": [{"name": "x", "risk_at_most": 11}]}))
     code, out, err = merge(capsys, url, str(m.n), "--settings", str(bad))
@@ -706,6 +710,7 @@ def test_order_merge_takes_timing_and_debug(backend, record, url, clock, capsys)
     """templet:3163 -- `--timing` and `--debug` write to stderr and leave
     stdout as it was."""
     m = ready_to_merge(record, clock)
+    one_writer(backend, record)
     _, plain, _ = merge(capsys, url, str(m.n))
     code, out, err = merge(capsys, url, str(m.n), "--timing", "--debug")
     assert code == 0 and out == plain
@@ -722,6 +727,7 @@ def test_order_merge_prints_a_slow_phase(
     """templet:3163 -- a phase that takes longer than the bound is printed
     with its elapsed time."""
     m = ready_to_merge(record, clock)
+    one_writer(backend, record)
     monkeypatch.setattr(cli, "SLOW_PHASE_S", 0.0)
     code, out, err = merge(capsys, url, str(m.n))
     assert code == 0

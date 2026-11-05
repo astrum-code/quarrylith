@@ -4,8 +4,27 @@ clock the tests move, and an opener for more handles on the same record."""
 
 import pytest
 from backends import Clock, url_for
+from hengestore import guarding, stop_all
 
 from quarrylith.record import contract
+
+
+@pytest.fixture(scope="session", autouse=True)
+def guarded_henge():
+    """Every Henge record of the suite reaches its store through `Guarded`:
+    no delete, no listing, no get_many past 1,000 keys. The stores stop at
+    the end."""
+    henge = getattr(contract, "henge", None)
+    if henge is None:
+        yield
+        return
+    connect = henge._connect
+    henge._connect = guarding(connect)
+    try:
+        yield
+    finally:
+        henge._connect = connect
+        stop_all()
 
 
 @pytest.fixture

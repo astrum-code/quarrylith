@@ -1,0 +1,792 @@
+{
+ "bookkeeping": {
+  "beats": [],
+  "cursors": []
+ },
+ "format": 1,
+ "journal": [
+  {
+   "actor": "alpha",
+   "at": 1700000000000,
+   "data": {
+    "id": "0001",
+    "standing": "admitted"
+   },
+   "kind": "effort.file",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:efforts"
+     ],
+     {
+      "key": "next:efforts",
+      "value": 2
+     }
+    ],
+    [
+     "efforts",
+     [
+      "0001"
+     ],
+     {
+      "budget": {},
+      "concluded_at": null,
+      "created_at": 1700000000000,
+      "evidence": {},
+      "gates": {},
+      "id": "0001",
+      "inputs": {},
+      "order": {
+       "rule": "unblocks-then-age"
+      },
+      "outcome": null,
+      "owner": "owner-a",
+      "slug": "e1",
+      "standing": "admitted",
+      "statement": "Do the thing",
+      "title": "Effort 1",
+      "tools": {}
+     }
+    ]
+   ],
+   "seq": 1,
+   "subject": "effort:0001",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000000000,
+   "data": {
+    "drivers": [
+     "process"
+    ],
+    "labels": [],
+    "name": "n1"
+   },
+   "kind": "node.declare",
+   "puts": [
+    [
+     "nodes",
+     [
+      "n1"
+     ],
+     {
+      "declared_at": 1700000000000,
+      "drivers": [
+       "process"
+      ],
+      "labels": [],
+      "name": "n1",
+      "retired_at": null
+     }
+    ]
+   ],
+   "seq": 2,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000000000,
+   "data": {
+    "amount": 8192,
+    "node": "n1",
+    "resource": "memory"
+   },
+   "kind": "capacity.set",
+   "puts": [
+    [
+     "capacity",
+     [
+      "n1",
+      "memory"
+     ],
+     {
+      "amount": 8192,
+      "at": 1700000000000,
+      "declared_by": "alpha",
+      "node": "n1",
+      "resource": "memory",
+      "unit": "bytes"
+     }
+    ]
+   ],
+   "seq": 3,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000000000,
+   "data": {
+    "amount": 3,
+    "node": "n1",
+    "resource": "slots"
+   },
+   "kind": "capacity.set",
+   "puts": [
+    [
+     "capacity",
+     [
+      "n1",
+      "slots"
+     ],
+     {
+      "amount": 3,
+      "at": 1700000000000,
+      "declared_by": "alpha",
+      "node": "n1",
+      "resource": "slots",
+      "unit": "slots"
+     }
+    ]
+   ],
+   "seq": 4,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000001000,
+   "data": {
+    "holder": "cache",
+    "ids": [
+     1
+    ],
+    "needs": {
+     "memory": 1024
+    },
+    "node": "n1"
+   },
+   "kind": "reserve",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:reservations"
+     ],
+     {
+      "key": "next:reservations",
+      "value": 2
+     }
+    ],
+    [
+     "reservations",
+     [
+      1
+     ],
+     {
+      "amount": 1024,
+      "from_at": 1700000001000,
+      "holder": "cache",
+      "id": 1,
+      "node": "n1",
+      "released_at": null,
+      "resource": "memory",
+      "run": null,
+      "task": null,
+      "until_at": null,
+      "why": null
+     }
+    ]
+   ],
+   "seq": 5,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000001000,
+   "data": {
+    "holder": "podman",
+    "ids": [
+     2
+    ],
+    "needs": {
+     "memory": 2048
+    },
+    "node": "n1"
+   },
+   "kind": "reserve",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:reservations"
+     ],
+     {
+      "key": "next:reservations",
+      "value": 3
+     }
+    ],
+    [
+     "reservations",
+     [
+      2
+     ],
+     {
+      "amount": 2048,
+      "from_at": 1700000001000,
+      "holder": "podman",
+      "id": 2,
+      "node": "n1",
+      "released_at": null,
+      "resource": "memory",
+      "run": null,
+      "task": null,
+      "until_at": null,
+      "why": null
+     }
+    ]
+   ],
+   "seq": 6,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000002000,
+   "data": {
+    "id": 2,
+    "node": "n1",
+    "why": "the machine shrank"
+   },
+   "kind": "reserve.release",
+   "puts": [
+    [
+     "reservations",
+     [
+      2
+     ],
+     {
+      "amount": 2048,
+      "from_at": 1700000001000,
+      "holder": "podman",
+      "id": 2,
+      "node": "n1",
+      "released_at": 1700000002000,
+      "resource": "memory",
+      "run": null,
+      "task": null,
+      "until_at": null,
+      "why": "the machine shrank"
+     }
+    ]
+   ],
+   "seq": 7,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000002000,
+   "data": {
+    "holder": "podman",
+    "ids": [
+     3
+    ],
+    "needs": {
+     "memory": 3072
+    },
+    "node": "n1"
+   },
+   "kind": "reserve",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:reservations"
+     ],
+     {
+      "key": "next:reservations",
+      "value": 4
+     }
+    ],
+    [
+     "reservations",
+     [
+      3
+     ],
+     {
+      "amount": 3072,
+      "from_at": 1700000002000,
+      "holder": "podman",
+      "id": 3,
+      "node": "n1",
+      "released_at": null,
+      "resource": "memory",
+      "run": null,
+      "task": null,
+      "until_at": null,
+      "why": null
+     }
+    ]
+   ],
+   "seq": 8,
+   "subject": "node:n1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000002000,
+   "data": {
+    "effort": "0001",
+    "id": 1,
+    "kind": "job",
+    "number": null
+   },
+   "kind": "task.file",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:tasks"
+     ],
+     {
+      "key": "next:tasks",
+      "value": 2
+     }
+    ],
+    [
+     "tasks",
+     [
+      1
+     ],
+     {
+      "attempts": 0,
+      "created_at": 1700000002000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 1,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "memory": 512,
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "open",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ]
+   ],
+   "seq": 9,
+   "subject": "task:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000003000,
+   "data": {
+    "attempt": 1,
+    "fence": null,
+    "holder": "alpha",
+    "node": "n1",
+    "reservations": [
+     4,
+     5
+    ],
+    "run": 1,
+    "task": 1
+   },
+   "kind": "run.start",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:runs"
+     ],
+     {
+      "key": "next:runs",
+      "value": 2
+     }
+    ],
+    [
+     "tasks",
+     [
+      1
+     ],
+     {
+      "attempts": 1,
+      "created_at": 1700000002000,
+      "effort": "0001",
+      "ended_at": null,
+      "flags": [],
+      "id": 1,
+      "kind": "job",
+      "labels": [],
+      "loop": {
+       "interval_s": 0,
+       "max_attempts": 1
+      },
+      "needs": {
+       "memory": 512,
+       "slots": 1
+      },
+      "not_before": null,
+      "number": null,
+      "sandbox": "process",
+      "schedule": null,
+      "state": "running",
+      "supervision": {
+       "beat_s": null,
+       "expect_s": null
+      }
+     }
+    ],
+    [
+     "runs",
+     [
+      1
+     ],
+     {
+      "attempt": 1,
+      "branch": null,
+      "cost": {},
+      "expect_until": 1700000063000,
+      "fence": null,
+      "finished_at": null,
+      "footprint": {},
+      "harness": {},
+      "holder": "alpha",
+      "id": 1,
+      "node": "n1",
+      "outcome": null,
+      "pgid": null,
+      "phase": "started",
+      "phase_at": 1700000003000,
+      "reason": null,
+      "sandbox": "process",
+      "started_at": 1700000003000,
+      "task": 1
+     }
+    ],
+    [
+     "meta",
+     [
+      "next:reservations"
+     ],
+     {
+      "key": "next:reservations",
+      "value": 6
+     }
+    ],
+    [
+     "reservations",
+     [
+      4
+     ],
+     {
+      "amount": 512,
+      "from_at": 1700000003000,
+      "holder": "alpha",
+      "id": 4,
+      "node": "n1",
+      "released_at": null,
+      "resource": "memory",
+      "run": 1,
+      "task": 1,
+      "until_at": null,
+      "why": null
+     }
+    ],
+    [
+     "reservations",
+     [
+      5
+     ],
+     {
+      "amount": 1,
+      "from_at": 1700000003000,
+      "holder": "alpha",
+      "id": 5,
+      "node": "n1",
+      "released_at": null,
+      "resource": "slots",
+      "run": 1,
+      "task": 1,
+      "until_at": null,
+      "why": null
+     }
+    ]
+   ],
+   "seq": 10,
+   "subject": "run:1",
+   "via": "cli"
+  },
+  {
+   "actor": "alpha",
+   "at": 1700000004000,
+   "data": {
+    "kind": "measure",
+    "reading": 1,
+    "source": "host"
+   },
+   "kind": "reading",
+   "puts": [
+    [
+     "meta",
+     [
+      "next:readings"
+     ],
+     {
+      "key": "next:readings",
+      "value": 2
+     }
+    ],
+    [
+     "readings",
+     [
+      1
+     ],
+     {
+      "at": 1700000004000,
+      "id": 1,
+      "kind": "measure",
+      "source": "host",
+      "value": {
+       "memory_available": 2048
+      }
+     }
+    ]
+   ],
+   "seq": 11,
+   "subject": "reading:host",
+   "via": "cli"
+  }
+ ],
+ "records": {
+  "capacity": [
+   {
+    "amount": 8192,
+    "at": 1700000000000,
+    "declared_by": "alpha",
+    "node": "n1",
+    "resource": "memory",
+    "unit": "bytes"
+   },
+   {
+    "amount": 3,
+    "at": 1700000000000,
+    "declared_by": "alpha",
+    "node": "n1",
+    "resource": "slots",
+    "unit": "slots"
+   }
+  ],
+  "change_text": [],
+  "changes": [],
+  "checks": [],
+  "comments": [],
+  "deps": [],
+  "effort_links": [],
+  "efforts": [
+   {
+    "budget": {},
+    "concluded_at": null,
+    "created_at": 1700000000000,
+    "evidence": {},
+    "gates": {},
+    "id": "0001",
+    "inputs": {},
+    "order": {
+     "rule": "unblocks-then-age"
+    },
+    "outcome": null,
+    "owner": "owner-a",
+    "slug": "e1",
+    "standing": "admitted",
+    "statement": "Do the thing",
+    "title": "Effort 1",
+    "tools": {}
+   }
+  ],
+  "holds": [],
+  "imports": [],
+  "item_text": [],
+  "items": [],
+  "leases": [],
+  "left": [],
+  "merges": [],
+  "meta": [
+   {
+    "key": "next:efforts",
+    "value": 2
+   },
+   {
+    "key": "next:readings",
+    "value": 2
+   },
+   {
+    "key": "next:reservations",
+    "value": 6
+   },
+   {
+    "key": "next:runs",
+    "value": 2
+   },
+   {
+    "key": "next:tasks",
+    "value": 2
+   }
+  ],
+  "nodes": [
+   {
+    "declared_at": 1700000000000,
+    "drivers": [
+     "process"
+    ],
+    "labels": [],
+    "name": "n1",
+    "retired_at": null
+   }
+  ],
+  "pulled": [],
+  "questions": [],
+  "readings": [
+   {
+    "at": 1700000004000,
+    "id": 1,
+    "kind": "measure",
+    "source": "host",
+    "value": {
+     "memory_available": 2048
+    }
+   }
+  ],
+  "reservations": [
+   {
+    "amount": 1024,
+    "from_at": 1700000001000,
+    "holder": "cache",
+    "id": 1,
+    "node": "n1",
+    "released_at": null,
+    "resource": "memory",
+    "run": null,
+    "task": null,
+    "until_at": null,
+    "why": null
+   },
+   {
+    "amount": 2048,
+    "from_at": 1700000001000,
+    "holder": "podman",
+    "id": 2,
+    "node": "n1",
+    "released_at": 1700000002000,
+    "resource": "memory",
+    "run": null,
+    "task": null,
+    "until_at": null,
+    "why": "the machine shrank"
+   },
+   {
+    "amount": 3072,
+    "from_at": 1700000002000,
+    "holder": "podman",
+    "id": 3,
+    "node": "n1",
+    "released_at": null,
+    "resource": "memory",
+    "run": null,
+    "task": null,
+    "until_at": null,
+    "why": null
+   },
+   {
+    "amount": 512,
+    "from_at": 1700000003000,
+    "holder": "alpha",
+    "id": 4,
+    "node": "n1",
+    "released_at": null,
+    "resource": "memory",
+    "run": 1,
+    "task": 1,
+    "until_at": null,
+    "why": null
+   },
+   {
+    "amount": 1,
+    "from_at": 1700000003000,
+    "holder": "alpha",
+    "id": 5,
+    "node": "n1",
+    "released_at": null,
+    "resource": "slots",
+    "run": 1,
+    "task": 1,
+    "until_at": null,
+    "why": null
+   }
+  ],
+  "reviews": [],
+  "run_text": [],
+  "runs": [
+   {
+    "attempt": 1,
+    "branch": null,
+    "cost": {},
+    "expect_until": 1700000063000,
+    "fence": null,
+    "finished_at": null,
+    "footprint": {},
+    "harness": {},
+    "holder": "alpha",
+    "id": 1,
+    "node": "n1",
+    "outcome": null,
+    "pgid": null,
+    "phase": "started",
+    "phase_at": 1700000003000,
+    "reason": null,
+    "sandbox": "process",
+    "started_at": 1700000003000,
+    "task": 1
+   }
+  ],
+  "statements": [],
+  "tasks": [
+   {
+    "attempts": 1,
+    "created_at": 1700000002000,
+    "effort": "0001",
+    "ended_at": null,
+    "flags": [],
+    "id": 1,
+    "kind": "job",
+    "labels": [],
+    "loop": {
+     "interval_s": 0,
+     "max_attempts": 1
+    },
+    "needs": {
+     "memory": 512,
+     "slots": 1
+    },
+    "not_before": null,
+    "number": null,
+    "sandbox": "process",
+    "schedule": null,
+    "state": "running",
+    "supervision": {
+     "beat_s": null,
+     "expect_s": null
+    }
+   }
+  ]
+ }
+}

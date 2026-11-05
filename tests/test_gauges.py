@@ -25,6 +25,7 @@ PAGE = (
     "capacity",
     "reserved",
     "free",
+    "measured",
     "queue_depth",
     "runs_active",
     "run_age",
@@ -181,6 +182,10 @@ def fixture(record, clock):
     reading(30, 0.2, at(t0, 300))
     reading(50, 0.3, at(t0, 300))
     record.record_reading("other", "five_hour", {"utilization": 0.99})
+    clock.at = at(t0, 58)
+    host = {"node": "n1", "memory_available": 2000, "disk_free": 5000}
+    consumers = {"cache": {"memory": 1100}}
+    record.record_reading("host", "measure", {**host, "consumers": consumers})
 
     clock.at = at(t0, 50)
     record.beat(r1)
@@ -232,6 +237,11 @@ def test_every_gauge_computes_from_a_fixture_through_the_contract(record, clock)
             series(node="n1", resource="memory"): 2560,
             series(node="n1", resource="slots"): 1,
             series(node="n2", resource="slots"): 2,
+        },
+        "measured": {
+            series(node="n1", resource="disk", holder=""): 5000,
+            series(node="n1", resource="memory", holder=""): 2000,
+            series(node="n1", resource="memory", holder="cache"): 1100,
         },
         "queue_depth": {
             series(of="items", state="claimed", effort="0001", label="*"): 2,

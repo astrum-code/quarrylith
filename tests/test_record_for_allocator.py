@@ -192,6 +192,63 @@ def test_replace_reservation_to_the_same_amount_writes_nothing(record, clock):
 
 
 @over_backends
+def test_a_reservation_with_an_end_is_replaced_open_ended(record, clock):
+    """templet:3159 -- the replacement of a reservation that has an end runs
+    open ended, even by the same amount: one event and a new id."""
+    host(record)
+    (a,) = record.reserve(
+        "n1",
+        {"memory": 100},
+        holder="x",
+        from_at=clock(),
+        until_at=clock() + MIN,
+    )
+    head = record.head()
+    new = record.replace_reservation(a, 100, "open it")
+    assert new != a and record.head() == head + 1
+    assert record.get("reservations", new)["until_at"] is None
+    assert record.get("reservations", a)["released_at"] is not None
+
+
+@over_backends
+def test_a_shrink_of_one_with_an_end_meets_a_later_one(record, clock):
+    """templet:3159 -- a shrink is checked too: the replacement runs on
+    forever, so it is refused whole when a later reservation is in its way."""
+    host(record)
+    (a,) = record.reserve(
+        "n1",
+        {"memory": 100},
+        holder="x",
+        from_at=clock(),
+        until_at=clock() + MIN,
+    )
+    record.reserve(
+        "n1",
+        {"memory": 4096},
+        holder="later",
+        from_at=clock() + 2 * MIN,
+        until_at=None,
+    )
+    head = record.head()
+    with pytest.raises(Refused, match="no room"):
+        record.replace_reservation(a, 50, "shrink, and open ended")
+    assert record.head() == head
+    assert record.get("reservations", a)["released_at"] is None
+
+
+@over_backends
+def test_only_its_own_resource_counts(record, clock):
+    """templet:3159 -- the room of a replace is the node's room of the
+    reservation's own resource: a node's slots do not count against its
+    memory."""
+    host(record)
+    record.reserve("n1", {"slots": 3}, holder="runs", from_at=clock(), until_at=None)
+    mine = standing(record, clock, "podman", 100)
+    new = record.replace_reservation(mine, 4096, "to the last byte")
+    assert record.get("reservations", new)["amount"] == 4096
+
+
+@over_backends
 def test_replace_reservation_holds_the_invariants_under_replay(record, clock, tmp_path):
     """templet:3159 -- after replaces, the replay of the journal equals the
     records, `check()` finds nothing, and the dump loads into every backend
@@ -395,6 +452,79 @@ def test_measured_is_the_latest_reading_whatever_its_age(record, clock):
     got = measured(record, clock(), window_ms=MIN)
     assert got[series(node="n1", resource="memory", holder="")] == 42
     assert got[series(node="n2", resource="memory", holder="")] == 7
+
+
+class Counting:
+    """The contract's reads, with the limits of the `readings` reads kept and
+    a bound on how many may be made."""
+
+    def __init__(self, record, most=12):
+        self.record, self.limits, self.most = record, [], most
+
+    def __getattr__(self, name):
+        read = getattr(self.record, name)
+        if name != "read":
+            return read
+
+        def counted(kind, /, **kw):
+            if kind == "readings":
+                self.limits.append(kw.get("limit"))
+                assert len(self.limits) <= self.most, "the reads do not end"
+            return read(kind, **kw)
+
+        return counted
+
+
+@over_backends
+def test_measured_finds_a_node_behind_many_readings_of_another(record, clock):
+    """templet:3159 -- the read is limited, from twice the live nodes, and
+    doubles until every live node is found: a node whose latest reading sits
+    behind many of another's is still found, and a read does not fetch every
+    reading."""
+    host(record)
+    host(record, name="n2")
+    measure(record, clock, node="n1", memory_available=42)
+    for i in range(9):
+        clock.step()
+        measure(record, clock, node="n2", memory_available=i)
+    seen = Counting(record)
+    got = gauges.by_name("measured").compute(seen, now=clock(), window_ms=MIN)
+    memory = {
+        lab["node"]: v
+        for lab, v in got
+        if lab["resource"] == "memory" and not lab["holder"]
+    }
+    assert memory == {"n1": 42, "n2": 8}
+    assert seen.limits == [4, 8, 16]
+
+
+@over_backends
+def test_measured_stops_at_the_first_read_that_comes_back_short(record, clock):
+    """templet:3159 -- a live node with no reading ends the loop with a read
+    that returns fewer rows than asked: the gauge reads once more than the
+    rows it holds need, never without end, and gives the nodes it found."""
+    host(record)
+    host(record, name="n2")
+    measure(record, clock, node="n1", memory_available=42)
+    for _ in range(5):
+        clock.step()
+        record.record_reading("host", "measure", {"memory_available": 5})
+    seen = Counting(record)
+    got = gauges.by_name("measured").compute(seen, now=clock(), window_ms=MIN)
+    assert [(lab["node"], v) for lab, v in got if lab["resource"] == "memory"] == [
+        ("n1", 42)
+    ]
+    assert seen.limits == [4, 8]
+
+
+@over_backends
+def test_measured_reads_nothing_when_no_node_is_live(record, clock):
+    """templet:3159 -- with no live node there is nothing to find, and no
+    reading is read."""
+    measure(record, clock)
+    seen = Counting(record)
+    assert gauges.by_name("measured").compute(seen, now=clock(), window_ms=MIN) == []
+    assert seen.limits == []
 
 
 @over_backends

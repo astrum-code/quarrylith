@@ -137,14 +137,22 @@ def measured(record, *, now, window_ms):
     reading's age is the allocator's to judge, not the gauge's."""
     live = {n["name"] for n in record.read("nodes") if n["retired_at"] is None}
     found = {}
-    for reading in record.read("readings", source="host", kind="measure", desc=True):
-        value = _dict(reading["value"])
-        node = value.get("node")
-        if not isinstance(node, str) or node not in live or node in found:
-            continue
-        found[node] = value
-        if len(found) == len(live):
+    limit = 2 * len(live)
+    while len(found) < len(live):
+        # the newest readings first, a window that doubles until every live
+        # node is found or the window holds all the readings there are
+        rows = record.read(
+            "readings", source="host", kind="measure", desc=True, limit=limit
+        )
+        found = {}
+        for reading in rows:
+            value = _dict(reading["value"])
+            node = value.get("node")
+            if isinstance(node, str) and node in live and node not in found:
+                found[node] = value
+        if len(rows) < limit:
             break
+        limit *= 2
     out = {}
     for node, value in found.items():
         for resource, key in (("memory", "memory_available"), ("disk", "disk_free")):

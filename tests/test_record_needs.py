@@ -237,6 +237,8 @@ def test_no_wait_and_no_operation_where_a_span_would_hold_them_up(opener):
                 item(rec, "in a reading")
     assert time.monotonic() - started < 3
     assert rec.head() == head
+    # and the refusal ends with the span
+    assert rec.events(head, wait=0.01) == []
 
 
 @over_backends

@@ -49,6 +49,7 @@ EVENT_KINDS = (
     "reserve.release",
     "run.start",
     "run.phase",
+    "run.pgid",
     "run.finish",
     "change.open",
     "change.edit",

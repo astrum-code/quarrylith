@@ -965,8 +965,11 @@ class HengeRecord(Record):
     def load(self, dump):
         """Load a dump into an empty record, resumably: `loading` is put first,
         with the dump's digest; each event goes through the commit protocol;
-        `loading` is put to null at the end. A load stopped part-way goes on
-        from `head() + 1` when given the same dump, and refuses any other."""
+        `loading` is put to null at the end, and one sync follows, so a load
+        that returned is durable. A sync that is not answered gives
+        `Unavailable` with the load still in progress: the same dump finishes
+        it. A load stopped part-way goes on from `head() + 1` when given the
+        same dump, and refuses any other."""
         self._writable()
         journal = contract.check_dump(dump)
         digest = hashlib.sha256(schema.canonical(dump).encode("utf-8")).hexdigest()
@@ -1031,6 +1034,9 @@ class HengeRecord(Record):
                     lambda cur: SKIP if cur is None else None,
                     why="load",
                 )
+                # the load's end and its unsynced bookkeeping rows are durable
+                # before the caller is told it is done
+                self._sync("load")
                 self._loading = None
             except _Found as e:
                 self._fail("load", str(e), e)
@@ -1152,8 +1158,9 @@ class HengeRecord(Record):
         each through the guard (an own put, or a fresh read and a check), then
         one sync, as SQLite's commit is, so a cursor never steps back across a
         power cut. A cursor takes the larger seq, a beat the later time. A
-        load's rows need no sync of their own: an unsynced one is lost only
-        with the load's end, and the next open goes on with the same dump."""
+        load's rows need no sync of their own: the load's last sync, after it
+        puts `loading` to null, covers them, and a load stopped before it goes
+        on with the same dump."""
         key = schema.key_of(kind, row)
         rkey = [kind, *key]
         cur = self._kept.get((self.R, _ckey(rkey)))

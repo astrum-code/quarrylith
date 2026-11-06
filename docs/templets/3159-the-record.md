@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 79e5399
+    at: 6f950ab
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect

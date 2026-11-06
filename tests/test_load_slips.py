@@ -496,24 +496,226 @@ def dump_two(tmp_path):
     return two_batches(tmp_path, BATCH)[0]
 
 
-def test_a_new_chunk_never_overwrites_another(monkeypatch):
+def a_split_met_by(fake, chunk_held, listed, faults=0):
+    """A writer whose fifth effort splits `efforts`'s `*` chunk, its plan already
+    read, when number 1 comes to hold `chunk_held`, listed by the directory or
+    not. `faults`: the writer's fresh read of the directory fails that many
+    times. Returns the writer, the key of number 1, and the directory's."""
+    idx = henge.spaces("rec")["idx"]
+    ix = ("efforts", "*", None)
+    number, directory = henge.ix_key(ix, 1), henge.ix_key(ix, "dir")
+    armed = {"on": False, "done": False}
+
+    def at(space, key, value, n):
+        if armed["on"] and not armed["done"] and space == idx and key == number:
+            armed["done"] = True
+            fake._apply_put("x", idx, number, chunk_held, None)
+            if listed:
+                entry = [[1, chunk_held[0]]]
+                fake._apply_put("x", idx, directory, entry, None)
+            if faults:
+                fake.fault(
+                    lambda who, op, sp, k, v: op == "get"
+                    and sp == idx
+                    and list(k) == directory,
+                    Unavailable_of_store(),
+                    times=faults,
+                )
+
+    rec = handle(Calling(fake.client("w"), at), "alpha")
+    rec.init()
+    for i in range(4):
+        rec.file_effort(f"e{i}", f"s-{i}", f"e{i}", "owner-a", PARTS)
+    armed["on"] = True
+    return rec, number, directory
+
+
+def Unavailable_of_store():
+    from henge.core import errors
+
+    return errors.Unavailable("the store is not answering")
+
+
+def test_a_new_chunk_never_overwrites_a_listed_one(monkeypatch):
     """templet:3159 -- Henge, row 3: a split's new chunk goes `absent`, or is the
-    chunk already there. A number that holds some other chunk means the plan is
-    stale: the writer stops, and that chunk stands."""
+    chunk already there. A number the directory lists that holds some other chunk
+    means the plan read across another's split: the writer stops, and that chunk
+    stands."""
     monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
     monkeypatch.setattr(henge, "PIECE_KEYS", 2)
     fake = FakeStore()
-    rec = handle(fake.client("w"), "alpha")
-    rec.init()
     idx = henge.spaces("rec")["idx"]
-    ix = ("efforts", "*", None)
     held = [["zz"]]
-    fake._apply_put("x", idx, henge.ix_key(ix, 1), held, None)
-    with pytest.raises((Unavailable, Unknown)):
-        for i in range(8):
-            rec.file_effort(f"e{i}", f"s-{i}", f"e{i}", "owner-a", PARTS)
-    assert fake.value(idx, henge.ix_key(ix, 1)) == held
+    rec, number, _ = a_split_met_by(fake, held, listed=True)
+    with pytest.raises((Unavailable, Unknown), match="stale plan"):
+        rec.file_effort("e4", "s-4", "e4", "owner-a", PARTS)
+    assert fake.value(idx, number) == held
     assert rec._closed is not None
+
+
+def test_a_new_chunk_overwrites_a_leftover_no_directory_lists(monkeypatch):
+    """templet:3159 -- Henge, row 3: a number no directory lists holds a dead
+    writer's leftover, and the writer puts its own over it, with the version it
+    read, and goes on."""
+    monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
+    monkeypatch.setattr(henge, "PIECE_KEYS", 2)
+    fake = FakeStore()
+    idx = henge.spaces("rec")["idx"]
+    held = [["zz"]]
+    rec, number, directory = a_split_met_by(fake, held, listed=False)
+    rec.file_effort("e4", "s-4", "e4", "owner-a", PARTS)
+    assert rec._closed is None
+    assert fake.value(idx, number) != held
+    assert [n for n, _ in fake.value(idx, directory)] == [1]
+    assert [r["id"] for r in rec.read("efforts")] == [f"e{i}" for i in range(5)]
+    assert rec.check() == []
+    rec.close()
+
+
+@pytest.mark.parametrize("faults", [1, 1000])
+def test_a_new_chunks_read_of_the_directory_is_tried_again(monkeypatch, faults):
+    """templet:3159 -- Henge, row 3 and the record's timeout: the fresh read of the
+    directory, at a number that holds another chunk, is a read inside a retry of a
+    put. It is tried again after a pause, and past the timeout the operation ends
+    as any such put does, `Unknown`, with the record closed."""
+    monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
+    monkeypatch.setattr(henge, "PIECE_KEYS", 2)
+    fake = FakeStore()
+    rec, _, _ = a_split_met_by(fake, [["zz"]], listed=False, faults=faults)
+    rec.timeout_s = 0.3
+    if faults == 1:
+        rec.file_effort("e4", "s-4", "e4", "owner-a", PARTS)
+        assert rec._closed is None
+        assert rec.check() == []
+        rec.close()
+    else:
+        with pytest.raises(Unknown):
+            rec.file_effort("e4", "s-4", "e4", "owner-a", PARTS)
+        assert rec._closed is not None
+
+
+def an_ack_killed_at(fake, j, kind):
+    """The writer's fifth cursor or beat splits its `*` chunk, and it dies before
+    the j-th put of that. Returns whether it died."""
+    state = {"at": None}
+
+    def dies(space, key, value, n):
+        if state["at"] is not None and n == state["at"]:
+            raise Died()
+
+    client = Calling(fake.client("w"), dies)
+    rec = handle(client, "alpha")
+    rec.init()
+    admitted(rec)
+    if kind == "ack":
+        for key in "cdef":
+            rec.ack(key, 1)
+    else:
+        for key in (11, 12, 13, 14):
+            rec.beat(key)
+    state["at"] = client.puts + j
+    try:
+        if kind == "ack":
+            rec.ack("g", 1)
+        else:
+            rec.beat(15)
+    except Died:
+        rec._closed = "killed"
+        rec._shut()
+        return True
+    rec.close()
+    return False
+
+
+@pytest.mark.parametrize(
+    "kind,keys",
+    [
+        ("ack", ["z", "y", "g"]),
+        ("ack", ["0", "1", "g"]),
+        ("beat", [20, 21, 15]),
+        ("beat", [1, 2, 15]),
+    ],
+    ids=["ack-higher", "ack-lower", "beat-higher", "beat-lower"],
+)
+def test_a_dead_acks_leftover_stops_no_later_split(kind, keys, monkeypatch):
+    """templet:3159 -- Henge, row 3, one writer and the lock held: an `ack` or a
+    `beat` makes no entry, so nothing redoes one that dies inside a split, and its
+    new chunks stay, listed by no directory. It dies before each put, and other
+    keys, higher and lower, and its own, are taken, read, and `check()` is clean."""
+    monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
+    monkeypatch.setattr(henge, "PIECE_KEYS", 2)
+    monkeypatch.setattr(henge, "JOURNAL_CHUNK", 4)
+    died = 0
+    for j in range(1, 10):
+        fake = FakeStore()
+        if not an_ack_killed_at(fake, j, kind):
+            break
+        died += 1
+        for key in keys:
+            rec = on_fake(fake, "w2", actor="alpha", via="cli")
+            if kind == "ack":
+                rec.ack(key, 1)
+            else:
+                rec.beat(key)
+            rec.close()
+        rec = on_fake(fake, "reader")
+        if kind == "ack":
+            read = {r["consumer"] for r in rec.read("cursors")}
+        else:
+            read = {r["run"] for r in rec.read("beats")}
+        assert set(keys) <= read, (j, read)
+        assert rec.check() == [], j
+        rec.close()
+    assert died >= 3
+
+
+def test_a_dead_acks_leftover_on_a_real_store_at_the_pages_bounds():
+    """templet:3159 -- Henge, row 3: on a real `henge single`, at the page's own
+    8,192 keys a chunk: an `ack` that splits dies after its new chunks and before
+    the directory. Another consumer's `ack`, higher and lower, and its own, are
+    taken, each by a new open."""
+    with own_store("single") as running:
+        address = f"ipc://{running.folder}/henge.sock"
+
+        def opened(client):
+            rec = henge.HengeRecord(
+                client, "rec", actor="alpha", via="cli", timeout_s=10.0
+            )
+            rec.clock = Clock()
+            return rec
+
+        state = {"at": None}
+
+        def dies(space, key, value, n):
+            if state["at"] is not None and n == state["at"]:
+                raise Died()
+
+        client = Calling(Store.connect(address), dies)
+        rec = opened(client)
+        rec.init()
+        admitted(rec)
+        idx = henge.spaces("rec")["idx"]
+        direct = Store.connect(address)
+        keys = [[f"c{i:05d}"] for i in range(henge.CHUNK_KEYS)]
+        direct.put(idx, ["cursors", "*", 0], keys)
+        direct.close()
+        rec._forget()
+        state["at"] = client.puts + 3
+        with pytest.raises(Died):
+            rec.ack("c99999", 1)
+        rec._closed = "killed"
+        rec._shut()
+        for who in ("c99998", "d00000", "c99999"):
+            rec = opened(Store.connect(address))
+            rec.ack(who, 1)
+            assert rec._closed is None
+            rec.close()
+        rec = opened(Store.connect(address))
+        try:
+            read = {r["consumer"] for r in rec.read("cursors")}
+            assert read == {"c99998", "d00000", "c99999"}
+        finally:
+            rec.close()
 
 
 # -- a redo crossed with the loader, by pairs of calls ----------------------------
@@ -557,7 +759,8 @@ class Stop:
 def a_pair(dump, i, j):
     """The loader stopped before its call i; a fresh open stopped before its call
     j; the loader goes to its end; the open goes on. Returns None if the loader
-    has no call i, else whether the open reached its call j."""
+    has no call i, else what the open met: whether it reached its call j, and
+    whether a stale plan stopped it."""
     fake = fresh(FakeStore)
     stopped = Stop(fake.client("R"), j)
     opened, state = {}, {}
@@ -567,8 +770,8 @@ def a_pair(dump, i, j):
             opened["rec"] = henge.HengeRecord(
                 stopped, "rec", actor="r", via="load", timeout_s=1.0
             )
-        except ENDED:
-            pass
+        except ENDED as e:
+            state["stale"] = "stale plan" in str(e)
 
     thread = threading.Thread(target=second, daemon=True)
 
@@ -602,8 +805,11 @@ def a_pair(dump, i, j):
     if returned:
         rec = on_fake(fake, "reader")
         assert rec.dump() == dump, (i, j)
+        # a stop leaves nothing in the way of what comes after
+        rec.note("past", "after the pair")
+        assert rec.check() == [], (i, j)
         rec.close()
-    return state["reached"]
+    return state["reached"], state.get("stale", False)
 
 
 def some_pairs(seed, count, calls, opens):
@@ -625,13 +831,16 @@ def test_pairs_of_calls_around_a_split(tmp_path, monkeypatch):
     pairs = [(i, j) for i in range(72, 79) for j in range(17, 22)]
     pairs += some_pairs(3159, 40, 150, 60)
     end = time.monotonic() + 25
-    ran = 0
+    ran = stale = 0
     for i, j in pairs:
-        a_pair(dump, i, j)
+        got = a_pair(dump, i, j)
         ran += 1
+        stale += 1 if got is not None and got[1] else 0
         if time.monotonic() > end:
             break
     assert ran >= 30
+    # the window above is this dump's calls: if they move, say so
+    assert stale >= 1, "no pair met a stale plan: the window has moved"
 
 
 def test_pairs_of_calls_on_a_net_nothing(tmp_path, monkeypatch):
@@ -655,6 +864,9 @@ def test_pairs_of_calls_on_a_net_nothing(tmp_path, monkeypatch):
 class Scheduler:
     """One store call at a time, among the handles, by a seeded choice."""
 
+    #: A gate no count of the loader's calls opens: only a batch's end does.
+    SHUT = 10**9
+
     def __init__(self, rng):
         self.rng = rng
         self.cv = threading.Condition()
@@ -662,6 +874,8 @@ class Scheduler:
         self.calls = collections.Counter()
         self.grant = None
         self.deaths, self.gates = {}, {}
+        #: The writer's gate opens at the loader's boundary-th put of `applied`.
+        self.boundary = self.seen = 0
 
     def park(self, me):
         with self.cv:
@@ -698,7 +912,8 @@ class Scheduler:
                     n
                     for n in alive
                     if self.gates.get(n, 0) <= self.calls["L"] or "L" in self.done
-                ] or alive
+                ] or [n for n in alive if self.gates.get(n, 0) < Scheduler.SHUT]
+                ready = ready or alive
                 pick = (
                     last
                     if last in ready and self.rng.random() < stay
@@ -722,8 +937,14 @@ class Turn:
             self.scheduler.park(self.me)
         return getattr(self.inner, op)(*a, **k)
 
-    def put(self, *a, **k):
-        return self._call("put", *a, **k)
+    def put(self, space, key, value, **k):
+        s = self.scheduler
+        at_applied = list(key) == ["applied"] and space.endswith(".state")
+        if self.me == "L" and s.boundary and at_applied:
+            s.seen += 1
+            if s.seen == s.boundary:
+                s.gates["W"] = 0
+        return self._call("put", space, key, value, **k)
 
     def get(self, *a, **k):
         return self._call("get", *a, **k)
@@ -785,7 +1006,13 @@ def a_seeded_run(seed, batch, dump):
         def writes():
             for i in range(rng.randint(2, 6)):
                 try:
-                    writer.note("past", f"n{i}")
+                    items = writer.read("items")
+                    if items and rng.random() < 0.7:
+                        it = rng.choice(items)
+                        to = "blocked" if it["state"] != "blocked" else "ready"
+                        writer.move(it["number"], to, "the writer")
+                    else:
+                        writer.note("past", f"n{i}")
                 except Refused:
                     pass
                 except Unavailable:
@@ -794,6 +1021,12 @@ def a_seeded_run(seed, batch, dump):
 
         actors["W"] = writes
         scheduler.gates["W"] = rng.randint(1, scale)
+        if rng.random() < 0.7:
+            # to a batch's end, where it can take the next seq
+            scheduler.boundary = rng.randint(
+                1, max(1, len(dump["journal"]) // henge.LOAD_BATCH)
+            )
+            scheduler.gates["W"] = Scheduler.SHUT
     if rng.random() < 0.8:
         actors["R"] = opener("R", rng.random() < 0.4)
         scheduler.gates["R"] = rng.randint(1, scale)
@@ -833,8 +1066,9 @@ def a_seeded_run(seed, batch, dump):
 @pytest.mark.parametrize("batch", [2, 8])
 def test_a_seeded_scheduler_never_tears(batch, tmp_path, monkeypatch):
     """templet:3159 -- Henge, invariant 13: a seeded mix of a loader, fresh opens
-    and a writer open before the load, with deaths, one store call at a time, half
-    on chunks of 4 keys. Nothing is torn, in as many runs as fit a ceiling."""
+    and a writer open before the load that moves items, mostly from a batch's end,
+    with deaths, one store call at a time, on chunks of 4 keys. Nothing is torn, in
+    as many runs as fit a ceiling."""
     monkeypatch.setattr(henge, "LOAD_BATCH", batch)
     monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
     monkeypatch.setattr(henge, "PIECE_KEYS", 2)

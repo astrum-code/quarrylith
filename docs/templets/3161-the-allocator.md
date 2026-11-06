@@ -195,6 +195,7 @@ class Short:
     waits: bool           # can waiting alone ever make it fit?
     until: int | None     # a time after which it may fit (a budget reset), else None
     holders: list         # the three largest live holders of the resource, [(holder, amount)]
+    detail: str = ""      # a line for a cause the figures do not say: the floor, or why unmeasured
 
 @dataclass(frozen=True)
 class Refusal:
@@ -522,7 +523,7 @@ document names. On top of the seam it has:
 - **`measure(*, now)`**. It runs the probes and writes **one** reading,
   `record_reading("host", "measure", value)`, with value `{"node",
   "memory_total", "memory_available", "method", "disk_free", "consumers":
-  {name: {"memory": resident}}, "drift": [...]}`.
+  {name: {"memory": resident}}, "absent": {name: why}, "drift": [...]}`.
   - **`node`** names the machine the reading is of: the document's `node`. It
     should likely become a hostname later; it is the document's name now. The
     `measured` gauge reads it and skips a reading that has none. A record
@@ -532,14 +533,21 @@ document names. On top of the seam it has:
   - **With no document declared**, `measure` refuses (the record's `Refused`)
     and writes nothing: the document names the node, the work disk and the
     consumers to measure.
-  - A probe that fails writes no reading, and raises `ProbeError` naming the
-    probe. With no reading, `place` refuses `unmeasured` once `max_age_s`
+  - **A consumer that is down is not a failed probe.** One whose pid file is
+    missing or holds no number, or whose process is not running, has no
+    resident figure and is named in `absent` with why; the host's figures
+    are still written, so one service being down does not leave the host
+    unmeasured.
+  - A probe of the host that fails writes no reading, and raises
+    `ProbeError` naming the probe. With no reading, `place` refuses `unmeasured` once `max_age_s`
     passes, as today's guards hold on a failed reading.
   - **`method`** names how "available" was read. On macOS it is `vm_stat`'s
     free + inactive + purgeable + speculative pages (#3102's honest free).
     On Linux it is `/proc/meminfo`'s `MemAvailable`. The disk is
     `os.statvfs(disk_path)`. A consumer is the summed RSS (`ps -A -o
-    pid=,ppid=,rss=,comm=`) of its probe's processes.
+    pid=,ppid=,rss=,comm=`) of its probe's processes. The macOS figure counts
+    every inactive page and reads neither swap nor the compressor: the floor
+    is a floor on reclaimable memory, not a test of pressure.
   - The services (step 5) call `measure` on their beat, at most once a
     minute, and before a round whose latest reading is older than
     `max_age_s`.
@@ -1226,3 +1234,11 @@ later: nothing in the effort runs sessions through the queue.
   above the floor, and 0 while unmeasured; `measured_shorts(value, document,
   node, needs)` is the shared policy beside `table_shorts` and
   `budget_shorts` (this PR)
+- 2026-11-06 proposed: `Short` gains a trailing `detail` (a line for a cause the
+  figures do not say: the floor of a `measured` short, why a host is
+  `unmeasured`: no reading, another node's, old, or without figures); a
+  `measured` short's `free` is the available figure, not the room above the
+  floor; the reading gains `absent` (`{consumer: why}`) for a consumer that is
+  down, which is no failed probe; the observations are written before the
+  reading; the macOS figure counts every inactive page and reads neither swap
+  nor the compressor (this PR)

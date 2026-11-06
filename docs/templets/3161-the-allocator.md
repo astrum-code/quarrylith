@@ -3,7 +3,7 @@ title: The allocator
 owner: workbench
 mechanism: allocator
 templet: 3161
-status: agreed
+status: built
 base:
   quarrylith: bd0420d0
   benchLith: 2a8a78e5
@@ -21,7 +21,11 @@ pins:
       - src/quarrylith/record/contract.py::Record.finish_run
       - src/quarrylith/record/contract.py::Record.record_reading
       - src/quarrylith/record/contract.py::Record.state
-    at: bd0420d0
+    paths:
+      - src/quarrylith/allocator/
+      - src/quarrylith/alloc_cli.py
+      - src/quarrylith/cli.py
+    at: cdbee3ee
 ---
 
 # The allocator
@@ -104,8 +108,9 @@ flowchart LR
 | module | holds |
 |---|---|
 | `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`, the document as plain data and back, `to_data(document, figures=None)` and `document_from_data(raw)`; the shared policy: `classify`, `needs_of`, `table_shorts(reader, node, needs, *, now)`, `budget_shorts(reader, document, node, needs, *, now)`, and `allowance(reader, document, node, provider, *, now)`, the budget's allowance that `budget_shorts` and `headroom` both read |
-| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare` (which returns a `Declaration`: `wrote`, `refusals` by consumer, `failed`), `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
-| `quarrylith.cli` | gains `quarrylith alloc declare|show|place|measure|consumer` (below) |
+| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare` (which returns a `Declaration`: `wrote`, `refusals` by consumer, `failed`; with `dry_run=True` it writes nothing and returns the lines it would write), `declared`, `check_resize`, `resize`, `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
+| `quarrylith.allocator.show` | `snapshot(record, *, now)`, plain data of what is declared, held, free, measured and drifting, and `lines(snapshot)`, the text `alloc show` prints; it reads the record only |
+| `quarrylith.alloc_cli` | the commands `quarrylith alloc declare|show|place|measure|consumer measure` (below), added to the parser by `quarrylith.cli`; the one module outside `quarrylith.allocator` that builds on it |
 
 The allocator imports the standard library and `quarrylith.record` only, and
 reads and writes the record only through the contract: `get`, `read`,
@@ -195,6 +200,7 @@ class Short:
     waits: bool           # can waiting alone ever make it fit?
     until: int | None     # a time after which it may fit (a budget reset), else None
     holders: list         # the three largest live holders of the resource, [(holder, amount)]
+    detail: str = ""      # a line for a cause the figures do not say: the floor, or why unmeasured
 
 @dataclass(frozen=True)
 class Refusal:
@@ -225,7 +231,8 @@ allocator: task 12 (agent) refused on laptop: memory 2.0 GiB asked, 1.3 GiB free
   nothing fits until a declaration changes.
 - `measured` and `unmeasured`: always true. Memory frees and a reading comes.
 - `budget`: true, on `resource` `budget.<provider>`. `until` is the reading's `resets_at` at a stop or a
-  rejection, and None while pacing at a warning.
+  rejection, and None while pacing at a warning, and at a stop that names no
+  end, whose `detail` says so.
 - `undeclared`, `unclassified`, `driver` and `node`: false. Only a change to
   the document, the node or the task can help.
 
@@ -459,7 +466,7 @@ in `place`, not the declared figure, follows the host as it changes.
 `HostPlacement(record)` fills the seam for one host: the node the declared
 document names. On top of the seam it has:
 
-- **`declare(document, *, figures, now)`**. It brings the record to the
+- **`declare(document, *, figures, now, dry_run=False)`**. It brings the record to the
   document, with each `"measure"` taken from `figures` and nothing probed (a
   `"measure"` with no figure is refused, naming the key). The argument is
   `figures`, not `measured`, because `hold` already has a `measured` flag.
@@ -500,11 +507,29 @@ document names. On top of the seam it has:
   The consumers are checked, and written, those that keep or lower their
   amount first, so a swap of two amounts on a table with no spare room is not
   refused for the order the document lists them in.
-- **`resolve(document, *, fresh=False, now)`** -> figures. For each
+
+  With `dry_run=True` it makes the same check and then returns the lines it
+  would write, in the order it writes them, and writes nothing: the lines the
+  real `declare` then writes. It calls `declare_node` only when the node is
+  not already as the document says, so every write call it makes is an event.
+- **`declared()`** -> `(document, figures)` or None: the document in force as
+  it was declared, its `"measure"` kept, rebuilt from the document reading
+  and its recorded figures, and refused when the rebuilt document is not the
+  one the reading's sha256 fingerprints. **`resize(name, size, *, now)`** is
+  that document declared again with consumer `name`'s measured memory set to
+  `size`: one replace of its reservation and the new figure recorded, with
+  the same sha256, and a Refusal in the Declaration when the size does not fit.
+  **`check_resize(name)`** refuses, before anyone samples for ten minutes, a
+  consumer that has no probe or whose memory the document fixes (it is not
+  `"measure"`): the size of that one is the document's to change.
+- **`resolve(document, *, fresh=False, now, progress=None, sleep=time.sleep)`**
+  -> figures. For each
   `"measure"`, the figure the latest `allocator/document` reading recorded
   for the same key; with none, or with `fresh`, the probe (`probe_memory`,
   `probe_disk` and `probe_size`, `sample_consumer`). It writes nothing.
-  `alloc declare` is `resolve`, then `declare`.
+  `alloc declare` is `resolve`, then `declare`. `progress(name, number, total,
+  peak)` is called after each sample of a consumer, and `sleep` waits between
+  them.
 - **`place(task, *, now)`**. It reads the latest `allocator/document`
   reading. With none, it refuses `node`. It then classifies, makes the needs
   and checks, in this order, collecting every short:
@@ -520,17 +545,41 @@ document names. On top of the seam it has:
   It fits only when nothing is short. The table check is exactly the one
   `start_run` makes, so a Fit fails at `start_run` only through a race.
 - **`measure(*, now)`**. It runs the probes and writes **one** reading,
-  `record_reading("host", "measure", value)`, with value `{"memory_total",
-  "memory_available", "method", "disk_free", "consumers": {name: {"memory":
-  resident}}, "drift": [...]}`.
-  - A probe that fails writes no reading, and raises `ProbeError` naming the
-    probe. With no reading, `place` refuses `unmeasured` once `max_age_s`
+  `record_reading("host", "measure", value)`, with value `{"node",
+  "memory_total", "memory_available", "method", "disk_free", "consumers":
+  {name: {"memory": resident}}, "absent": {name: why}, "drift": [...]}`.
+  - **`node`** names the machine the reading is of: the document's `node`. It
+    should likely become a hostname later; it is the document's name now. The
+    `measured` gauge reads it and skips a reading that has none. A record
+    keeps the measurement of the one host its document names, so `place`'s
+    read of the latest `host/measure` reading is of one row and assumes one
+    measured node per record. It is not widened here.
+  - **With no document declared**, `measure` refuses (the record's `Refused`)
+    and writes nothing: the document names the node, the work disk and the
+    consumers to measure.
+  - **A consumer that is down is not a failed probe.** One whose pid file is
+    missing or holds no number, or whose process is not running, has no
+    resident figure and is named in `absent` with why; the host's figures
+    are still written, so one service being down does not leave the host
+    unmeasured. **It is said, though**: when a consumer becomes absent, and
+    when it returns or is no longer probed, `measure` writes one observation
+    (`allocator: yard is absent: pid file ... is missing`, `allocator: yard
+    is back`), by the rule drift uses, so a probe that has gone blind is seen
+    once as well as a service that is down. **A limit, left as it is:** a
+    probe reads a consumer by its pid, and a pid file that is left behind
+    while another process has taken the number reads that process's tree as
+    the consumer. The check is that a process with the number is running,
+    not that it is the consumer.
+  - A probe of the host that fails writes no reading, and raises
+    `ProbeError` naming the probe. With no reading, `place` refuses `unmeasured` once `max_age_s`
     passes, as today's guards hold on a failed reading.
   - **`method`** names how "available" was read. On macOS it is `vm_stat`'s
     free + inactive + purgeable + speculative pages (#3102's honest free).
     On Linux it is `/proc/meminfo`'s `MemAvailable`. The disk is
     `os.statvfs(disk_path)`. A consumer is the summed RSS (`ps -A -o
-    pid=,ppid=,rss=,comm=`) of its probe's processes.
+    pid=,ppid=,rss=,comm=`) of its probe's processes. The macOS figure counts
+    every inactive page and reads neither swap nor the compressor: the floor
+    is a floor on reclaimable memory, not a test of pressure.
   - The services (step 5) call `measure` on their beat, at most once a
     minute, and before a round whose latest reading is older than
     `max_age_s`.
@@ -540,9 +589,9 @@ document names. On top of the seam it has:
     `drift.tolerance`. The Podman machine at 19.7 GB resident, against
     15.4 GiB declared, is 19% over;
   - **undeclared use**: measured available memory below the table's free
-    memory less the live runs' reservations, by more than the tolerance of
-    capacity. That is memory used by nothing declared: a manual session, a
-    VM started by hand.
+    memory (the memory capacity less every live reservation, the runs'
+    included) by more than the tolerance of the memory capacity. That is
+    memory used by nothing declared: a manual session, a VM started by hand.
 
   **It is reported, never corrected.** When the drift list changes (an entry
   appears, or one ends), `measure` writes one statement:
@@ -552,8 +601,15 @@ document names. On top of the seam it has:
   `reserve` or `release` from a measurement. A declaration changes only by
   `declare`, run by a person or by the services on a person's change to the
   document.
-- **`sample_consumer(name, *, seconds=600, every=10)`**: the consumer's
-  probe, sampled every `every` seconds for `seconds`. It returns the
+- **`sample_consumer(name, *, seconds=600, every=10)`** (and the keywords
+  `document`, for a document not yet declared, which `resolve` passes,
+  `progress(number, total, peak)`, called after each sample, and `sleep`):
+  the consumer's probe, sampled every `every` seconds for `seconds`, `seconds /
+  every + 1` times, each from one `ps`. A consumer with nothing resident at the
+  first sample is a `ProbeError` there, naming why, so a service that is down
+  is not waited on for the window (10 minutes at the default), nor is a
+  `declare` of a `"measure"` consumer that is down; a consumer up at the first
+  sample and gone later is sampled to the end. It returns the
   **declared size**: the peak resident size × 1.25, rounded up to a whole
   256 MiB. This is how the yard is measured for `"measure"`. Its supervisor,
   store and services are one process tree under the pid file.
@@ -595,21 +651,50 @@ the node and an amount per run.
   window**: per (provider, `kind`), since a budget reading's `kind` is its
   window (five-hour, seven-day), as `budget_pace` keys them. `value` holds
   `status` (allowed, allowed_warning, rejected), `utilization` (0 to 1) and
-  `resets_at`. A window whose latest reading is older than
-  `budget.max_age_s`, or a provider with none, guards nothing, as today. Each
+  `resets_at`, **in milliseconds**, as the record's clock (a number below
+  March 1973 in milliseconds is read as seconds; a time before 2000 or past
+  year 9999 is no reset of ours: a count, a relative number, microseconds or
+  nanoseconds name no end). A provider with no reading
+  guards nothing, as today, and a **warning** whose latest reading is older
+  than `budget.max_age_s` guards nothing, as today. **A stop does not go
+  stale** (the user, 2026-11-06): it holds until its own `resets_at`, however
+  old the reading, unless a newer **recognised** reading of that provider and
+  window lifts it: only `allowed`, or `allowed_warning` below `stop_at`, does
+  (an unrecognised or garbled reading is paced like a warning and lifts
+  nothing). That can over-hold and never over-spend. A stop that names no
+  readable reset (none, or not a time) can't name its end: it holds until a
+  newer reading, with waits true and `until` unset, and the `Refusal` says
+  plainly that the provider is stopped by a reading with no reset time. Each
   window is judged alone:
-  - `rejected`, or `utilization >= stop_at` before `resets_at`: short until
-    its `resets_at`;
-  - `allowed_warning`: short when the provider's live run reservations plus
-    this need pass `warning_max` (today's two agents);
-  - else: the table's check alone.
+  - `rejected`, or `utilization >= stop_at`: short until its `resets_at`
+    (the guard lifts at that instant);
+  - `allowed_warning`, **and a status that is not recognised** (missing,
+    unknown or of another type), **and a `utilization` that can't be read**:
+    short when the provider's live run reservations (runs, on this node,
+    not standing holds or a task's own) plus this need pass `warning_max`
+    (today's two agents), while the reading is fresh and before its
+    `resets_at`;
+  - `allowed`: the table's check alone.
+
+  The status is matched without case or surrounding space (`REJECTED` and
+  `rejected ` are stops), as is the provider, and a `utilization` given as
+  numeric text is read as the number (`"inf"` is a stop). **The history is
+  read in two steps**: the newest `READ_LIMIT` readings of the source; and,
+  when those fill it, the whole history, since a provider's newest reading of
+  a window may lie under any number of newer readings of others and a window
+  may have any name. A history shorter than `READ_LIMIT`, the common case, is
+  one read of at most that many rows. The bound is on the rows one read
+  returns, not on the store's work (Henge reads the source whatever the
+  limit), and a long history costs a whole read per provider on each `place`:
+  a retention rule on readings, or a reading kept per provider and window, is
+  the record's design and would remove that cost.
 
   **The provider is short when any window is** (the tighter one counts, as
   today), with one `budget` Short, whose `resource` is the harness's
   `budget.<provider>` (the order's hold reads it, to hold the same
   provider's later candidates). Its `until` is the `resets_at` of the
-  window at a stop or a rejection (the latest, when several are), and None
-  when only a warning is short. So a five-hour reading at `allowed` never
+  window at a stop or a rejection (the latest, when several are, and None when
+  one of them names no end), and None when only a warning is short. So a five-hour reading at `allowed` never
   hides a seven-day reading at `rejected`.
 
   The readings move the **allowance**, never the capacity. A warning would
@@ -669,27 +754,52 @@ them is either a resource here or dropped:
 
 ### The commands
 
-`quarrylith alloc` (in `quarrylith.cli`):
+`quarrylith alloc` (in `quarrylith.alloc_cli`, added to the parser by
+`quarrylith.cli`):
 
 | command | does |
 |---|---|
-| `alloc declare DOC URL [--dry-run] [--remeasure]` | `resolve` (the recorded figures kept, unless `--remeasure`), then `declare`. Prints each write, or with `--dry-run` what it would write and every refusal |
-| `alloc show URL [--json]` | per node and resource: capacity, the standing consumers, the runs' reservations, free, the measured figure, the drift; the document's sha256 and age |
-| `alloc place URL TASK [--json]` | `place`, now: the Fit or the Refusal's `text` |
-| `alloc measure URL` | `measure`, once |
-| `alloc consumer measure NAME URL [--for 10m] [--every 10s] [--declare]` | `sample_consumer`, printing a phase line every 30 s (`sampling yard: 18/60, peak 1.21 GiB, 3:00`). With `--declare` it writes the size into the record by a replace, and prints the document line to copy |
+| `alloc declare DOC URL [--dry-run] [--remeasure]` | `resolve` (the recorded figures kept, unless `--remeasure`), then `declare`. Prints a line per write (`wrote node laptop`), or with `--dry-run` per write it would make (`would write ...`) and every refusal, and writes nothing. A second declare of the same document says `nothing to write` |
+| `alloc show URL [--json] [--now MS]` | per node and resource: capacity, the standing consumers, the tasks' own holds and the runs' reservations, free, the measured figure, the drift; the document's sha256 and age, the host reading's age, the consumers that are absent and the allocator's latest observations |
+| `alloc place URL TASK [--json] [--now MS]` | `place`, now: the Fit (`fit:`, `needs:`, `why:` lines) or the Refusal's `text`, which exits 2 |
+| `alloc measure URL` | `measure`, once: the host's memory and disk, each consumer's resident size, the consumers that are absent and the drift |
+| `alloc consumer measure NAME URL [--for 10m] [--every 10s] [--declare]` | `sample_consumer`, printing the peak and the size to declare (`consumer yard: peak 1.2 GiB over 61 samples, size 1.5 GiB (1536 MiB)`) and, past five seconds, a phase line every 30 s (`sampling yard: 18/61, peak 1.21 GiB, 3:00`). With `--declare` it writes the size into the record by `resize` and prints the document line to copy (`document line: memory = "1536MiB"`). It checks first that the consumer's memory is `"measure"` in the declared document (`check_resize`), since a fixed amount is the document's to change |
 
 Every `alloc` command:
 
-- takes **`--timing`**, which prints the time per layer: `store` (the
-  record's reads and operations) and `probe` (the host's commands);
-- takes **`--debug`**, which prints each read, each short and each write on
-  stderr;
-- **prints its phases with elapsed time once it passes five seconds** (the
-  CLI rule of #3157).
+- takes **`--timing`**, which prints one line on stderr with the time and the
+  calls per layer: `timing: store 3.2 ms (14 calls), probe 41.0 ms (3
+  calls)`. `store` is the record's reads and operations, `probe` the host's
+  commands;
+- takes **`--debug`**, which prints on stderr each read (`read: free('laptop',
+  'memory', ...)`), each short of a refusal (`short: room memory asked 60.0
+  GiB, free 46.0 GiB, capacity 48.0 GiB, waits`) and each write (`write:
+  reserve(...)`), a write line for each event the command makes;
+- **prints its phases with elapsed time once one passes five seconds** (the
+  CLI rule of #3157): `resolving: 6.2 s`, and, while a phase is still running
+  past the bound, `measuring: still running, 5.0 s`, so a call that hangs is
+  not silent until it is cut; while a consumer is sampled a
+  phase line with the samples done, the peak and the elapsed `m:ss`, the
+  first once five seconds have passed and then every 30 seconds;
+- prints only figures and names the record holds. A document's free text (a
+  consumer's `why`) and a process's command line are in no output, `--debug`
+  included: a debug line shows a map only when its values are figures, and
+  otherwise its size.
 
-`URL` is the record's (`sqlite:///...` or `henge:...#...`). A refusal exits
-2, an error 1.
+`URL` is the record's (`sqlite:///...` or `henge:...#...`). `--dry-run`
+opens the record read-only. A refusal exits 2 (the allocator's, the record's,
+a document it cannot read or that has a key it does not know), an error 1 (a
+probe that failed, naming the probe), an unavailable store 3. The reports a
+command is for (the Fit and the Refusal of `place`, the refusals of `declare`)
+go to stdout, and the line of an error or of a refusal of the command itself
+to stderr, `refused: ...` or `error: ...`.
+
+Adding a command is a function, `_name(args)`, and a parser line in
+`add_commands`: it opens its record with `_session`, which traces the record
+and the probes for `--timing` and `--debug`. **Not built, and not decided**: a
+person clearing a provider's stop that has no reset time (the budget's stop
+that names no end holds until a newer reading; no command ends it by hand).
+It is added here when the user decides how.
 
 ### Needs from the record
 
@@ -870,13 +980,36 @@ which pass.
   reading at `allowed`, newer than its latest seven-day reading at
   `rejected`, a run is refused `budget` with `until` the seven-day
   `resets_at`. With both windows stopped, `until` is the later `resets_at`
-- [ ] a budget reading older than `budget.max_age_s`, or none, guards
+- [ ] a warning older than `budget.max_age_s`, or no reading, guards
   nothing, and a harness with no budget resource is never refused `budget`
-- [ ] `measure` writes one reading with total and available memory, the
-  method named, the work disk's free bytes and each probed consumer's
-  resident size. The probes run for real on the test host, and the parsers
-  read captured samples of `vm_stat`, `/proc/meminfo` and `ps`. A failing
-  probe writes no reading and raises naming the probe
+- [ ] a stop (`rejected`, or `utilization >= stop_at`) holds until its
+  `resets_at`, however old the reading, and lifts at that instant (and a
+  warning lifts there too); a newer reading of that provider and window that
+  is not a stop lifts it, one of another window or provider does not; a stop
+  with no readable `resets_at` holds until a newer reading, waits true,
+  `until` unset, and the `Refusal` names the provider and says so
+- [ ] a status that is missing, unknown or of another type, and a
+  `utilization` that can't be read, are paced like a warning (and go stale
+  like one); the status is matched without case or surrounding space; a
+  `utilization` given as numeric text is read; a `resets_at` in seconds is
+  read as seconds and does not lift a stop as a past time would
+- [ ] a history shorter than `READ_LIMIT` is one read of at most that many
+  rows; a stop under `READ_LIMIT` - 1, `READ_LIMIT` and twice as many newer
+  readings of its window by another provider, with or without a reset, or in
+  a window of another name, is found; a resets_at before 2000, past year 9999
+  or in microseconds or nanoseconds is no reset (the stop holds until a newer
+  reading, and no line raises); a newer unrecognised or garbled reading does
+  not lift a stop and a recognised non-stop does; the provider is matched
+  without case or space; a warning's live weight counts the provider's
+  runs on the asked node only, not a standing hold, a task's own reservation
+  or a run on another node
+- [ ] `measure` writes one reading with the node, total and available
+  memory, the method named, the work disk's free bytes and each probed
+  consumer's resident size. The probes run for real on the test host, and the
+  parsers read captured samples of `vm_stat`, `/proc/meminfo` and `ps`. A
+  failing probe writes no reading and raises naming the probe. The reading
+  shows in the `measured` gauge (which skips one with no `node`), and with no
+  document declared `measure` refuses and writes nothing
 - [ ] a start whose need would leave measured available memory under
   `floor.memory`, or measured free disk under `floor.disk`, is refused
   `measured`, with waits true, although the table has room
@@ -1158,33 +1291,121 @@ later: nothing in the effort runs sessions through the queue.
   user's choices"), with the note that the local model's 64k peak does not
   fit at these figures
 - 2026-11-03 agreed (merge of this PR, user)
-- 2026-11-03 proposed: `classify` and `needs_of` return the Refusal, built by
+- 2026-11-03 changed: `classify` and `needs_of` return the Refusal, built by
   `refuse`; a missing `class:` label weighs standard and an unknown one is
   `unclassified`; units by resource name; the required keys of the document;
-  a measured consumer memory needs a probe (this PR)
-- 2026-11-05 proposed: the document as plain data (`to_data`,
+  a measured consumer memory needs a probe (approved: the conformance review
+  of quarrylith#16)
+- 2026-11-05 changed: the document as plain data (`to_data`,
   `document_from_data`), which the document reading stores and `place` reads
   back; the table check's signature `table_shorts(reader, node, needs, *,
   now)`; `declare` returns a `Declaration` (`wrote`, `refusals` by consumer,
   `failed`) and `hold` raises the record's `Refused` for a second live hold of
-  one holder and resource (this PR)
-- 2026-11-06 proposed: `declare` checks every consumer's amount, kept or
+  one holder and resource (approved: the conformance review of quarrylith#23)
+- 2026-11-06 changed: `declare` checks every consumer's amount, kept or
   changed, against the new capacities before any write, and checks and writes
   the consumers that keep or lower their amount first; a stored document
   reading that does not parse is no document; `Placement.hold` and the seam
   block say a second hold raises `Refused`, and the check is of standing
   holds (or the same task's own); the limits under `declare` (a stale hold
   after a failed `declare` and a different document, a renamed node's holds,
-  the `sha256` as fingerprint) (this PR)
-- 2026-11-06 proposed: where a person sees a stale hold: the record's live
+  the `sha256` as fingerprint) (approved: the conformance review of
+  quarrylith#23)
+- 2026-11-06 changed: where a person sees a stale hold: the record's live
   reservations and, from step 5, `alloc show`, not `headroom`, which shows
   only free amounts; and `release` with no `node` means the node the current
-  document names (this PR)
-- 2026-11-06 proposed: the budget's two functions and their signatures,
+  document names (approved: the conformance review of quarrylith#25)
+- 2026-11-06 changed: the budget's two functions and their signatures,
   `budget_shorts(reader, document, node, needs, *, now)` and
   `allowance(reader, document, node, provider, *, now)` (`(allowance, until)`;
   None when the readings guard nothing). A `budget` short carries the
   allowance as `free` and the table's capacity of `budget.<provider>`; a
   warning counts the weight of the provider's live runs on the node, and the
   guard of a window lifts at its `resets_at` with no new reading. `headroom`
-  narrows a budget resource of the declared node to the allowance (this PR)
+  narrows a budget resource of the declared node to the allowance (approved:
+  the conformance review of quarrylith#25)
+- 2026-11-06 changed: the `host/measure` value names its machine in `node`
+  (the user's decision; the document's `node` for now), which the `measured`
+  gauge reads; an acceptance item that the reading shows in the gauge; `measure`
+  with no document declared refuses and writes nothing; `place`'s read of the
+  latest `host/measure` reading is of one row and assumes one measured node per
+  record (approved: the conformance review of quarrylith#27)
+- 2026-11-06 changed: the probes are in `quarrylith.allocator.probes`
+  (`host` re-exports them): `probe_memory`, `probe_disk`, `probe_size` (0 for a
+  path that is not there, bounded in the files it counts), `process_table` (one
+  bounded `ps` with no argument column), `probe_tree`, `probe_process`, and the
+  parsers; a consumer's resident size is read from that table, so `measure`
+  makes one `ps` for all its consumers. `HostPlacement(record, probes=...)`
+  takes the probes it reads with; `sample_consumer` takes the keywords
+  `document`, `progress` and `sleep`; the undeclared use of memory is the
+  memory capacity less every live reservation against the available memory
+  (approved: the conformance review of quarrylith#27)
+- 2026-11-06 changed: the measured check applies on the node the document
+  names (the plugin has no measurement of another node); `hold` with
+  `measured` and no document is `unmeasured`; `headroom` of memory and disk on
+  the declared node is the least of the table's free and the measured room
+  above the floor, and 0 while unmeasured; `measured_shorts(value, document,
+  node, needs)` is the shared policy beside `table_shorts` and
+  `budget_shorts` (approved: the conformance review of quarrylith#27)
+- 2026-11-06 changed: `Short` gains a trailing `detail` (a line for a cause the
+  figures do not say: the floor of a `measured` short, why a host is
+  `unmeasured`: no reading, another node's, old, or without figures); a
+  `measured` short's `free` is the available figure, not the room above the
+  floor; the reading gains `absent` (`{consumer: why}`) for a consumer that is
+  down, which is no failed probe; the observations are written before the
+  reading; the macOS figure counts every inactive page and reads neither swap
+  nor the compressor (approved: the conformance review of quarrylith#27)
+- 2026-11-06 changed: a stop (`rejected`, or `utilization >= stop_at`) holds
+  until its own `resets_at` even when the reading is stale, unless a newer
+  reading of that provider and window says otherwise; a stop that names no
+  readable reset holds until a newer reading and the refusal says so; an
+  unrecognised status is paced like a warning; a stale warning still guards
+  nothing. This replaces "a stale reading guards nothing" for a stop
+  (approved: the user, 2026-11-06, in the effort's log)
+- 2026-11-06 changed: `resets_at` is milliseconds, and a number below March
+  1973 in milliseconds is read as seconds; a time before 2000 or past year
+  9999, and a non-positive, non-finite or non-numeric `resets_at`, is no reset
+  and the stop holds until a newer reading; the status and the provider are
+  matched without case or surrounding space; a `utilization` as numeric text
+  is read (`"inf"` stops), and one that can't be read is paced like a warning
+  (approved: the conformance review of quarrylith#28)
+- 2026-11-06 changed: only a recognised reading lifts a stop (`allowed`, or
+  `allowed_warning` below `stop_at`); an unrecognised or garbled reading is
+  paced like a warning and lifts nothing (the coordinator's ruling on the
+  review of quarrylith#28, in the effort's log) (approved: the conformance
+  review of quarrylith#28)
+- 2026-11-06 changed: a `budget` short's `detail`, the trailing field of
+  `Short` the measurement's step adds, is printed after the short as
+  " -- <detail>"; a stop that names no end has one naming the provider
+  (approved: the conformance review of quarrylith#28)
+- 2026-11-06 changed: the budget's history is read in two steps, the newest
+  `READ_LIMIT` readings and, when those fill it, the whole history, so a stop
+  is never lost under others' newer readings or in a window of any name; the
+  bound is on the rows one read returns and not on the store's work (the
+  coordinator's ruling on the review of quarrylith#28, in the effort's log)
+  (approved: the conformance review of quarrylith#28)
+- 2026-11-06 proposed: the commands as built: `quarrylith.alloc_cli` holds
+  them and `quarrylith.allocator.show` the figures `alloc show` prints;
+  `alloc show` and `alloc place` take `--now`; a command prints a line per
+  write (`wrote ...`, `would write ...` with `--dry-run`), `nothing to write`
+  when there is none, and `refused <consumer>: <text>` for a consumer that does
+  not fit; `--timing` is one line, `timing: store ... ms (N calls), probe ... ms
+  (N calls)`, and `--debug` prints `read:`, `short:` and `write:` lines, with
+  no free text of the document in any output; the first phase line of a
+  sampling comes once five seconds have passed, then one every 30 seconds;
+  `--declare` of `consumer measure` is `HostPlacement.resize` (the document in
+  force, from `declared()`, declared again with the new figure), which needs
+  the consumer's memory to be `"measure"` in the document, checked by
+  `check_resize` before any sampling; `declare` takes `dry_run`, calls
+  `declare_node` only when the node differs, and `resolve` takes `progress` and
+  `sleep` (this PR)
+- 2026-11-06 proposed: a consumer that becomes absent, and one that returns or
+  is no longer probed, is said once each as an observation, by the rule drift
+  uses; and a pid file left behind while another process holds the number is
+  read as that process, a limit named under the measurement and left as it is
+  (this PR)
+- 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`
+  at its first sample, not after the window; a command's phase that passes the
+  slow bound says `<phase>: still running, N s` while it runs, as well as its
+  time when it ends; and the page pins `src/quarrylith/cli.py`, which holds the
+  exit-code mapping (this PR)

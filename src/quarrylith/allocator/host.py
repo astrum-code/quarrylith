@@ -2,20 +2,46 @@
 """The laptop plugin: the placement for one host, the node the declared
 document names. It registers as `host` in the `quarrylith.placement` group.
 
-It declares the document into the record (`declare`) and answers from the
-record's table (`place`, `hold`, `release`, `headroom`). It probes nothing:
-the figures a "measure" stands for are given to `declare`, and the budget and
-the host's measured room are not yet part of an answer."""
+It declares the document into the record (`declare`), measures the host
+(`measure`, `resolve`, `sample_consumer`) and answers from the record's table,
+the budget's readings and the host's latest measurement (`place`, `hold`,
+`release`, `headroom`). `declare` probes nothing: the figures a "measure"
+stands for are given to it, by `resolve`."""
 
+import copy
 import hashlib
+import time
 from dataclasses import dataclass, field
 
 from ..record import schema
 from ..record.contract import Refused
 from .classes import classify, needs_of
-from .document import document_from_data, to_data, unit_of
-from .seam import Fit, Placement, Refusal, Short, _size, refuse
+from .document import MEASURE, document_from_data, to_data, unit_of
+from . import probes as default_probes
 from .budget import allowance, budget_shorts, providers_of
+from .measure import (
+    KIND as MEASURE_KIND,
+    SOURCE as MEASURE_SOURCE,
+    absent_began,
+    absent_ended,
+    began,
+    drift_entries,
+    ended,
+    latest,
+    measured_room,
+    measured_shorts,
+    measurement,
+    reading_state,
+)
+from .probes import (  # noqa: F401 (the probes are the host plugin's, too)
+    ProbeError,
+    probe_disk,
+    probe_memory,
+    probe_process,
+    probe_size,
+    probe_tree,
+)
+from .seam import Fit, Placement, Refusal, Short, _size, refuse
 from .table import peak, room_short, table_free, table_shorts
 
 #: Where the declared document is kept: a reading of the record.
@@ -73,6 +99,11 @@ class HostPlacement(Placement):
 
     name = "host"
 
+    def __init__(self, record, *, probes=None):
+        super().__init__(record)
+        #: What reads the host: the probes module, or a stand-in with its names.
+        self.probes = default_probes if probes is None else probes
+
     # -- the document in force ----------------------------------------------------
 
     def _stored(self):
@@ -127,6 +158,8 @@ class HostPlacement(Placement):
             if live:
                 shorts += table_shorts(record, node, needs, now=now)
                 shorts += budget_shorts(record, document, node, needs, now=now)
+                found, why = reading_state(record, document, node, now=now)
+                shorts += measured_shorts(found, document, node, needs, why)
                 free = table_free(record, node, needs, now=now)
         if shorts:
             return refuse(task, run_class.name, needs, shorts, node=node)
@@ -159,6 +192,12 @@ class HostPlacement(Placement):
                     for row in rows
                 }
                 if document is not None and name == document.node:
+                    found = measurement(record, document, name, now=now)
+                    room = measured_room(found, document) if found else None
+                    for resource in ("memory", "disk"):
+                        if resource in out[name]:
+                            limit = room[resource] if room else 0
+                            out[name][resource] = min(out[name][resource], limit)
                     for provider in providers_of(out[name]):
                         room, _ = allowance(record, document, name, provider, now=now)
                         if room is not None:
@@ -170,10 +209,11 @@ class HostPlacement(Placement):
 
     def hold(self, holder, needs, *, task=None, node=None, measured=True, now):
         """A standing reservation, or a task's own, checked against the table
-        as `place` checks it. `measured` is the host's measured room, which a
-        later step reads; the table is checked either way. A `Refusal` when it
-        does not fit, and `Refused` for a second live hold of one holder and
-        resource on the node."""
+        as `place` checks it, and against the host's measured room unless
+        `measured` is False (on the declared node: the plugin has no
+        measurement of another). A `Refusal` when it does not fit, and
+        `Refused` for a second live hold of one holder and resource on the
+        node."""
         if not isinstance(needs, dict) or not needs:
             raise Refused(f"a hold names its needs, {{resource: amount}}: {needs!r}")
         for resource, amount in needs.items():
@@ -183,8 +223,8 @@ class HostPlacement(Placement):
                 )
         record = self.record
         with record.reading():
+            stored = self._stored()
             if node is None:
-                stored = self._stored()
                 if stored is None:
                     return _no_node(task, needs)
                 node = stored[0].node
@@ -202,6 +242,12 @@ class HostPlacement(Placement):
                             f"(reservation {r['id']}): replace it or release it first"
                         )
                 shorts += table_shorts(record, node, needs, now=now)
+                if measured and (stored is None or stored[0].node == node):
+                    document = stored[0] if stored else None
+                    found, why = None, "no allocation document is declared"
+                    if document is not None:
+                        found, why = reading_state(record, document, node, now=now)
+                    shorts += measured_shorts(found, document, node, needs, why)
         if shorts:
             return refuse(task, None, needs, shorts, node=node)
         return record.reserve(
@@ -228,9 +274,200 @@ class HostPlacement(Placement):
             record.release_reservation(id, why)
         return ids
 
+    # -- measure, drift, resolve, sample_consumer ---------------------------------
+
+    def _memory_table(self, document, now):
+        """`(free, capacity)` of the declared node's memory in the table."""
+        node = document.node
+        row = self.record.get("capacity", [node, "memory"])
+        if row is None:
+            return 0, None
+        free = self.record.free(node, "memory", from_at=now, until_at=None)
+        return free, row["amount"]
+
+    def measure(self, *, now):
+        """Read the host once and write one `host/measure` reading: the node,
+        total and available memory with the method named, the work disk's free
+        bytes, each probed consumer's resident memory and the drift from the
+        declaration. Returns the value. A probe that fails writes nothing and
+        raises `ProbeError` naming it; with no document declared there is
+        nothing that names the node, the work disk or the consumers, and it
+        refuses. It writes the reading, and a statement when a drift begins or
+        ends and when a consumer goes absent or comes back, and never a
+        capacity or a reservation."""
+        record = self.record
+        with record.reading():
+            stored = self._stored()
+            if stored is None:
+                raise Refused(
+                    "no allocation document is declared: it names the node, "
+                    "the consumers and the work disk to measure"
+                )
+            document = stored[0]
+            free, capacity = self._memory_table(document, now)
+            row = latest(record)
+        before, before_absent = [], {}
+        if row is not None and isinstance(row["value"], dict):
+            same = row["value"].get("node") == document.node
+            drift = row["value"].get("drift")
+            before = drift if same and isinstance(drift, list) else []
+            absent = row["value"].get("absent")
+            before_absent = absent if same and isinstance(absent, dict) else {}
+        probes = self.probes
+        memory = probes.probe_memory()
+        value = {
+            "node": document.node,
+            "memory_total": memory["memory_total"],
+            "memory_available": memory["memory_available"],
+            "method": memory["method"],
+            "disk_free": probes.probe_disk(document.disk_path),
+            "consumers": {},
+            "absent": {},
+        }
+        probed = [c for c in document.consumers if c.probe is not None]
+        table = probes.process_table() if probed else []
+        for consumer in probed:
+            found, why = probes.resident(consumer.probe, table)
+            if found is None:
+                value["absent"][consumer.name] = why
+            else:
+                value["consumers"][consumer.name] = {"memory": found}
+        value["drift"] = drift_entries(document, value, free, capacity)
+        now_whats = {entry["what"] for entry in value["drift"]}
+        before_whats = {entry.get("what") for entry in before}
+        # the statements come first: one that fails leaves no reading that
+        # holds a drift nobody was told of
+        for entry in value["drift"]:
+            if entry["what"] not in before_whats:
+                record.state("observation", began(entry), where="allocator")
+        for entry in before:
+            if entry.get("what") not in now_whats:
+                record.state("observation", ended(entry), where="allocator")
+        # a consumer that goes absent, or comes back, is said once, so a probe
+        # that has gone blind is seen as well as a service that is down
+        for name, why in value["absent"].items():
+            if name not in before_absent:
+                record.state("observation", absent_began(name, why), where="allocator")
+        for name in before_absent:
+            if name not in value["absent"]:
+                line = absent_ended(name, name in value["consumers"])
+                record.state("observation", line, where="allocator")
+        record.record_reading(MEASURE_SOURCE, MEASURE_KIND, value)
+        return value
+
+    def drift(self, *, now):
+        """What the latest measurement shows past the declaration, against the
+        table as it stands: the list `measure` put in its reading. Reads
+        only."""
+        with self.record.reading():
+            stored = self._stored()
+            row = latest(self.record)
+            if stored is None or row is None or not isinstance(row["value"], dict):
+                return []
+            free, capacity = self._memory_table(stored[0], now)
+            return drift_entries(stored[0], row["value"], free, capacity)
+
+    def resolve(self, document, *, fresh=False, now, progress=None, sleep=time.sleep):
+        """The figures for each "measure" in `document`: the one the latest
+        document reading recorded for the same key, or, with none or with
+        `fresh`, the probe. `{"capacity": {resource: n}, "consumers": {name:
+        {resource: n}}}`. Writes nothing. `progress(name, number, total,
+        peak)` is called after each sample of a consumer, and `sleep` waits
+        between them."""
+        recorded = {}
+        with self.record.reading():
+            stored = self._stored()
+        if stored is not None and not fresh:
+            recorded = stored[1].get("figures") or {}
+        old_capacity = recorded.get("capacity") or {}
+        old_consumers = recorded.get("consumers") or {}
+        probes = self.probes
+        figures = {"capacity": {}, "consumers": {}}
+        for resource in ("memory", "disk"):
+            if document.capacity.get(resource) != "measure":
+                continue
+            if resource in old_capacity:
+                figures["capacity"][resource] = old_capacity[resource]
+            elif resource == "memory":
+                figures["capacity"][resource] = probes.probe_memory()["memory_total"]
+            else:
+                held = sum(
+                    probes.probe_size(c.path)
+                    for c in document.consumers
+                    if c.path is not None and "disk" in c.amounts
+                )
+                free = probes.probe_disk(document.disk_path)
+                figures["capacity"][resource] = max(
+                    free + held - document.floor.disk, 0
+                )
+        for consumer in document.consumers:
+            if consumer.amounts.get("memory") != "measure":
+                continue
+            old = (old_consumers.get(consumer.name) or {}).get("memory")
+            if old is None:
+                old = self.sample_consumer(
+                    consumer.name,
+                    document=document,
+                    sleep=sleep,
+                    progress=(
+                        None
+                        if progress is None
+                        else lambda n, total, top, name=consumer.name: progress(
+                            name, n, total, top
+                        )
+                    ),
+                )
+            figures["consumers"][consumer.name] = {"memory": old}
+        return figures
+
+    def sample_consumer(
+        self,
+        name,
+        *,
+        seconds=600,
+        every=10,
+        document=None,
+        progress=None,
+        sleep=time.sleep,
+    ):
+        """The size to declare for consumer `name`: its probe sampled every
+        `every` seconds for `seconds` (the document in `document`, else the
+        declared one), its peak resident memory times 1.25, rounded up to a
+        whole 256 MiB. `progress(number, total, peak)` is called after each
+        sample. A probe that finds nothing resident is a `ProbeError`."""
+        if document is None:
+            with self.record.reading():
+                stored = self._stored()
+            document = stored[0] if stored else None
+        found = [c for c in (document.consumers if document else ()) if c.name == name]
+        if not found or found[0].probe is None:
+            raise Refused(f"no probed consumer {name!r} in the allocation document")
+        probe = found[0].probe
+        total = seconds // every + 1
+        top, why = 0, ""
+        for number in range(1, total + 1):
+            found, why = self.probes.resident(probe, self.probes.process_table())
+            if number == 1 and found is None:
+                # down at the first sample: nothing to wait the window out for
+                raise ProbeError(
+                    f"sample_consumer: nothing is resident under {name}'s probe"
+                    + (f" ({why})" if why else "")
+                )
+            top = max(top, found or 0)
+            if progress is not None:
+                progress(number, total, top)
+            if number < total:
+                sleep(every)
+        if top == 0:
+            raise ProbeError(
+                f"sample_consumer: nothing is resident under {name}'s probe"
+                + (f" ({why})" if why else "")
+            )
+        return default_probes.declared_size(top)
+
     # -- declare ------------------------------------------------------------------
 
-    def declare(self, document, *, figures, now):
+    def declare(self, document, *, figures, now, dry_run=False):
         """Bring the record to `document`, each "measure" taken from
         `figures` and nothing probed (`DocumentError` naming the key of one
         with no figure). The whole document is checked against the record
@@ -238,7 +475,8 @@ class HostPlacement(Placement):
         written. Each write is then one operation, refused whole; a refused
         one is in `failed`, the rest go on, and a second `declare` finishes
         it. The document reading is written last, and only when nothing
-        failed."""
+        failed. With `dry_run` it writes nothing and returns the lines it
+        would write, the ones a real `declare` then writes."""
         figures = {} if figures is None else figures
         data = to_data(document, figures)
         resolved = document_from_data(data)
@@ -249,6 +487,13 @@ class HostPlacement(Placement):
             before = self._stored()
         if plan["refusals"]:
             return Declaration(refusals=plan["refusals"])
+        same = (
+            before is not None
+            and before[1]["sha256"] == digest
+            and schema.canonical(before[1]["figures"]) == schema.canonical(figures)
+        )
+        if dry_run:
+            return Declaration(wrote=tuple(self._lines(plan, node, digest, same)))
         record = self.record
         wrote, failed = [], []
 
@@ -261,8 +506,11 @@ class HostPlacement(Placement):
                 failed.append((what, str(refused)))
                 return False, None
 
-        if write("node", lambda: record.declare_node(node, resolved.drivers, []))[1]:
-            wrote.append(f"node {node}")
+        if plan["node"]:
+            if write("node", lambda: record.declare_node(node, resolved.drivers, []))[
+                1
+            ]:
+                wrote.append(f"node {node}")
         for r, why in plan["release"]:
             what = f"release {r['holder']} {r['resource']}"
             if write(what, lambda: record.release_reservation(r["id"], why))[0]:
@@ -274,16 +522,79 @@ class HostPlacement(Placement):
         for resource, amount in plan["shrink"]:
             self._capacity(node, resource, amount, wrote, write)
         if not failed:
-            same = (
-                before is not None
-                and before[1]["sha256"] == digest
-                and schema.canonical(before[1]["figures"]) == schema.canonical(figures)
-            )
             if not same:
                 value = {"sha256": digest, "figures": figures, "document": data}
                 record.record_reading(SOURCE, KIND, value)
                 wrote.append(f"document {digest[:12]}")
         return Declaration(wrote=tuple(wrote), failed=tuple(failed))
+
+    @staticmethod
+    def _lines(plan, node, digest, same):
+        """The lines `declare` writes for `plan`, in the order it writes
+        them."""
+        lines = [f"node {node}"] if plan["node"] else []
+        for r, why in plan["release"]:
+            lines.append(f"release {r['holder']} {r['resource']}: {why}")
+        lines += [f"capacity {r} = {a}" for r, a in plan["grow"]]
+        for kind, name, resource, amount, old in plan["actions"]:
+            if kind == "replace":
+                lines.append(f"replace {name} {resource}: {old['amount']} -> {amount}")
+            else:
+                lines.append(f"hold {name} {resource} {amount}")
+        lines += [f"capacity {r} = {a}" for r, a in plan["shrink"]]
+        if not same:
+            lines.append(f"document {digest[:12]}")
+        return lines
+
+    def declared(self):
+        """`(document, figures)` in force, or None before one: the document as
+        it was declared, its "measure" kept, and the figures recorded with it.
+        Rebuilt from the reading, and refused when what it rebuilds is not
+        what the reading's sha256 fingerprints."""
+        with self.record.reading():
+            stored = self._stored()
+        if stored is None:
+            return None
+        value = stored[1]
+        figures = value.get("figures") or {}
+        data = copy.deepcopy(value["document"])
+        for resource in figures.get("capacity") or {}:
+            data["capacity"][resource] = MEASURE
+        for consumer in data.get("consumer", []):
+            for resource in (figures.get("consumers") or {}).get(consumer["name"], {}):
+                consumer[resource] = MEASURE
+        if _digest(data) != value["sha256"]:
+            raise Refused(
+                "the declared document cannot be told from its record: declare "
+                "the document again"
+            )
+        return document_from_data(data), figures
+
+    def check_resize(self, name):
+        """The size of consumer `name` is the record's to set, or `Refused`
+        saying why not: no document, no probed consumer of that name, or its
+        memory a fixed amount in the declared document."""
+        current = self.declared()
+        document = current[0] if current else None
+        found = [c for c in (document.consumers if document else ()) if c.name == name]
+        if not found or found[0].probe is None:
+            raise Refused(f"no probed consumer {name!r} in the allocation document")
+        if "memory" not in (current[1].get("consumers") or {}).get(name, {}):
+            raise Refused(
+                f"{name}'s memory is a fixed amount in the declared document, "
+                f'not "{MEASURE}": put the size in the document and declare it'
+            )
+
+    def resize(self, name, size, *, now):
+        """Declare consumer `name`'s measured memory as `size`: the document in
+        force declared again with that figure, which replaces its reservation
+        in one event and records the figure. The Declaration, a Refusal in it
+        when the size does not fit."""
+        self.check_resize(name)
+        document, figures = self.declared()
+        figures = copy.deepcopy(figures)
+        figures["consumers"][name]["memory"] = size
+        return self.declare(document, figures=figures, now=now)
 
     def _capacity(self, node, resource, amount, wrote, write):
         what = f"capacity {resource}"
@@ -402,6 +713,9 @@ class HostPlacement(Placement):
             for name, found in shorts.items()
         }
         return {
+            "node": row is None
+            or row["drivers"] != sorted(document.drivers)
+            or row["labels"] != [],
             "release": release,
             "grow": grow,
             "shrink": shrink,

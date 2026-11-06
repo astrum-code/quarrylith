@@ -56,6 +56,7 @@ class Short:
     waits: bool  # can waiting alone ever make it fit?
     until: int | None  # a time after which it may fit, else None
     holders: list  # the largest live holders of the resource: [(holder, amount)]
+    detail: str = ""  # one line for a cause the figures do not say: why, or the floor
 
     def __post_init__(self):
         if self.cause not in CAUSES:
@@ -126,7 +127,13 @@ def _size(resource, amount, unit=True):
 def _part(short):
     """One short as words."""
     what, node = short.resource, short.node
-    if short.cause in ("room", "measured", "budget"):
+    if short.cause == "measured":
+        part = (
+            f"{what} {_size(what, short.asked)} asked, "
+            f"{_size(what, short.free)} available"
+        )
+        return f"{part}, {short.detail} [measured]" if short.detail else part
+    if short.cause in ("room", "budget"):
         part = (
             f"{what} {_size(what, short.asked)} asked, {_size(what, short.free)} free"
         )
@@ -135,9 +142,12 @@ def _part(short):
         if short.holders:
             held = ", ".join(f"{h} {_size(what, n, False)}" for h, n in short.holders)
             part += f" ({held})"
-        return part if short.cause == "room" else f"{part} [{short.cause}]"
+        if short.cause == "room":
+            return part
+        part = f"{part} [{short.cause}]"
+        return f"{part} -- {short.detail}" if short.detail else part
     if short.cause == "unmeasured":
-        return "unmeasured: the host's reading is missing or stale"
+        return f"unmeasured: {short.detail or 'the host reading is missing or stale'}"
     if short.cause == "undeclared":
         return f"undeclared: {what} has no capacity on {node}"
     if short.cause == "unclassified":
@@ -152,7 +162,13 @@ def _part(short):
 
 
 def _when(ms):
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    """A time as `YYYY-MM-DDTHH:MMZ`; a number no date holds is printed as it
+    is, so a line is built for any time a short names."""
+    try:
+        when = datetime.fromtimestamp(ms / 1000, timezone.utc)
+        return when.strftime("%Y-%m-%dT%H:%MZ")
+    except (ValueError, OverflowError, OSError):
+        return str(ms)
 
 
 def _line(task, run_class, shorts, waits, until, node):

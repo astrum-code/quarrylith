@@ -4,7 +4,7 @@ readings, taken per window, narrow what `place` and `headroom` allow, and
 never the capacity. Every test runs over every backend in BACKENDS."""
 
 from backends import over_backends
-from test_allocator_host import GIB, SAMPLE, declared, make_task, run
+from test_allocator_host import GIB, declared, make_task, run, sample_text
 
 from quarrylith.allocator import Fit, Refusal, load_document
 
@@ -69,13 +69,14 @@ def test_at_a_warning_a_run_is_refused_once_the_providers_weight_passes_the_max(
 @over_backends
 def test_a_budget_short_comes_beside_the_others_in_causes_order(effort, clock):
     """templet:3161 -- a budget short is collected with the table's, and the
-    Refusal lists them in `CAUSES` order: room first, then budget."""
+    Refusal lists them in `CAUSES` order: room, measured, then budget."""
     record = effort
     placement = declared(record, clock)
     reading(record, clock, status="rejected", resets_at=clock() + HOUR)
     answer = refused(placement, record, clock, needs={"memory": 100 * GIB})
     assert [(s.cause, s.resource) for s in answer.shorts] == [
         ("room", "memory"),
+        ("measured", "memory"),
         ("budget", "budget.anthropic"),
     ]
     assert answer.waits is False and answer.until is None
@@ -156,28 +157,30 @@ def test_a_stop_beats_a_warning_in_the_reason(effort, clock):
 
 
 @over_backends
-def test_an_old_or_missing_reading_guards_nothing_and_a_local_harness_is_never_refused(
+def test_an_old_warning_or_none_guards_nothing_and_local_is_never_refused(
     effort, clock
 ):
-    """templet:3161 -- a budget reading older than `budget.max_age_s` (900 s),
-    or none, guards nothing; another provider's reading does not count; and a
-    harness with no budget resource is never refused `budget`."""
+    """templet:3161 -- a warning older than `budget.max_age_s` (900 s), or no
+    reading, guards nothing; another provider's reading does not count; and a
+    harness with no budget resource is never refused `budget`. (A stop does
+    not go stale: see the budget holds.)"""
     record = effort
-    text = SAMPLE.read_text().replace('"slots.local" = 0', '"slots.local" = 1')
+    text = sample_text().replace('"slots.local" = 0', '"slots.local" = 1')
     placement = declared(record, clock, load_document(text))
     assert isinstance(refused(placement, record, clock), Fit)
     reading(record, clock, provider="openai", status="rejected")
     assert isinstance(refused(placement, record, clock), Fit)
-    reading(record, clock, status="rejected", resets_at=clock() + 4 * HOUR)
+    reading(record, clock, status="allowed_warning", resets_at=clock() + 4 * HOUR)
+    agents(record, clock, placement, 2)
     assert budget_short(refused(placement, record, clock))
+    reading(
+        record, clock, kind="seven_day", status="rejected", resets_at=clock() + HOUR
+    )
     local = refused(placement, record, clock, labels=["harness:local"])
     assert isinstance(local, Fit) and "budget.anthropic" not in local.needs
     clock.step(900 * 1000)
     assert budget_short(refused(placement, record, clock))
-    clock.step(1000)
-    assert isinstance(refused(placement, record, clock), Fit)
-    reading(record, clock, utilization=0.99, status="rejected")
-    clock.step(900 * 1000 + 1)
+    clock.step(HOUR)
     assert isinstance(refused(placement, record, clock), Fit)
 
 

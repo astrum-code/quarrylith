@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """quarrylith's command line: `quarrylith record
-init|check|dump|load|import|events|gauges URL` and `quarrylith order
-schedule TEXT`, `quarrylith order show URL` and `quarrylith order merge URL
-NUMBER`.
+init|check|dump|load|import|events|gauges URL`, `quarrylith order
+schedule TEXT`, `quarrylith order show URL`, `quarrylith order merge URL
+NUMBER` and `quarrylith alloc declare|show|place|measure|consumer measure`
+(`alloc_cli`).
 
-Exit codes: 0 done, 1 `check` found something, 2 refused, 3 the store was
-unavailable (or the outcome is unknown). `load` and `import` refuse a dump or
-a document before they open the record, so a refused one writes nothing and
-makes no file.
+Exit codes: 0 done, 1 `check` found something (or an `alloc` probe failed),
+2 refused, 3 the store was unavailable (or the outcome is unknown). `load`
+and `import` refuse a dump or a document before they open the record, so a
+refused one writes nothing and makes no file.
 """
 
 import argparse
@@ -20,7 +21,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import gauges
+from . import alloc_cli, gauges
+from .allocator import DocumentError, ProbeError
 from .order import merge as merges
 from .order import schedule as schedules
 from .order import sequence as sequences
@@ -410,6 +412,7 @@ def parser():
     merged.add_argument("--timing", action="store_true", help="time per layer")
     merged.add_argument("--debug", action="store_true", help="the settings and class")
     merged.set_defaults(run=_order_merge)
+    alloc_cli.add_commands(groups, _actor())
     return top
 
 
@@ -425,9 +428,16 @@ def main(argv=None):
         for problem in e.problems:
             print(f"  {problem}", file=sys.stderr)
         return 2
-    except (schedules.ScheduleError, order_settings.SettingsError) as e:
+    except (
+        schedules.ScheduleError,
+        order_settings.SettingsError,
+        DocumentError,
+    ) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
+    except ProbeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     except contract.Refused as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2

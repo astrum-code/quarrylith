@@ -1,0 +1,7 @@
+    1     0   9000 /sbin/init
+  100     1  20480 /usr/bin/supervisor
+  101   100  40960 /usr/bin/store
+  102   100  10240 /usr/bin/service one
+  103   102   2048 /usr/bin/helper
+  200     1  51200 /usr/bin/other-daemon
+  201   200   1024 /usr/bin/other-daemon

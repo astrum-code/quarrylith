@@ -36,8 +36,38 @@ STANDING = {
 }
 
 
+def sample_text(max_age=1_000_000):
+    """The sample, its host reading kept fresh for `max_age` seconds: the
+    tests step the clock by minutes and hours between a reading and a
+    placement."""
+    return SAMPLE.read_text().replace("max_age_s = 180", f"max_age_s = {max_age}")
+
+
+def host_reading(
+    record,
+    clock,
+    node="laptop",
+    available=47 * GIB,
+    total=48 * GIB,
+    disk_free=190 * GIB,
+    **more,
+):
+    """A host measurement, as `measure` writes it, taken now: generous by
+    default, so a placement test is not about the measured room."""
+    value = {
+        "node": node,
+        "memory_total": total,
+        "memory_available": available,
+        "method": "given",
+        "disk_free": disk_free,
+        "consumers": {},
+        "drift": [],
+    }
+    return record.record_reading("host", "measure", {**value, **more})
+
+
 def sample(old=None, new=None):
-    text = SAMPLE.read_text()
+    text = sample_text()
     if old is not None:
         assert old in text
         text = text.replace(old, new)
@@ -51,8 +81,10 @@ def declare(record, clock, document=None, figures=FIGURES):
 
 
 def declared(record, clock, document=None, figures=FIGURES):
+    """Declare `document` (the sample), and give the host a measurement."""
     result = declare(record, clock, document, figures)
     assert result.ok, result
+    host_reading(record, clock)
     return HostPlacement(record)
 
 
@@ -218,7 +250,7 @@ def test_declare_with_a_changed_consumer_replaces_its_reservation_in_one_event(
         '[[consumer]]\nname = "desktop"\nmemory = "10GiB"\n'
         'why = "the operating system and the user\'s own applications"\n'
     )
-    text = SAMPLE.read_text().replace('memory = "15.4GiB"', 'memory = "16GiB"')
+    text = sample_text().replace('memory = "15.4GiB"', 'memory = "16GiB"')
     assert desktop in text
     gone = load_document(text.replace(desktop, ""))
     result = HostPlacement(record).declare(gone, figures=FIGURES, now=clock())
@@ -297,7 +329,7 @@ def test_declare_with_a_capacity_below_what_is_reserved_reports_what_failed(
     task = make_task(record)
     held = run(record, placement, clock, task)
     smaller = load_document(
-        SAMPLE.read_text()
+        sample_text()
         .replace('"slots.gate" = 2', '"slots.gate" = 1')
         .replace('"slots.claude-code" = 4', '"slots.claude-code" = 0')
     )
@@ -327,7 +359,7 @@ def test_declare_orders_the_capacity_around_the_consumers(record, clock):
     clock.step()
     # the machine shrinks to 8 GiB and the memory with it, below the 26.9 GiB
     # the old consumers held: the capacity can only fall once the machine has
-    smaller = SAMPLE.read_text().replace('memory = "15.4GiB"', 'memory = "8GiB"')
+    smaller = sample_text().replace('memory = "15.4GiB"', 'memory = "8GiB"')
     figures = {**FIGURES, "capacity": {"memory": 22 * GIB, "disk": 200 * GIB}}
     result = HostPlacement(record).declare(
         load_document(smaller), figures=figures, now=clock()
@@ -337,7 +369,7 @@ def test_declare_orders_the_capacity_around_the_consumers(record, clock):
     assert standing(record)[("podman-machine", "memory")] == 8 * GIB
     # the machine grows to 30 GiB with the memory: the capacity first
     clock.step()
-    bigger = SAMPLE.read_text().replace('memory = "15.4GiB"', 'memory = "30GiB"')
+    bigger = sample_text().replace('memory = "15.4GiB"', 'memory = "30GiB"')
     figures = {**FIGURES, "capacity": {"memory": 60 * GIB, "disk": 200 * GIB}}
     result = HostPlacement(record).declare(
         load_document(bigger), figures=figures, now=clock()
@@ -359,7 +391,7 @@ def test_declare_checks_a_capacity_below_unchanged_consumers_before_any_write(
     declared(record, clock)
     clock.step()
     head = record.head()
-    other = SAMPLE.read_text().replace('"slots.codex" = 3', '"slots.codex" = 5')
+    other = sample_text().replace('"slots.codex" = 3', '"slots.codex" = 5')
     figures = {**FIGURES, "capacity": {"memory": 11 * GIB, "disk": 200 * GIB}}
     result = HostPlacement(record).declare(
         load_document(other), figures=figures, now=clock()
@@ -380,7 +412,7 @@ def test_two_consumers_that_swap_amounts_on_an_exact_table_fit_in_any_order(
     """templet:3161 -- the shrinks are checked and written before the grows, so
     a document that swaps two consumers' amounts on a table with no spare room
     is not refused for the order its consumers are written in."""
-    text = SAMPLE.read_text()
+    text = sample_text()
     wide = text.replace('memory = "15.4GiB"', 'memory = "16GiB"')
     exact = {
         **FIGURES,
@@ -492,7 +524,7 @@ def test_a_hold_a_failed_declare_made_stays_until_a_person_releases_it(effort, c
     record = effort
     placement = declared(record, clock)
     run(record, placement, clock, make_task(record))
-    text = SAMPLE.read_text()
+    text = sample_text()
     extra = '\n[[consumer]]\nname = "extra"\nmemory = "1GiB"\nwhy = "an addition"\n'
     clock.step()
     failing = text.replace('"slots.claude-code" = 4', '"slots.claude-code" = 0')
@@ -528,6 +560,7 @@ def test_an_unreadable_document_reading_is_no_document(effort, clock):
         assert [s.cause for s in refusal.shorts] == ["node"], bad
         assert placement.release("x", why="none") == []
     assert declare(record, clock).ok
+    host_reading(record, clock)
     assert isinstance(placement.place(task, now=clock()), Fit)
 
 
@@ -539,7 +572,7 @@ def test_place_reads_the_latest_document_after_a_redeclare(effort, clock):
     placement = declared(record, clock)
     task = make_task(record)
     assert placement.place(task, now=clock()).needs["memory"] == 2 * GIB
-    text = SAMPLE.read_text()
+    text = sample_text()
     old = (
         'name = "agent"\nmatch = { kind = ["agent", "review"] }\n'
         'needs = { memory = "2GiB"'
@@ -753,6 +786,7 @@ def script(record, clock):
     placement = HostPlacement(record)
     admitted(record)
     out.append(placement.declare(sample(), figures=FIGURES, now=clock()).wrote)
+    host_reading(record, clock)
     tasks = [
         make_task(record, labels=["repo:widgets"]),
         make_task(record, "job", "vm"),
@@ -992,7 +1026,8 @@ def test_headroom_gives_each_resources_free_on_each_live_node(effort, clock):
     assert after["slots.claude-code"] == 3 and after["lane.widgets"] == 3
     for holder, _ in list(standing(record)):
         placement.release(holder, why="done")
-    assert placement.headroom(now=clock())["laptop"]["memory"] == 48 * GIB - 2 * GIB
+    # the table has 46 GiB free; the measurement leaves 47 less the 4 GiB floor
+    assert placement.headroom(now=clock())["laptop"]["memory"] == 43 * GIB
 
 
 @over_backends

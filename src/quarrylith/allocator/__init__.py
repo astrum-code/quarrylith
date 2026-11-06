@@ -29,6 +29,8 @@ from .seam import (
     placement_for,
     refuse,
 )
+from .measure import measured_shorts
+from .probes import ProbeError
 from .table import table_shorts
 
 __all__ = [
@@ -42,6 +44,7 @@ __all__ = [
     "Lane",
     "Match",
     "Placement",
+    "ProbeError",
     "Refusal",
     "RunClass",
     "Short",
@@ -50,6 +53,7 @@ __all__ = [
     "classify",
     "document_from_data",
     "load_document",
+    "measured_shorts",
     "needs_of",
     "parse_amount",
     "placement_for",

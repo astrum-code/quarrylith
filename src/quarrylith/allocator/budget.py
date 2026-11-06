@@ -25,10 +25,17 @@ SECONDS_BELOW = 10**11
 FIRST_RESET = 946_684_800_000
 LAST_RESET = 253_402_300_799_999
 
-STOP, WARN, ALLOWED = "stop", "warn", "allowed"
+STOP, WARN, ALLOWED, CLEAR = "stop", "warn", "allowed", "clear"
+#: The status of a person's clear: a reading in the stopped window, with who
+#: and why, that lifts a stop which names no end.
+CLEARED = "cleared"
+#: The longest a clear's reason may be.
+WHY_AT_MOST = 300
 #: What a stop that names no end says, in the refusal (a Short's `detail`).
 DETAIL = (
-    "{provider} is stopped by a reading with no reset time: held until a newer reading"
+    "{provider} is stopped by a reading with no reset time: held until a newer "
+    "reading, or until a person clears it (quarrylith alloc clear URL {provider} "
+    "--why TEXT)"
 )
 
 
@@ -93,15 +100,24 @@ def _used(value):
     return used, True
 
 
+def _named(text):
+    return isinstance(text, str) and bool(text.strip())
+
+
 def _state(document, value):
-    """`(state, recognised)`: `stop`, `warn` or `allowed`, and whether the
-    reading is one we know. `rejected`, or a utilization from `stop_at`, is a
-    stop; `allowed_warning` is a warning; `allowed` is allowed. A status that
-    is not recognised (missing, unknown, of another type), and a utilization
-    that cannot be read, are paced as a warning and are not recognised. The
-    status is matched without case or surrounding space."""
+    """`(state, recognised)`: `stop`, `warn`, `allowed` or `clear`, and whether
+    the reading is one we know. A `cleared` reading that names who and why is
+    a clear; one that does not is not recognised. `rejected`, or a utilization
+    from `stop_at`, is a stop; `allowed_warning` is a warning; `allowed` is
+    allowed. A status that is not recognised (missing, unknown, of another
+    type), and a utilization that cannot be read, are paced as a warning and
+    are not recognised. The status is matched without case or surrounding
+    space."""
     status = value.get("status")
     status = status.strip().lower() if isinstance(status, str) else None
+    if status == CLEARED:
+        named = all(_named(value.get(key)) for key in ("by", "why"))
+        return (CLEAR, True) if named else (WARN, False)
     used, readable = _used(value)
     if status == "rejected" or (used is not None and used >= document.budget.stop_at):
         return STOP, True
@@ -112,29 +128,50 @@ def _state(document, value):
     return WARN, False
 
 
+def _walk(document, rows):
+    """`(paced, anchor, cleared, lifted)` of one window's readings, newest
+    first: the newest unrecognised reading above any clear or recognised one;
+    the newest recognised one that is not a clear, with its state; the newest
+    clear above it; and whether that clear lifts the anchor. A clear lifts a
+    stop that names no end and nothing else: not a stop with a readable
+    reset, which holds until it, and not a warning."""
+    paced = anchor = cleared = None
+    for row in rows:
+        state, recognised = _state(document, row["value"])
+        if state == CLEAR:
+            cleared = cleared or row
+            continue
+        if recognised:
+            anchor = row, state
+            break
+        if paced is None and cleared is None:
+            paced = row
+    lifted = (
+        cleared is not None
+        and anchor is not None
+        and anchor[1] == STOP
+        and _resets(anchor[0]["value"]) is None
+    )
+    return paced, anchor, cleared, lifted
+
+
 def _windows(reader, document, provider, now):
     """`(kind, state, resets)` of each guard of `provider` that still holds.
     Per window, the newest recognised reading counts, and an unrecognised
     reading newer than it is paced like a warning without lifting it: only a
-    recognised non-stop lifts a stop. A stop holds until its `resets_at`,
-    however old the reading, or until a newer recognised reading when it names
-    none; a warning, and an unrecognised reading, holds while it is no older
-    than `budget.max_age_s` and before its `resets_at`."""
+    recognised non-stop lifts a stop, or a person's clear, which lifts a stop
+    that names no end. A stop holds until its `resets_at`, however old the
+    reading, or until a newer recognised reading when it names none; a
+    warning, and an unrecognised reading, holds while it is no older than
+    `budget.max_age_s` and before its `resets_at`."""
     limit = document.budget.max_age_s * 1000
     found = []
     for kind, rows in _history(reader, provider).items():
-        paced, anchor = None, None
-        for row in rows:
-            state, recognised = _state(document, row["value"])
-            if recognised:
-                anchor = row, state
-                break
-            if paced is None:
-                paced = row
+        paced, anchor, _, lifted = _walk(document, rows)
         guards = []
         if paced is not None:
             guards.append((paced, WARN))
-        if anchor is not None:
+        if anchor is not None and not lifted:
             guards.append(anchor)
         for row, state in guards:
             resets = _resets(row["value"])
@@ -144,6 +181,59 @@ def _windows(reader, document, provider, now):
                 continue
             found.append((kind, state, resets))
     return found
+
+
+def report(reader, document, provider, *, now):
+    """The stops of `provider` and the clears in force, one dict per window,
+    by window name: `state` `stop` with its `resets` (None when it names no
+    end), or `cleared` with `by`, `why` and `at` of the clear that lifted a
+    stop which names no end. A stop whose reset has passed, and a clear with
+    no stop under it, are not listed."""
+    out = []
+    for kind, rows in sorted(_history(reader, provider).items()):
+        _, anchor, cleared, lifted = _walk(document, rows)
+        if lifted:
+            value = cleared["value"]
+            out.append(
+                {
+                    "provider": provider,
+                    "window": kind,
+                    "state": "cleared",
+                    "resets": None,
+                    "by": value["by"],
+                    "why": value["why"],
+                    "at": cleared["at"],
+                }
+            )
+        elif anchor is not None and anchor[1] == STOP:
+            resets = _resets(anchor[0]["value"])
+            if resets is None or now < resets:
+                out.append(
+                    {
+                        "provider": provider,
+                        "window": kind,
+                        "state": "stop",
+                        "resets": resets,
+                    }
+                )
+    return out
+
+
+def clear(record, document, provider, why, *, by, now):
+    """Clear `provider`'s stop that names no end: one `cleared` reading, with
+    `by` and `why`, in each window whose stop names none. `(cleared, held)`:
+    the windows cleared, and the stops that name a future reset, which hold
+    until it and are not cleared. Nothing is written for a provider with no
+    such stop."""
+    provider = provider.strip().lower()
+    view = report(record, document, provider, now=now)
+    stops = [w for w in view if w["state"] == "stop"]
+    cleared = [w["window"] for w in stops if w["resets"] is None]
+    for window in cleared:
+        value = {"provider": provider, "status": CLEARED, "by": by, "why": why}
+        record.record_reading(SOURCE, window, value)
+    held = [(w["window"], w["resets"]) for w in stops if w["resets"] is not None]
+    return cleared, held
 
 
 def _judge(reader, document, node, provider, now):

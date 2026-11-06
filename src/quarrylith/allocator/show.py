@@ -6,6 +6,7 @@ declaration. `snapshot` is plain data; `lines` writes it as text. Both read
 the record only, and carry figures and names the record holds, never the
 document's free text."""
 
+from .budget import providers_of, report
 from .document import document_from_data
 from .measure import KIND as MEASURE_KIND
 from .measure import SOURCE as MEASURE_SOURCE
@@ -64,10 +65,15 @@ def snapshot(record, *, now):
         for node in sorted(record.read("nodes", live=True), key=lambda n: n["name"]):
             nodes.append(_node(record, node, now, value, held_by))
         said = record.read("statements", type="observation", desc=True, limit=50)
+        stops = []
+        if document is not None:
+            for provider in providers_of(document.capacity):
+                stops += report(record, document, provider, now=now)
     drift = value.get("drift") if isinstance(value.get("drift"), list) else []
     absent = value.get("absent") if isinstance(value.get("absent"), dict) else {}
     said = [s for s in said if s["where"] == "allocator"][:OBSERVATIONS]
     return {
+        "budget": stops,
         "at": now,
         "document": (
             None
@@ -163,6 +169,20 @@ def _node(record, node, now, value, held_by):
     }
 
 
+def _budget_line(stop):
+    """One stop of a provider's budget, or the clear in force that lifted one,
+    as `alloc show` words it."""
+    head = f"budget {stop['provider']} {stop['window']}:"
+    if stop["state"] == "cleared":
+        return f"{head} cleared by {stop['by']} at {_when(stop['at'])}: {stop['why']}"
+    if stop["resets"] is not None:
+        return f"{head} stopped until {_when(stop['resets'])}"
+    return (
+        f"{head} stopped, no reset time: clear it with "
+        f"`quarrylith alloc clear URL {stop['provider']} --why TEXT`"
+    )
+
+
 def lines(snap):
     """`snap` as the text `alloc show` prints."""
     out = []
@@ -224,6 +244,8 @@ def lines(snap):
             for entry in r["drift"]:
                 text = began(entry)
                 out.append("    drift: " + text.removeprefix("allocator: "))
+    for stop in snap["budget"]:
+        out.append(_budget_line(stop))
     for name, why in sorted(snap["absent"].items()):
         out.append(f"absent: {name}: {why}")
     if snap["observations"]:

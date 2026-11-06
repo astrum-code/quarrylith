@@ -520,9 +520,18 @@ document names. On top of the seam it has:
   It fits only when nothing is short. The table check is exactly the one
   `start_run` makes, so a Fit fails at `start_run` only through a race.
 - **`measure(*, now)`**. It runs the probes and writes **one** reading,
-  `record_reading("host", "measure", value)`, with value `{"memory_total",
-  "memory_available", "method", "disk_free", "consumers": {name: {"memory":
-  resident}}, "drift": [...]}`.
+  `record_reading("host", "measure", value)`, with value `{"node",
+  "memory_total", "memory_available", "method", "disk_free", "consumers":
+  {name: {"memory": resident}}, "drift": [...]}`.
+  - **`node`** names the machine the reading is of: the document's `node`. It
+    should likely become a hostname later; it is the document's name now. The
+    `measured` gauge reads it and skips a reading that has none. A record
+    keeps the measurement of the one host its document names, so `place`'s
+    read of the latest `host/measure` reading is of one row and assumes one
+    measured node per record. It is not widened here.
+  - **With no document declared**, `measure` refuses (the record's `Refused`)
+    and writes nothing: the document names the node, the work disk and the
+    consumers to measure.
   - A probe that fails writes no reading, and raises `ProbeError` naming the
     probe. With no reading, `place` refuses `unmeasured` once `max_age_s`
     passes, as today's guards hold on a failed reading.
@@ -540,9 +549,9 @@ document names. On top of the seam it has:
     `drift.tolerance`. The Podman machine at 19.7 GB resident, against
     15.4 GiB declared, is 19% over;
   - **undeclared use**: measured available memory below the table's free
-    memory less the live runs' reservations, by more than the tolerance of
-    capacity. That is memory used by nothing declared: a manual session, a
-    VM started by hand.
+    memory (the memory capacity less every live reservation, the runs'
+    included) by more than the tolerance of the memory capacity. That is
+    memory used by nothing declared: a manual session, a VM started by hand.
 
   **It is reported, never corrected.** When the drift list changes (an entry
   appears, or one ends), `measure` writes one statement:
@@ -552,8 +561,12 @@ document names. On top of the seam it has:
   `reserve` or `release` from a measurement. A declaration changes only by
   `declare`, run by a person or by the services on a person's change to the
   document.
-- **`sample_consumer(name, *, seconds=600, every=10)`**: the consumer's
-  probe, sampled every `every` seconds for `seconds`. It returns the
+- **`sample_consumer(name, *, seconds=600, every=10)`** (and the keywords
+  `document`, for a document not yet declared, which `resolve` passes,
+  `progress(number, total, peak)`, called after each sample, and `sleep`):
+  the consumer's probe, sampled every `every` seconds for `seconds`, `seconds /
+  every + 1` times, each from one `ps`. A probe that finds nothing resident is
+  a `ProbeError`. It returns the
   **declared size**: the peak resident size × 1.25, rounded up to a whole
   256 MiB. This is how the yard is measured for `"measure"`. Its supervisor,
   store and services are one process tree under the pid file.
@@ -872,11 +885,13 @@ which pass.
   `resets_at`. With both windows stopped, `until` is the later `resets_at`
 - [ ] a budget reading older than `budget.max_age_s`, or none, guards
   nothing, and a harness with no budget resource is never refused `budget`
-- [ ] `measure` writes one reading with total and available memory, the
-  method named, the work disk's free bytes and each probed consumer's
-  resident size. The probes run for real on the test host, and the parsers
-  read captured samples of `vm_stat`, `/proc/meminfo` and `ps`. A failing
-  probe writes no reading and raises naming the probe
+- [ ] `measure` writes one reading with the node, total and available
+  memory, the method named, the work disk's free bytes and each probed
+  consumer's resident size. The probes run for real on the test host, and the
+  parsers read captured samples of `vm_stat`, `/proc/meminfo` and `ps`. A
+  failing probe writes no reading and raises naming the probe. The reading
+  shows in the `measured` gauge (which skips one with no `node`), and with no
+  document declared `measure` refuses and writes nothing
 - [ ] a start whose need would leave measured available memory under
   `floor.memory`, or measured free disk under `floor.disk`, is refused
   `measured`, with waits true, although the table has room
@@ -1188,3 +1203,26 @@ later: nothing in the effort runs sessions through the queue.
   warning counts the weight of the provider's live runs on the node, and the
   guard of a window lifts at its `resets_at` with no new reading. `headroom`
   narrows a budget resource of the declared node to the allowance (this PR)
+- 2026-11-06 proposed: the `host/measure` value names its machine in `node`
+  (the user's decision; the document's `node` for now), which the `measured`
+  gauge reads; an acceptance item that the reading shows in the gauge; `measure`
+  with no document declared refuses and writes nothing; `place`'s read of the
+  latest `host/measure` reading is of one row and assumes one measured node per
+  record (this PR)
+- 2026-11-06 proposed: the probes are in `quarrylith.allocator.probes`
+  (`host` re-exports them): `probe_memory`, `probe_disk`, `probe_size` (0 for a
+  path that is not there, bounded in the files it counts), `process_table` (one
+  bounded `ps` with no argument column), `probe_tree`, `probe_process`, and the
+  parsers; a consumer's resident size is read from that table, so `measure`
+  makes one `ps` for all its consumers. `HostPlacement(record, probes=...)`
+  takes the probes it reads with; `sample_consumer` takes the keywords
+  `document`, `progress` and `sleep`; the undeclared use of memory is the
+  memory capacity less every live reservation against the available memory
+  (this PR)
+- 2026-11-06 proposed: the measured check applies on the node the document
+  names (the plugin has no measurement of another node); `hold` with
+  `measured` and no document is `unmeasured`; `headroom` of memory and disk on
+  the declared node is the least of the table's free and the measured room
+  above the floor, and 0 while unmeasured; `measured_shorts(value, document,
+  node, needs)` is the shared policy beside `table_shorts` and
+  `budget_shorts` (this PR)

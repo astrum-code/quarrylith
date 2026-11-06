@@ -187,6 +187,8 @@ def _pressure_lines(pressure):
     if pressure["swap_total"] is not None:
         used, total = pressure["swap_used"], pressure["swap_total"]
         parts.append(f"swap {used / 2**30:.1f} GiB of {total / 2**30:.1f} GiB")
+    if pressure.get("memory_free_percent") is not None:
+        parts.append(f"memory {pressure['memory_free_percent']}% free")
     return ["pressure: " + (", ".join(parts) or "no reading on this host")]
 
 

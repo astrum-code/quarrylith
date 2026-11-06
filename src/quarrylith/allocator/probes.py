@@ -154,6 +154,8 @@ PSI_FULL_WARN = 5.0
 #: cost a placement long.
 SYSCTL = "/usr/sbin/sysctl"
 PRESSURE_TIMEOUT_S = 3
+#: The share of memory that is free, in whole percent, on macOS.
+MEMORY_LEVEL = "kern.memorystatus_level"
 UNITS = {"K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40}
 #: The whole of `vm.swapusage`, as the kernel writes it (`total = 7168.00M  used
 #: = 5913.25M  free = 1254.75M  (encrypted)`): a figure, a point and a capital
@@ -171,6 +173,15 @@ def parse_pressure_level(text):
     found = text.strip()
     if re.fullmatch(r"[0-9]+", found) is None or int(found) < 1:
         raise ProbeError("probe_pressure: the pressure level is not a number")
+    return int(found)
+
+
+def parse_memory_level(text):
+    """The free share of memory in `kern.memorystatus_level`'s output: a whole
+    number of percent, 0 to 100. Anything else is a `ProbeError`."""
+    found = text.strip()
+    if re.fullmatch(r"[0-9]{1,3}", found) is None or int(found) > 100:
+        raise ProbeError("probe_pressure: the memory level is not a percent")
     return int(found)
 
 
@@ -207,13 +218,15 @@ def parse_swap_meminfo(text):
 
 
 def probe_pressure():
-    """`{"level", "swap_used", "swap_total", "method"}` of this host: the memory
-    pressure level (the kernel's 1 normal, 2 warn, 4 critical) and the swap in
-    bytes. A figure the host does not have is None, and is not a failed read;
-    one it has and cannot read raises `ProbeError`. On macOS each is one
-    `sysctl -n`; on Linux the level is 2 when `/proc/pressure/memory`'s `full
-    avg10` is `PSI_FULL_WARN` or more, else 1, and the swap comes from
-    `/proc/meminfo`."""
+    """`{"level", "swap_used", "swap_total", "memory_free_percent", "method"}` of
+    this host: the memory pressure level (the kernel's 1 normal, 2 warn, 4
+    critical), the swap in bytes and the share of memory that is free, in whole
+    percent (macOS: `kern.memorystatus_level`; Linux: `MemAvailable` over
+    `MemTotal`, rounded down). A figure the host does not have is None, and is
+    not a failed read; one it has and cannot read raises `ProbeError`. On macOS
+    each is one `sysctl -n`; on Linux the level is 2 when
+    `/proc/pressure/memory`'s `full avg10` is `PSI_FULL_WARN` or more, else 1,
+    and the swap and the free share come from `/proc/meminfo`."""
     if sys.platform == "darwin":
         level = parse_pressure_level(
             _run(
@@ -229,10 +242,18 @@ def probe_pressure():
                 PRESSURE_TIMEOUT_S,
             )
         )
+        free = parse_memory_level(
+            _run(
+                "probe_pressure",
+                [SYSCTL, "-n", MEMORY_LEVEL],
+                PRESSURE_TIMEOUT_S,
+            )
+        )
         return {
             "level": level,
             "swap_used": used,
             "swap_total": total,
+            "memory_free_percent": free,
             "method": "sysctl",
         }
     if sys.platform.startswith("linux"):
@@ -241,14 +262,25 @@ def probe_pressure():
             level = 2 if full >= PSI_FULL_WARN else 1
         except Absent:
             level = None
-        total, used = parse_swap_meminfo(_small("probe_pressure", "/proc/meminfo"))
+        meminfo = _small("probe_pressure", "/proc/meminfo")
+        total, used = parse_swap_meminfo(meminfo)
+        memory_total, available = parse_meminfo(meminfo)
+        if memory_total < 1:
+            raise ProbeError("probe_pressure: MemTotal in meminfo is 0")
         return {
             "level": level,
             "swap_used": used,
             "swap_total": total,
+            "memory_free_percent": min(available * 100 // memory_total, 100),
             "method": "psi" if level is not None else "meminfo",
         }
-    return {"level": None, "swap_used": None, "swap_total": None, "method": "none"}
+    return {
+        "level": None,
+        "swap_used": None,
+        "swap_total": None,
+        "memory_free_percent": None,
+        "method": "none",
+    }
 
 
 # -- disk ---------------------------------------------------------------------------

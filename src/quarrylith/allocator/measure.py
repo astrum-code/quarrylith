@@ -101,23 +101,35 @@ def measured_shorts(value, document, node, needs, why=""):
 LEVEL_NAMES = {1: "normal", 2: "warn", 4: "critical"}
 #: The lowest level that refuses new work: warn.
 REFUSE_LEVEL = 2
-#: Swap refuses new work when it is used past BOTH: a floor and a share of its
-#: total. macOS grows its swap on demand, so a share alone reads "nearly full"
-#: on a small swap (90% of 1 GiB is no crisis); the floor alone would refuse a
-#: large swap that still has room. The floor is twice the memory floor and about
-#: a sixth of this host's 48 GiB; the night that began it had 14 of 15 GiB.
+#: Swap refuses new work when it is nearly full AND memory is short. Nearly
+#: full is used past BOTH a floor and a share of its total. macOS grows its swap
+#: on demand, so a share alone reads "nearly full" on a small swap (90% of 1 GiB
+#: is no crisis); the floor alone would refuse a large swap that still has room.
+#: The floor is twice the memory floor and about a sixth of this host's 48 GiB;
+#: the night that began it had 14 of 15 GiB. And memory is short when under
+#: `MEMORY_FREE_UNDER_PERCENT` of it is free: macOS leaves old pages in swap for
+#: days, so a stock of swap alone would refuse a calm host (9.2 of 10 GiB at 84%
+#: free) and only the warn level, or swap with memory short, is struggling now.
 SWAP_FLOOR = 8 * 2**30
 SWAP_SHARE_PERCENT = 85
+MEMORY_FREE_UNDER_PERCENT = 40
 
 
 def _gib(n):
     return f"{n / 2**30:.1f} GiB"
 
 
-def swap_refused(used, total):
-    """Whether swap of `used` of `total` bytes refuses new work: the one place
-    the swap rule is written."""
-    return used >= SWAP_FLOOR and used * 100 >= total * SWAP_SHARE_PERCENT
+def swap_refused(used, total, free_percent):
+    """Whether swap of `used` of `total` bytes, with `free_percent` of memory
+    free (None: not known), refuses new work: the one place the swap rule is
+    written. Memory not shown short (a free share of 40% or more, or none known)
+    never refuses on swap."""
+    return (
+        used >= SWAP_FLOOR
+        and used * 100 >= total * SWAP_SHARE_PERCENT
+        and free_percent is not None
+        and free_percent < MEMORY_FREE_UNDER_PERCENT
+    )
 
 
 def pressure_view(value, why=""):
@@ -131,20 +143,24 @@ def pressure_view(value, why=""):
             "level": None,
             "swap_used": None,
             "swap_total": None,
+            "memory_free_percent": None,
             "refused": [],
             "unread": why or "the pressure reading failed",
         }
     level = value.get("level")
     used, total = value.get("swap_used"), value.get("swap_total")
+    free = value.get("memory_free_percent")
+    free = free if _number(free) else None
     refused = []
     if _number(level) and level >= REFUSE_LEVEL:
         refused.append(f"memory pressure is {LEVEL_NAMES.get(level, f'level {level}')}")
-    if _number(used) and _number(total) and swap_refused(used, total):
-        refused.append(f"swap {_gib(used)} of {_gib(total)}")
+    if _number(used) and _number(total) and swap_refused(used, total, free):
+        refused.append(f"swap {_gib(used)} of {_gib(total)}, memory {free}% free")
     return {
         "level": LEVEL_NAMES.get(level, f"level {level}") if _number(level) else None,
         "swap_used": used if _number(used) else None,
         "swap_total": total if _number(total) else None,
+        "memory_free_percent": free,
         "refused": refused,
         "unread": None,
     }

@@ -414,6 +414,7 @@ def stub(memory, resident=None):
             "level": 1,
             "swap_used": 0,
             "swap_total": GIB,
+            "memory_free_percent": 80,
             "method": "given",
         },
         process_table=lambda: table,

@@ -16,7 +16,13 @@ REAL_PROBE_PRESSURE = getattr(probes, "probe_pressure", None)
 def calm_pressure():
     """A host with no pressure and a small swap: what a placement test reads
     unless it says otherwise, so a busy test host cannot fail one."""
-    return {"level": 1, "swap_used": 0, "swap_total": 2**30, "method": "given"}
+    return {
+        "level": 1,
+        "swap_used": 0,
+        "swap_total": 2**30,
+        "memory_free_percent": 80,
+        "method": "given",
+    }
 
 
 @pytest.fixture(autouse=True)

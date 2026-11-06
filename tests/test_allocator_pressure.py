@@ -31,8 +31,9 @@ class Host:
     """The probes of a host whose memory pressure a test sets: every other probe
     is the real one. `reads` counts the reads."""
 
-    def __init__(self, level=1, used=0, total=2 * GIB, fail=None):
+    def __init__(self, level=1, used=0, total=2 * GIB, free=80, fail=None):
         self.level, self.used, self.total, self.fail = level, used, total, fail
+        self.free = free  # the share of memory that is free, in percent
         self.reads = 0
 
     def probe_pressure(self):
@@ -43,6 +44,7 @@ class Host:
             "level": self.level,
             "swap_used": self.used,
             "swap_total": self.total,
+            "memory_free_percent": self.free,
             "method": "given",
         }
 
@@ -106,7 +108,7 @@ def test_pressure_refuses_where_the_measured_room_says_yes(effort, clock):
     measured check passes; `place` refuses on the pressure alone, and on the
     swap alone."""
     record = effort
-    host = Host(level=2, used=14 * GIB, total=15 * GIB)
+    host = Host(level=2, used=14 * GIB, total=15 * GIB, free=30)
     placement, task = setup(record, clock, host)
     clock.step()
     host_reading(record, clock, available=14 * GIB + 400 * MIB)
@@ -114,7 +116,9 @@ def test_pressure_refuses_where_the_measured_room_says_yes(effort, clock):
     assert [s.cause for s in answer.shorts] == ["pressure", "pressure"]
     host.level = 1
     answer = placement.place(task, now=clock())
-    assert [s.detail for s in answer.shorts] == ["swap 14.0 GiB of 15.0 GiB"]
+    assert [s.detail for s in answer.shorts] == [
+        "swap 14.0 GiB of 15.0 GiB, memory 30% free"
+    ]
     host.used, host.level = 0, 4
     answer = placement.place(task, now=clock())
     assert [s.detail for s in answer.shorts] == ["memory pressure is critical"]
@@ -122,29 +126,50 @@ def test_pressure_refuses_where_the_measured_room_says_yes(effort, clock):
 
 # -- the swap -----------------------------------------------------------------------
 
-#: (used, total, refused): the rule is a share of the total and a floor, and
-#: both must hold. 14 of 15 GiB is the night's; the small swaps are macOS's.
+#: (used, total, free %, refused): swap refuses when it is nearly full (a floor
+#: and a share of the total, both) AND free memory is under 40%. 14 of 15 GiB at
+#: 30% free is the night's; 9.2 of 10 GiB at 84% free is the real state of the
+#: morning after (macOS leaves cold pages in swap for days); the small swaps are
+#: macOS's.
 SWAPS = [
-    (14 * GIB, 15 * GIB, True),
-    (8 * GIB, 9 * GIB, True),  # at the floor and past the share
-    (8 * GIB - MIB, 9 * GIB, False),  # a byte-ish short of the floor
-    (900 * MIB, 1000 * MIB, False),  # 90% of a small swap: no crisis
-    (300 * MIB, 330 * MIB, False),
-    (7 * GIB, 7 * GIB + 512 * MIB, False),  # 93% below the floor
-    (20 * GIB, 40 * GIB, False),  # past the floor, half full: room to grow
-    (8 * GIB, 10 * GIB, False),  # at the floor, 80%: under the share
-    (17 * GIB // 2, 10 * GIB, True),  # exactly the 85% share
-    (0, 0, False),  # no swap at all
+    (14 * GIB, 15 * GIB, 30, True),
+    (14 * GIB, 15 * GIB, 84, False),  # the same swap, memory not short
+    (9 * GIB + 204 * MIB, 10 * GIB, 84, False),  # 9.2 of 10 GiB: this morning
+    (9 * GIB + 204 * MIB, 10 * GIB, 39, True),  # the same swap, memory short
+    (14 * GIB, 15 * GIB, 39, True),  # just under 40%
+    (14 * GIB, 15 * GIB, 40, False),  # 40% free: not under it
+    (14 * GIB, 15 * GIB, 41, False),
+    (14 * GIB, 15 * GIB, 0, True),
+    (14 * GIB, 15 * GIB, None, False),  # no free figure: memory not shown short
+    (8 * GIB, 9 * GIB, 30, True),  # at the floor and past the share
+    (8 * GIB - MIB, 9 * GIB, 30, False),  # a byte-ish short of the floor
+    (900 * MIB, 1000 * MIB, 30, False),  # 90% of a small swap: no crisis
+    (300 * MIB, 330 * MIB, 30, False),
+    (7 * GIB, 7 * GIB + 512 * MIB, 30, False),  # 93% below the floor
+    (20 * GIB, 40 * GIB, 30, False),  # past the floor, half full: room to grow
+    (8 * GIB, 10 * GIB, 30, False),  # at the floor, 80%: under the share
+    (17 * GIB // 2, 10 * GIB, 30, True),  # exactly the 85% share
+    (0, 0, 30, False),  # no swap at all
 ]
 
 
-@pytest.mark.parametrize("used,total,refused", SWAPS)
-def test_the_swap_rule_is_a_floor_and_a_share_together(used, total, refused):
-    """templet:3161 -- the host is refused when swap used is at least 8 GiB
-    and at least 85% of the swap total, and only then: a small swap at 90% is
-    no crisis, and a large one half full has room."""
+@pytest.mark.parametrize("used,total,free,refused", SWAPS)
+def test_the_swap_rule_is_a_floor_a_share_and_short_memory_together(
+    used, total, free, refused
+):
+    """templet:3161 -- the host is refused for its swap when swap used is at
+    least 8 GiB and at least 85% of the swap total AND memory is under 40%
+    free, and only then: a small swap at 90% is no crisis, a large one half
+    full has room, and a nearly full swap with memory to spare is old pages."""
     shorts = measure.pressure_shorts(
-        {"level": 1, "swap_used": used, "swap_total": total}, "", "laptop"
+        {
+            "level": 1,
+            "swap_used": used,
+            "swap_total": total,
+            "memory_free_percent": free,
+        },
+        "",
+        "laptop",
     )
     assert bool(shorts) is refused
     if not refused:
@@ -152,20 +177,39 @@ def test_the_swap_rule_is_a_floor_and_a_share_together(used, total, refused):
     (short,) = shorts
     shown = lambda n: f"{n / GIB:.1f} GiB"  # noqa: E731
     assert short.cause == "pressure"
-    assert short.detail == f"swap {shown(used)} of {shown(total)}"
+    assert short.detail == f"swap {shown(used)} of {shown(total)}, memory {free}% free"
     assert (short.capacity, short.free, short.waits) == (total, total - used, True)
+
+
+def test_the_warn_level_refuses_alone_whatever_the_free_memory():
+    """templet:3161 -- warn or worse refuses on its own: with plenty of memory
+    free, with no free figure, and with no swap."""
+    for free in (95, 40, None):
+        value = {"level": 2, "swap_used": 0, "swap_total": 0}
+        value["memory_free_percent"] = free
+        (short,) = measure.pressure_shorts(value, "", "laptop")
+        assert short.detail == "memory pressure is warn"
 
 
 @over_backends
 def test_place_refuses_a_nearly_full_swap_and_not_a_small_one(effort, clock):
-    """templet:3161 -- through `place`: 14.0 of 15.0 GiB of swap is refused,
-    with the detail in the refusal's line; 900 of 1000 MiB is not."""
+    """templet:3161 -- through `place`: 14.0 of 15.0 GiB of swap at 30% free
+    memory is refused, with both figures in the refusal's line; the same swap at
+    84% free (and 9.2 of 10 GiB at 84%, the morning after) is not; 900 of
+    1000 MiB is not."""
     record = effort
-    host = Host(used=14 * GIB, total=15 * GIB)
+    host = Host(used=14 * GIB, total=15 * GIB, free=30)
     placement, task = setup(record, clock, host)
     answer = placement.place(task, now=clock())
-    assert pressure_of(answer).detail == "swap 14.0 GiB of 15.0 GiB"
-    assert "swap 14.0 GiB of 15.0 GiB" in answer.text
+    want = "swap 14.0 GiB of 15.0 GiB, memory 30% free"
+    assert pressure_of(answer).detail == want
+    assert want in answer.text
+    host.free = 84
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    host.used, host.total = 9 * GIB + 204 * MIB, 10 * GIB
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    host.free = 30
+    assert pressure_of(placement.place(task, now=clock()))
     host.used, host.total = 900 * MIB, 1000 * MIB
     assert isinstance(placement.place(task, now=clock()), Fit)
 
@@ -241,7 +285,10 @@ def test_a_host_with_no_pressure_reading_is_not_refused_for_that(effort, clock):
     host.level, host.used, host.total = 2, None, None
     assert pressure_of(placement.place(task, now=clock())).detail.endswith("warn")
     host.level, host.used, host.total = None, 14 * GIB, 15 * GIB
+    host.free = 30
     assert pressure_of(placement.place(task, now=clock())).detail.startswith("swap")
+    host.free = None  # no free figure: memory is not shown short
+    assert isinstance(placement.place(task, now=clock()), Fit)
 
 
 # -- fresh where it decides ---------------------------------------------------------
@@ -285,7 +332,7 @@ def test_headroom_is_nothing_on_a_node_under_pressure(effort, clock):
     placement, task = setup(record, clock, host)
     calm = placement.headroom(now=clock())["laptop"]
     assert calm["memory"] > 0 and calm["slots.claude-code"] > 0
-    for host_ in (Host(level=2), Host(used=14 * GIB, total=15 * GIB)):
+    for host_ in (Host(level=2), Host(used=14 * GIB, total=15 * GIB, free=30)):
         placement.probes = host_
         room = placement.headroom(now=clock())["laptop"]
         assert set(room) == set(calm) and set(room.values()) == {0}
@@ -345,7 +392,9 @@ def test_alloc_place_and_show_tell_the_pressure(
     code, out, err = alloc(capsys, *args)
     assert code == 0, (out, err)
     code, out, err = alloc(capsys, "show", url)
-    assert code == 0 and "pressure: normal, swap 0.0 GiB of 2.0 GiB" in out.splitlines()
+    assert code == 0 and (
+        "pressure: normal, swap 0.0 GiB of 2.0 GiB, memory 80% free" in out.splitlines()
+    )
     fake.level = 2
     code, out, err = alloc(capsys, *args)
     assert code == 2 and err == ""
@@ -360,12 +409,22 @@ def test_alloc_place_and_show_tell_the_pressure(
     code, out, _ = alloc(capsys, "show", url, "--json")
     assert json.loads(out)["pressure"]["refused"] == ["memory pressure is warn"]
     fake.level, fake.swap_used, fake.swap_total = 1, 14 * GIB, 15 * GIB
+    fake.free = 84  # the swap is nearly full and memory is not short: no refusal
     code, out, _ = alloc(capsys, *args)
-    assert code == 2 and "swap 14.0 GiB of 15.0 GiB" in out
+    assert code == 0, out
     code, out, _ = alloc(capsys, "show", url)
     assert (
-        "pressure: swap 14.0 GiB of 15.0 GiB; new work is refused; swap in use "
-        "falls only when its pages are read back or the host restarts"
+        "pressure: normal, swap 14.0 GiB of 15.0 GiB, memory 84% free"
+        in out.splitlines()
+    )
+    fake.free = 30
+    code, out, _ = alloc(capsys, *args)
+    assert code == 2 and "swap 14.0 GiB of 15.0 GiB, memory 30% free" in out
+    code, out, _ = alloc(capsys, "show", url)
+    assert (
+        "pressure: swap 14.0 GiB of 15.0 GiB, memory 30% free; new work is "
+        "refused; swap in use falls only when its pages are read back or the "
+        "host restarts"
     ) in out.splitlines()
     fake.swap_used = 0
     fake.pressure_fail = "probe_pressure: sysctl exited 1"
@@ -387,7 +446,8 @@ PSI = (
     "full avg10={full} avg60=0.00 avg300=0.00 total=789\n"
 )
 MEMINFO = (
-    "MemTotal:       16384000 kB\n"
+    "MemTotal:       {memtotal} kB\n"
+    "MemAvailable:   {available} kB\n"
     "SwapTotal:      {total} kB\n"
     "SwapFree:       {free} kB\n"
 )
@@ -469,6 +529,36 @@ def fake_run(answers, calls=None, kws=None):
     return run
 
 
+def test_the_free_share_of_memory_is_a_whole_percent_of_the_kernels():
+    """templet:3161 -- `kern.memorystatus_level` is a whole number from 0 to
+    100; anything else (a percent sign, a decimal or comma, a number out of
+    range, no number, a digit of another script) is a failed read."""
+    parse = real_probes.parse_memory_level
+    assert (parse("84\n"), parse(" 0 "), parse("100")) == (84, 0, 100)
+    for bad in ("", "84%", "84.5", "84,5", "101", "-1", "\u0668\u0664", "1 2", "x"):
+        with pytest.raises(ProbeError, match="memory level"):
+            parse(bad)
+
+
+def test_a_failed_free_share_read_is_a_failed_pressure_read(monkeypatch):
+    """templet:3161 -- the third read of macOS fails as the others do: a
+    ProbeError naming the probe, so `place` says `unmeasured`, never a yes."""
+    answers = {
+        (SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"): "1\n",
+        (SYSCTL, "-n", "vm.swapusage"): SWAPUSAGE,
+        (SYSCTL, "-n", "kern.memorystatus_level"): "84%\n",
+    }
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(real_probes, "_run", fake_run(answers))
+    with pytest.raises(ProbeError, match="memory level"):
+        REAL_PROBE_PRESSURE()
+    answers[(SYSCTL, "-n", "kern.memorystatus_level")] = ProbeError(
+        "probe_pressure: sysctl exited 1"
+    )
+    with pytest.raises(ProbeError, match="exited 1"):
+        REAL_PROBE_PRESSURE()
+
+
 class Ran:
     """A stand-in for `subprocess.run` that is a `sysctl` whose figures follow
     its locale: a comma decimal unless the caller's environment says `C`."""
@@ -483,6 +573,7 @@ class Ran:
         text = {
             "kern.memorystatus_vm_pressure_level": "1\n",
             "vm.swapusage": SWAPUSAGE,
+            "kern.memorystatus_level": "84\n",
         }[argv[-1]]
         if (kw.get("env") or {}).get("LC_ALL") != "C":
             text = text.replace(".", ",")
@@ -502,7 +593,8 @@ def test_the_sysctl_reads_run_in_the_c_locale_by_their_full_path(monkeypatch):
     got = REAL_PROBE_PRESSURE()
     assert got["swap_total"] == 7168 * MIB
     assert got["swap_used"] == round(5913.25 * MIB)
-    assert len(ran.calls) == 2
+    assert len(ran.calls) == 3
+    assert got["memory_free_percent"] == 84
     for argv, kw in ran.calls:
         assert argv[0] == SYSCTL
         assert kw["env"]["LC_ALL"] == "C" and kw["env"]["PATH"]
@@ -523,14 +615,15 @@ def test_a_hung_sysctl_is_a_short_bounded_failed_read(monkeypatch):
     assert ran.calls[0][1]["timeout"] == real_probes.PRESSURE_TIMEOUT_S
 
 
-def test_probe_pressure_on_macos_asks_sysctl_twice_and_nothing_else(monkeypatch):
-    """templet:3161 -- on macOS the read is two `sysctl -n` calls (the level
-    and the swap), with nothing from `vm_stat` or `ps`, and a failure of either
-    is a ProbeError naming the probe."""
+def test_probe_pressure_on_macos_asks_sysctl_three_times_only(monkeypatch):
+    """templet:3161 -- on macOS the read is three `sysctl -n` calls (the level,
+    the swap and the free share of memory), with nothing from `vm_stat` or `ps`,
+    and a failure of any is a ProbeError naming the probe."""
     calls = []
     answers = {
         (SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"): "2\n",
         (SYSCTL, "-n", "vm.swapusage"): SWAPUSAGE,
+        (SYSCTL, "-n", "kern.memorystatus_level"): "37\n",
     }
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(real_probes, "_run", fake_run(answers, calls))
@@ -539,9 +632,10 @@ def test_probe_pressure_on_macos_asks_sysctl_twice_and_nothing_else(monkeypatch)
         "level": 2,
         "swap_used": round(5913.25 * MIB),
         "swap_total": 7168 * MIB,
+        "memory_free_percent": 37,
         "method": "sysctl",
     }
-    assert len(calls) == 2
+    assert len(calls) == 3
     for key in answers:
         broken = dict(answers)
         broken[key] = real_probes.ProbeError("probe_pressure: sysctl exited 1")
@@ -557,10 +651,16 @@ def test_probe_pressure_on_linux_reads_psi_and_meminfo(monkeypatch, full, level)
     """templet:3161 -- on Linux, from files of the shape the kernel writes (a
     hand-written fixture, never a captured one): `/proc/pressure/memory`'s
     `full avg10` at 5.0 or more is level 2 (warn), else 1; the swap is
-    `SwapTotal` less `SwapFree`."""
+    `SwapTotal` less `SwapFree`; the free share of memory is `MemAvailable`
+    over `MemTotal`, in whole percent, rounded down."""
     files = {
         "/proc/pressure/memory": PSI.format(full=full),
-        "/proc/meminfo": MEMINFO.format(total=4 * 1024 * 1024, free=1024 * 1024),
+        "/proc/meminfo": MEMINFO.format(
+            memtotal=16_000_000,
+            available=5_999_999,
+            total=4 * 1024 * 1024,
+            free=1024 * 1024,
+        ),
     }
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(real_probes, "_small", lambda probe, path: files[path])
@@ -568,6 +668,7 @@ def test_probe_pressure_on_linux_reads_psi_and_meminfo(monkeypatch, full, level)
         "level": level,
         "swap_used": 3 * GIB,
         "swap_total": 4 * GIB,
+        "memory_free_percent": 37,
         "method": "psi",
     }
 
@@ -576,7 +677,9 @@ def test_probe_pressure_on_linux_without_psi_or_swap_reads_none(monkeypatch):
     """templet:3161 -- a Linux with no `/proc/pressure/memory` (an old kernel,
     or one without PSI) has no level, and a host with no swap has swap 0 of 0;
     neither is a failed read. A file that is there and unreadable is."""
-    files = {"/proc/meminfo": MEMINFO.format(total=0, free=0)}
+    files = {
+        "/proc/meminfo": MEMINFO.format(memtotal=1000, available=400, total=0, free=0)
+    }
 
     def small(probe, path):
         if path not in files:
@@ -587,6 +690,7 @@ def test_probe_pressure_on_linux_without_psi_or_swap_reads_none(monkeypatch):
     monkeypatch.setattr(real_probes, "_small", small)
     got = REAL_PROBE_PRESSURE()
     assert (got["level"], got["swap_used"], got["swap_total"]) == (None, 0, 0)
+    assert got["memory_free_percent"] == 40
 
     def unreadable(probe, path):
         raise ProbeError(f"{probe}: {path} is not readable (Permission denied)")
@@ -603,6 +707,7 @@ def test_probe_pressure_on_another_platform_reads_nothing(monkeypatch):
     monkeypatch.setattr(real_probes, "_run", fake_run({}))
     got = REAL_PROBE_PRESSURE()
     assert (got["level"], got["swap_used"], got["swap_total"]) == (None, None, None)
+    assert got["memory_free_percent"] is None
 
 
 def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
@@ -626,6 +731,7 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
         assert got["level"] in (1, 2, None)
     assert 0 <= got["swap_used"] <= got["swap_total"]
     assert got["swap_total"] % MIB == 0
+    assert 0 <= got["memory_free_percent"] <= 100
     if sys.platform == "darwin":
         env = {**os.environ, "LC_ALL": "C"}
         text = subprocess.run(
@@ -638,6 +744,13 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
         assert set(apart) == {"total", "used", "free"}, text
         assert abs(got["swap_total"] - apart["total"]) <= GIB, (got, text)
         assert abs(got["swap_used"] - apart["used"]) <= GIB, (got, text)
+        level = subprocess.run(
+            [SYSCTL, "-n", "kern.memorystatus_level"],
+            capture_output=True,
+            text=True,
+            env=env,
+        ).stdout
+        assert abs(got["memory_free_percent"] - int(level)) <= 15, (got, level)
 
 
 def test_a_file_that_is_not_there_is_absent_and_one_not_readable_is_an_error(

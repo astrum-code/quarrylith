@@ -103,8 +103,8 @@ flowchart LR
 
 | module | holds |
 |---|---|
-| `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`; the shared policy: `classify`, `needs_of`, `table_shorts`, `budget_shorts` |
-| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare`, `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
+| `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`, the document as plain data and back, `to_data(document, figures=None)` and `document_from_data(raw)`; the shared policy: `classify`, `needs_of`, `table_shorts(reader, node, needs, *, now)`, `budget_shorts` |
+| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare` (which returns a `Declaration`: `wrote`, `refusals` by consumer, `failed`), `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
 | `quarrylith.cli` | gains `quarrylith alloc declare|show|place|measure|consumer` (below) |
 
 The allocator imports the standard library and `quarrylith.record` only, and
@@ -479,6 +479,23 @@ document names. On top of the seam it has:
   between can make a later write refused: `declare` reports what it wrote
   and what it did not, and a second `declare` finishes it. A `set_capacity`
   below what is reserved is the record's refusal, passed on.
+
+  Three limits, each a person's to settle and not `declare`'s:
+  - **A failed `declare` followed by a different document** may leave a stale
+    hold: a consumer the failed document added and neither the last written
+    document nor the new one names. It over-reserves and never over-commits.
+    `declare` tracks no intended consumers. The way out is `release` of the
+    holder by a person, who sees it in `headroom`.
+  - **A document that names another node** does not release the old node's
+    holds or retire it. That is a person's act outside `declare`. A capacity
+    row a document drops stays as well (the record has no remove).
+  - **The stored `sha256`** is the fingerprint of the document as written,
+    its `"measure"` kept: it tells the same declaration again. It is no check
+    that the stored data is what was declared.
+
+  The consumers are checked, and written, those that keep or lower their
+  amount first, so a swap of two amounts on a table with no spare room is not
+  refused for the order the document lists them in.
 - **`resolve(document, *, fresh=False, now)`** -> figures. For each
   `"measure"`, the figure the latest `allocator/document` reading recorded
   for the same key; with none, or with `fresh`, the probe (`probe_memory`,
@@ -1141,3 +1158,17 @@ later: nothing in the effort runs sessions through the queue.
   `refuse`; a missing `class:` label weighs standard and an unknown one is
   `unclassified`; units by resource name; the required keys of the document;
   a measured consumer memory needs a probe (this PR)
+- 2026-11-05 proposed: the document as plain data (`to_data`,
+  `document_from_data`), which the document reading stores and `place` reads
+  back; the table check's signature `table_shorts(reader, node, needs, *,
+  now)`; `declare` returns a `Declaration` (`wrote`, `refusals` by consumer,
+  `failed`) and `hold` raises the record's `Refused` for a second live hold of
+  one holder and resource (this PR)
+- 2026-11-06 proposed: `declare` checks every consumer's amount, kept or
+  changed, against the new capacities before any write, and checks and writes
+  the consumers that keep or lower their amount first; a stored document
+  reading that does not parse is no document; `Placement.hold` and the seam
+  block say a second hold raises `Refused`, and the check is of standing
+  holds (or the same task's own); the limits under `declare` (a stale hold
+  after a failed `declare` and a different document, a renamed node's holds,
+  the `sha256` as fingerprint) (this PR)

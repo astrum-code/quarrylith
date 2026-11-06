@@ -146,6 +146,8 @@ def _part(short):
         return f"unclassified: no usable {what} label"
     if short.cause == "driver":
         return f"driver: {node} has no driver for the task's sandbox"
+    if node is None:
+        return "node: no allocation document is declared"
     return f"node: {node} is not declared"
 
 
@@ -164,7 +166,8 @@ def _line(task, run_class, shorts, waits, until, node):
     else:
         ending = "waits"
     reasons = "; ".join(_part(short) for short in shorts)
-    return f"allocator: {who} refused on {node}: {reasons}; {ending}"
+    where = "" if node is None else f" on {node}"
+    return f"allocator: {who} refused{where}: {reasons}; {ending}"
 
 
 class Placement(abc.ABC):
@@ -190,7 +193,10 @@ class Placement(abc.ABC):
     def hold(self, holder, needs, *, task=None, node=None, measured=True, now):
         """A standing reservation (task None) or a task's own, checked as
         `place` checks, and against the measured room unless `measured` is
-        False. Returns the reservation ids, or the `Refusal`."""
+        False. Returns the reservation ids, or the `Refusal`. A second live
+        hold of one holder and resource (a standing one, or the task's own for
+        the same task) is the caller's error, not a refusal for want of room:
+        it raises the record's `Refused`, since a change is a replace."""
 
     @abc.abstractmethod
     def release(self, holder, *, node=None, why):

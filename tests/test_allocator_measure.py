@@ -552,11 +552,11 @@ def test_sample_consumer_gives_the_peak_times_one_quarter_in_whole_blocks(
 @over_backends
 def test_sample_consumer_takes_the_peak_not_the_last_sample(record, clock, tmp_path):
     """templet:3161 -- the size is from the largest resident size of any
-    sample: 100, 300 then 200 MiB gives 300 x 1.25 rounded up to 512 MiB
-    (the last sample alone would give 256)."""
+    sample, times 1.25: 100, 220 then 150 MiB gives 275 MiB, rounded up to
+    512 MiB (the last sample alone would give 256, and the peak alone 256)."""
     from quarrylith.allocator import probes
 
-    sizes = iter([100 * MIB, 300 * MIB, 200 * MIB])
+    sizes = iter([100 * MIB, 220 * MIB, 150 * MIB])
     given = types.SimpleNamespace(
         process_table=lambda: [probes.Process(10, 1, next(sizes), "x")],
         resident=probes.resident,
@@ -605,8 +605,8 @@ def test_resolve_probes_once_and_then_gives_the_recorded_figures(
     )
     image = tmp_path / "disk.img"
     with open(image, "wb") as handle:
-        handle.truncate(200 * MIB)
-        handle.write(b"x" * (3 * MIB))
+        for _ in range(512):
+            handle.write(b"x" * MIB)
     consumers = (
         '[[consumer]]\nname = "yard"\nmemory = "measure"\n'
         'probe = { pidfile = "yard.pid" }\nwhy = "a service"\n'
@@ -619,8 +619,11 @@ def test_resolve_probes_once_and_then_gives_the_recorded_figures(
     disk = figures["capacity"]["disk"]
     expected = probes.probe_disk(str(tmp_path)) + probes.probe_size(str(image))
     expected = max(expected - 20 * GIB, 0)
-    assert isinstance(disk, int) and abs(disk - expected) < 2 * GIB
-    assert probes.probe_size(str(image)) < 20 * MIB
+    assert isinstance(disk, int) and abs(disk - expected) < 200 * MIB
+    # the image's 512 MiB are counted in: free space alone would be less
+    assert disk == 0 or disk - max(probes.probe_disk(str(tmp_path)) - 20 * GIB, 0) > (
+        256 * MIB
+    )
     assert figures["consumers"] == {"yard": {"memory": 3 * GIB // 2}}
     assert {"memory", "disk", "size", "sample yard"} <= set(calls)
     assert placement.declare(document, figures=figures, now=clock()).ok

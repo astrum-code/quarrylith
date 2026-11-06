@@ -6,7 +6,24 @@ import pytest
 from backends import Clock, admitted, url_for
 from hengestore import guarding, stop_all
 
+from quarrylith.allocator import probes
 from quarrylith.record import contract
+
+#: The real reader of the host's memory pressure, kept for the tests that read it.
+REAL_PROBE_PRESSURE = getattr(probes, "probe_pressure", None)
+
+
+def calm_pressure():
+    """A host with no pressure and a small swap: what a placement test reads
+    unless it says otherwise, so a busy test host cannot fail one."""
+    return {"level": 1, "swap_used": 0, "swap_total": 2**30, "method": "given"}
+
+
+@pytest.fixture(autouse=True)
+def calm_host(monkeypatch):
+    """The tests read no real memory pressure: the reader of the default probes
+    answers calm. A test that wants the real read takes REAL_PROBE_PRESSURE."""
+    monkeypatch.setattr(probes, "probe_pressure", calm_pressure, raising=False)
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -193,7 +193,10 @@ class Placement(abc.ABC):
     def hold(self, holder, needs, *, task=None, node=None, measured=True, now):
         """A standing reservation (task None) or a task's own, checked as
         `place` checks, and against the measured room unless `measured` is
-        False. Returns the reservation ids, or the `Refusal`."""
+        False. Returns the reservation ids, or the `Refusal`. A second live
+        hold of one holder and resource (a standing one, or the task's own for
+        the same task) is the caller's error, not a refusal for want of room:
+        it raises the record's `Refused`, since a change is a replace."""
 
     @abc.abstractmethod
     def release(self, holder, *, node=None, why):

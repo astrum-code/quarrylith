@@ -18,7 +18,6 @@ from .document import (
     to_data,
     unit_of,
 )
-from .table import table_shorts
 from .seam import (
     CAUSES,
     PLACEMENT_GROUP,
@@ -29,6 +28,7 @@ from .seam import (
     placement_for,
     refuse,
 )
+from .table import table_shorts
 
 __all__ = [
     "CAUSES",

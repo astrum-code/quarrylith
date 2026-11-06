@@ -39,6 +39,9 @@ class Declaration:
 
 
 def _digest(data):
+    """The fingerprint of the document as the caller wrote it, its "measure"
+    kept: it tells `declare` the same document again, and is no check that
+    the stored data is what was declared."""
     return hashlib.sha256(schema.canonical(data).encode()).hexdigest()
 
 
@@ -73,14 +76,18 @@ class HostPlacement(Placement):
 
     def _stored(self):
         """`(document, reading value)` of the latest `allocator/document`
-        reading, or None before one."""
+        reading, or None before one, and when the latest does not parse."""
         rows = self.record.read(
             "readings", source=SOURCE, kind=KIND, desc=True, limit=1
         )
         if not rows:
             return None
         value = rows[0]["value"]
-        return document_from_data(value["document"]), value
+        try:
+            return document_from_data(value["document"]), value
+        except (KeyError, TypeError, ValueError):
+            # a reading of another shape, or of a format not known: no document
+            return None
 
     def _node_shorts(self, node, sandbox=None):
         """The shorts of a node that is not live (`node`) or does not run
@@ -178,6 +185,7 @@ class HostPlacement(Placement):
                         r["holder"] == holder
                         and r["resource"] in needs
                         and r["run"] is None
+                        and r["task"] == task
                     ):
                         raise Refused(
                             f"{holder} holds {r['resource']} on {node} already "
@@ -217,7 +225,7 @@ class HostPlacement(Placement):
         one is in `failed`, the rest go on, and a second `declare` finishes
         it. The document reading is written last, and only when nothing
         failed."""
-        data = to_data(document, figures)
+        data = to_data(document, {} if figures is None else figures)
         resolved = document_from_data(data)
         digest = _digest(to_data(document))
         node = resolved.node
@@ -246,8 +254,8 @@ class HostPlacement(Placement):
                 wrote.append(f"{what}: {why}")
         for resource, amount in plan["grow"]:
             self._capacity(node, resource, amount, wrote, write)
-        for step in plan["consumers"]:
-            self._consumer(node, step, now, wrote, failed, write)
+        for action in plan["actions"]:
+            self._act(node, action, now, wrote, failed, write)
         for resource, amount in plan["shrink"]:
             self._capacity(node, resource, amount, wrote, write)
         if not failed:
@@ -272,32 +280,32 @@ class HostPlacement(Placement):
         if write(what, call)[1]:
             wrote.append(f"{what} = {amount}")
 
-    def _consumer(self, node, step, now, wrote, failed, write):
-        """One consumer's writes: a replace for each amount that changed, and
-        one hold for the resources it has none of."""
-        name = step["name"]
-        for old, resource, amount in step["replace"]:
+    def _act(self, node, action, now, wrote, failed, write):
+        """One write for a consumer: a hold for a resource it has none of, or
+        a replace of the hold it has."""
+        kind, name, resource, amount, old = action
+        if kind == "replace":
             what = f"replace {name} {resource}"
             why = f"{name} {resource} changed in the allocation document"
 
-            def swap(old=old, amount=amount, why=why):
+            def call():
                 return self.record.replace_reservation(old["id"], amount, why)
 
-            if write(what, swap)[0]:
+            if write(what, call)[0]:
                 wrote.append(f"{what}: {old['amount']} -> {amount}")
-        if not step["hold"]:
             return
+        what = f"hold {name} {resource}"
 
-        def take():
-            return self.hold(name, step["hold"], node=node, measured=False, now=now)
+        def call():
+            return self.hold(
+                name, {resource: amount}, node=node, measured=False, now=now
+            )
 
-        what = f"hold {name}"
-        done, made = write(what, take)
+        done, made = write(what, call)
         if done and isinstance(made, Refusal):
             failed.append((what, made.text))
         elif done:
-            for resource, amount in sorted(step["hold"].items()):
-                wrote.append(f"hold {name} {resource} {amount}")
+            wrote.append(f"{what} {amount}")
 
     def _plan(self, document, now):
         """What `declare` would do, read from the record: the reservations to
@@ -331,30 +339,34 @@ class HostPlacement(Placement):
                 release.append((r, "a second hold of one consumer and resource"))
             else:
                 kept[pair] = r
-        gone = {r["id"] for r, _ in release}
+        gone = {r["id"] for r, _ in release} | {r["id"] for r in kept.values()}
         working = [dict(r) for r in live if r["id"] not in gone]
         target = {**capacity, **dict(document.capacity)}
         wanted_capacity = sorted(document.capacity.items())
         grow = [(r, a) for r, a in wanted_capacity if a > capacity.get(r, -1)]
         shrink = [(r, a) for r, a in wanted_capacity if a < capacity.get(r, a)]
-        refusals, steps = {}, []
-        for consumer in document.consumers:
-            step = {"name": consumer.name, "replace": [], "hold": {}}
-            shorts = []
-            for resource, amount in sorted(consumer.amounts.items()):
-                old = kept.get((consumer.name, resource))
-                if old and old["amount"] == amount and old["until_at"] is None:
-                    continue
-                others = [w for w in working if old is None or w["id"] != old["id"]]
-                cap = target.get(resource, 0)
-                mine = [w for w in others if w["resource"] == resource]
-                short = room_short(
-                    node, resource, amount, cap, cap - peak(mine, now), others, now
-                )
-                if short is not None:
-                    shorts.append(short)
-                    continue
-                taken = dict(
+        # The consumers go back into the room the others leave, the ones that
+        # keep or lower their amount first: so a swap of two amounts is not
+        # refused for the order they are written in.
+        asks = [
+            (c, resource, amount, kept.get((c.name, resource)))
+            for c in document.consumers
+            for resource, amount in sorted(c.amounts.items())
+        ]
+        lowered = [a for a in asks if a[3] is not None and a[2] <= a[3]["amount"]]
+        raised = [a for a in asks if a not in lowered]
+        shorts, actions = {}, []
+        for consumer, resource, amount, old in lowered + raised:
+            cap = target.get(resource, 0)
+            mine = [w for w in working if w["resource"] == resource]
+            short = room_short(
+                node, resource, amount, cap, cap - peak(mine, now), working, now
+            )
+            if short is not None:
+                shorts.setdefault(consumer.name, []).append(short)
+                continue
+            working.append(
+                dict(
                     id=None,
                     resource=resource,
                     amount=amount,
@@ -364,19 +376,20 @@ class HostPlacement(Placement):
                     from_at=now,
                     until_at=None,
                 )
-                working = others + [taken]
-                if old is None:
-                    step["hold"][resource] = amount
-                else:
-                    step["replace"].append((old, resource, amount))
-            if shorts:
-                needs = dict(consumer.amounts)
-                refusals[consumer.name] = refuse(None, None, needs, shorts, node=node)
-            steps.append(step)
+            )
+            if old is None:
+                actions.append(("hold", consumer.name, resource, amount, None))
+            elif old["amount"] != amount or old["until_at"] is not None:
+                actions.append(("replace", consumer.name, resource, amount, old))
+        by_name = {c.name: c for c in document.consumers}
+        refusals = {
+            name: refuse(None, None, dict(by_name[name].amounts), found, node=node)
+            for name, found in shorts.items()
+        }
         return {
             "release": release,
             "grow": grow,
             "shrink": shrink,
-            "consumers": steps,
-            "refusals": refusals,
+            "actions": actions,
+            "refusals": {n: r for n, r in refusals.items()},
         }

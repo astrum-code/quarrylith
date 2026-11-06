@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`quarrylith alloc declare|show|place|measure|consumer measure`: the
+"""`quarrylith alloc declare|show|place|measure|clear|consumer measure`: the
 allocator's commands over a record. Every one takes `--timing` (the time and
 calls of the store and of the probes, on stderr) and `--debug` (each read,
 each short and each write, on stderr), and prints its phases with the elapsed
@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager
 
 from .allocator import probes as default_probes
-from .allocator import show
+from .allocator import budget, show
 from .allocator.document import load_document
 from .allocator.host import HostPlacement
 from .allocator.measure import began
@@ -386,6 +386,58 @@ def _measure(args):
     return 0
 
 
+def _clear(args):
+    for flag, text in (("--why", args.why), ("--actor", args.actor)):
+        if not text.isprintable():
+            raise Refused(f"{flag} is one printable line: no newline or control")
+    why = args.why.strip()
+    if not why or len(why) > budget.WHY_AT_MOST:
+        raise Refused(f"--why says why, in 1 to {budget.WHY_AT_MOST} characters")
+    provider = args.provider.strip().lower()
+    if not provider:
+        raise Refused("clear names a provider: the provider is empty")
+    said = budget.plain(provider)
+    with _session(args, readonly=False) as s:
+        with s.phase("reading"):
+            stored = show._latest(s.record, *show.DOCUMENT)
+            document = show._document(stored) if stored else None
+            if document is None:
+                raise Refused("no allocation document is declared: nothing to clear")
+            now = s.now()
+            stops = budget.report(s.record, document, provider, now=now)
+        with s.phase("clearing"):
+            if not any(w["state"] == "stop" for w in stops):
+                print(f"nothing to clear: {said} has no stop")
+                return 0
+            for w in budget.clearable(stops):
+                if w["raw"]:
+                    window = budget.plain(w["window"])
+                    print(
+                        f"{said} {window}: resets_at {w['raw']} is not read as a time"
+                    )
+            cleared, held = budget.clear(
+                s.record, document, provider, why, by=s.raw.actor, now=now
+            )
+        with s.phase("printing"):
+            if not cleared:
+                name = ", ".join(
+                    f"{budget.plain(w)} until {_when(at)}"
+                    + ("" if own else " (an earlier stop's)")
+                    for w, at, own in held
+                )
+                raise Refused(
+                    f"{said} {name}: a stop that names a reset holds until it"
+                )
+            for window in cleared:
+                name = budget.plain(window)
+                print(f"cleared {said} {name} (by {s.raw.actor}): {why}")
+            for window, at, own in held:
+                whose = "its own reset" if own else "an earlier stop's reset"
+                name = budget.plain(window)
+                print(f"{said} {name}: still held until {_when(at)}, {whose}")
+    return 0
+
+
 def _consumer_measure(args):
     seconds = _duration(args.window, "--for")
     every = _duration(args.every, "--every")
@@ -462,6 +514,12 @@ def add_commands(groups, actor):
     placed.add_argument("--json", action="store_true", help="as one JSON object")
     placed.add_argument("--now", type=int, help="the time, in ms (default: the clock)")
     command(commands, "measure", _measure, "read the host once and record it")
+    cleared = command(
+        commands, "clear", _clear, "clear a provider's stop that names no reset"
+    )
+    cleared.add_argument("provider", help="the provider, such as anthropic")
+    cleared.add_argument("--why", required=True, help="why: kept in the reading")
+    cleared.add_argument("--now", type=int, help="the time, in ms (default: the clock)")
     consumer = commands.add_parser("consumer", help="a standing consumer")
     sub = consumer.add_subparsers(dest="what", required=True)
     measured = command(

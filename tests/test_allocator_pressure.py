@@ -517,3 +517,22 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
     else:
         assert got["level"] in (1, 2, None)
     assert 0 <= got["swap_used"] <= got["swap_total"]
+
+
+def test_a_file_that_is_not_there_is_absent_and_one_not_readable_is_an_error(
+    tmp_path,
+):
+    """templet:3161 -- the small-file reader says `Absent` for a file the host
+    does not have (what a kernel without the pressure file gives), and a plain
+    `ProbeError`, not `Absent`, for a file that is there and cannot be read."""
+    with pytest.raises(real_probes.Absent, match="is not there"):
+        real_probes._small("probe_pressure", str(tmp_path / "nothing"))
+    locked = tmp_path / "locked"
+    locked.write_text("x")
+    locked.chmod(0)
+    try:
+        with pytest.raises(ProbeError, match="not readable") as caught:
+            real_probes._small("probe_pressure", str(locked))
+        assert not isinstance(caught.value, real_probes.Absent)
+    finally:
+        locked.chmod(0o600)

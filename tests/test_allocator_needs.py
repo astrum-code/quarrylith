@@ -50,7 +50,7 @@ def test_declare_with_drivers_declares_the_node_with_them_and_keeps_the_document
     assert node_drivers(record) == ["harness", "process"]
     stored, _ = placement._stored()
     assert tuple(stored.drivers) == document.drivers
-    assert placement.declared().drivers == document.drivers
+    assert placement.declared()[0].drivers == document.drivers
 
 
 @over_backends
@@ -296,9 +296,8 @@ def test_a_reservation_made_at_the_instant_of_the_reading_is_taken_as_seen(
     placement = HostPlacement(record)
     assert placement.declare(document, figures=FIGURES, now=clock()).ok
     task = make_task(record)
-    fit = placement.place(task, now=clock())
     host_reading(record, clock, available=3 * GIB)
-    start(record, task, fit)  # reserved at the reading's instant
+    start(record, task, placement.place(task, now=clock()))  # at the instant
     assert isinstance(placement.place(make_task(record), now=clock()), Fit)
     clock.step(1)
     other = make_task(record)
@@ -369,3 +368,23 @@ def test_a_henge_record_that_closed_itself_says_why(tmp_path):
     assert fake.closed == "recovery found journal/[3] and [4]"
     fake._closed = None
     assert fake.closed is None
+
+
+@over_backends
+def test_a_resize_keeps_the_drivers_the_node_was_declared_with(effort, clock):
+    """templet:3161 -- `resize` declares the document in force again with the
+    new figure, and the node keeps the drivers it has, not the document's."""
+    record = effort
+    placement = HostPlacement(record)
+    document = sample_document()
+    got = placement.declare(
+        document,
+        figures=FIGURES,
+        drivers=["harness", "process"],
+        now=clock(),
+    )
+    assert got.ok, got
+    clock.step()
+    sized = placement.resize("yard", 2 * GIB, now=clock())
+    assert sized.ok, sized
+    assert node_drivers(record) == ["harness", "process"]

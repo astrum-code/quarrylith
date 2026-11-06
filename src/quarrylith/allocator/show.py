@@ -65,6 +65,9 @@ def snapshot(record, *, now, pressure=None):
         nodes = []
         for node in sorted(record.read("nodes", live=True), key=lambda n: n["name"]):
             nodes.append(_node(record, node, now, value, held_by))
+            mine = document is not None and document.node == node["name"]
+            left = sorted(set(document.drivers) - set(node["drivers"])) if mine else []
+            nodes[-1]["unavailable"] = left
         said = record.read("statements", type="observation", desc=True, limit=50)
         stops = []
         if document is not None:
@@ -239,7 +242,10 @@ def lines(snap):
         )
     out.extend(_pressure_lines(snap.get("pressure")))
     for node in snap["nodes"]:
-        out.append(f"node {node['name']}: drivers {', '.join(node['drivers'])}")
+        head = f"node {node['name']}: drivers {', '.join(node['drivers'])}"
+        if node.get("unavailable"):
+            head += f"; declared but not available: {', '.join(node['unavailable'])}"
+        out.append(head)
         for r in node["resources"]:
             resource = r["resource"]
 

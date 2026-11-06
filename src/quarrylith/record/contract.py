@@ -652,6 +652,16 @@ class Record(abc.ABC):
     def close(self):
         """Close the record."""
 
+    #: Why the record is closed, or None while it is open. A backend sets it
+    #: when it closes: `close()`, or a failure that stops the writer.
+    _closed = None
+
+    @property
+    def closed(self):
+        """None while the record is open, else a line saying why it closed
+        (`"closed"` after `close()`). Asking never raises."""
+        return self._closed
+
     # -- the common parts -----------------------------------------------------
 
     @property

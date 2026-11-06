@@ -19,8 +19,11 @@ tells the walk what came of it:
 
 A candidate refused `never` (it can never fit) is in `walk.never`; when a walk
 started nothing and every candidate that passed the first three checks was
-refused `never`, `walk.only_never` is true, and the caller orders again with
-`never=walk.never` so that the landing tier can open.
+refused `never`, `walk.only_never` is true, and the caller orders again, once
+and in the same round, with `never=walk.never` so that the landing tier can
+open. It must not loop on `only_never`: a walk's `never` holds only its own
+round's refusals, so the second walk's does not include the first's, and a
+loop would alternate between the two sets for ever.
 
 A cut candidate is cut only for its own role's or repo's count, never for
 where it stands in its role's list: the sequence has already put the effort's
@@ -107,7 +110,9 @@ class Walk:
     @property
     def only_never(self):
         """Nothing started in this walk, and every candidate that passed the
-        first three checks (one at least) was refused `never`."""
+        first three checks (one at least) was refused `never`. A reason to
+        order once more with `never=walk.never`, not to loop: a second walk's
+        `never` does not carry the first's."""
         if self._begun or not self._passed:
             return False
         return all(key in self.never for key in self._passed)

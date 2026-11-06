@@ -325,11 +325,10 @@ def _sort_key(entry):
     )
 
 
-def _gather(reading, ready, landing=False):
-    """The ready set (or, with `landing`, the record's `landable`) as (task,
-    item) pairs: an item with an open task is represented by that task, one
-    with none by itself. An item whose only tasks are running or not ready is
-    left out."""
+def _gather(reading, ready):
+    """The ready set (or the record's `landable`) as (task, item) pairs: an
+    item with an open task is represented by that task, one with none by
+    itself. An item whose only tasks are running or not ready is left out."""
     record = reading.record
     by_item = {"open": {}, "running": {}}
     for state, found in by_item.items():
@@ -357,7 +356,7 @@ def _gather(reading, ready, landing=False):
                 )
                 continue
             task = tasks[0]
-            why = contract._unready(record, task, reading.now, landing=landing)
+            why = contract._unready(record, task, reading.now)
             left.append(_left(task, item, _plain(why, f"task {task['id']}")))
     return pairs, left
 
@@ -592,7 +591,7 @@ def _build(record, now, settings, never=None):
         floor = max(0, settings.review_slots - counts["reviews"])
         candidates = _tiers(entries, floor, counts["reviews"], settings.review_slots)
         if _opens_landing(candidates, counts, settings, now, seq):
-            found, more = _gather(reading, record.landable(now=now), landing=True)
+            found, more = _gather(reading, record.landable(now=now))
             landed, held = _entries(reading, found, "parked")
             held = list(held)
             landed = _without(landed, held, never)

@@ -7,6 +7,9 @@ the real read runs once on the test host, read-only. Every test that touches
 a record runs over every backend in BACKENDS."""
 
 import json
+import os
+import re
+import subprocess
 import sys
 
 import pytest
@@ -359,6 +362,11 @@ def test_alloc_place_and_show_tell_the_pressure(
     fake.level, fake.swap_used, fake.swap_total = 1, 14 * GIB, 15 * GIB
     code, out, _ = alloc(capsys, *args)
     assert code == 2 and "swap 14.0 GiB of 15.0 GiB" in out
+    code, out, _ = alloc(capsys, "show", url)
+    assert (
+        "pressure: swap 14.0 GiB of 15.0 GiB; new work is refused; swap in use "
+        "falls only when its pages are read back or the host restarts"
+    ) in out.splitlines()
     fake.swap_used = 0
     fake.pressure_fail = "probe_pressure: sysctl exited 1"
     code, out, _ = alloc(capsys, *args)
@@ -372,6 +380,7 @@ def test_alloc_place_and_show_tell_the_pressure(
 
 # -- the probe ----------------------------------------------------------------------
 
+SYSCTL = "/usr/sbin/sysctl"
 SWAPUSAGE = "total = 7168.00M  used = 5913.25M  free = 1254.75M  (encrypted)\n"
 PSI = (
     "some avg10=0.00 avg60=0.12 avg300=0.40 total=123456\n"
@@ -396,20 +405,62 @@ def test_swapusage_is_read_in_bytes():
             parse(bad)
 
 
+#: What a figure off the kernel's format looks like. Each reads as bytes, or as
+#: a wrong size, if it is let through: so each is a failed read.
+OFF_FORMAT = {
+    "a comma decimal (a locale)": (
+        "total = 7168,00M  used = 5745,25M  free = 1422,75M  (encrypted)"
+    ),
+    "a figure with no unit": "total = 7168.00  used = 5745.25  free = 1422.75",
+    "a lowercase unit": "total = 7168.00m  used = 5745.25m  free = 1422.75m",
+    "a space before the unit": "total = 7168.00 M  used = 5745.25 M  free = 1422.75 M",
+    "a unit the kernel does not write": "total = 7168.00P  used = 1.00P  free = 1.00P",
+    "a thousands separator": "total = 7,168.00M  used = 5,745.25M  free = 1.00M",
+    "a negative figure": "total = 7168.00M  used = -5.00M  free = 1.00M",
+    "text after the figures": "total = 1.00M  used = 1.00M  free = 0.00M  (x) more",
+    "text before the figures": "swap: total = 1.00M  used = 1.00M  free = 0.00M",
+    "a number in another script": "total = \u0667168.00M  used = 1.00M  free = 1.00M",
+    "no free figure": "total = 7168.00M  used = 5745.25M",
+}
+
+
+@pytest.mark.parametrize("why", sorted(OFF_FORMAT))
+def test_a_swapusage_off_the_kernels_format_is_a_failed_read_not_bytes(why):
+    """templet:3161 -- the swap text is read strictly, whole: a figure with no
+    unit, a lowercase unit, a comma, a space or anything else off the kernel's
+    `total = N.NNU  used = N.NNU  free = N.NNU` is a ProbeError and never read
+    as bytes, which would make the swap rule never fire without a word."""
+    with pytest.raises(ProbeError, match="swapusage"):
+        real_probes.parse_swapusage(OFF_FORMAT[why])
+
+
+def test_swapusage_takes_the_real_text_with_or_without_the_trailing_word():
+    """templet:3161 -- the kernel's text as this Mac writes it, with its
+    `(encrypted)` and a newline, and without the word."""
+    parse = real_probes.parse_swapusage
+    real = "total = 7168.00M  used = 5745.25M  free = 1422.75M  (encrypted)\n"
+    assert parse(real) == (7168 * MIB, round(5745.25 * MIB))
+    assert parse(real.replace("  (encrypted)", "")) == parse(real)
+    assert parse("total = 1T  used = 0K  free = 1T") == (2**40, 0)
+
+
 def test_the_pressure_level_is_a_number_of_the_kernels():
     """templet:3161 -- the level is the kernel's own number: 1 normal, 2 warn,
     4 critical; text that is no number is a failed read."""
     assert real_probes.parse_pressure_level("1\n") == 1
     assert real_probes.parse_pressure_level("4") == 4
-    for bad in ("", "warn", "-1", "0"):
+    assert real_probes.parse_pressure_level(" 2 \n") == 2
+    for bad in ("", "warn", "-1", "0", "2.0", "1 2", "\u0663", "1,0"):
         with pytest.raises(ProbeError, match="pressure level"):
             real_probes.parse_pressure_level(bad)
 
 
-def fake_run(answers, calls=None):
-    def run(probe, argv):
+def fake_run(answers, calls=None, kws=None):
+    def run(probe, argv, **kw):
         if calls is not None:
             calls.append(argv)
+        if kws is not None:
+            kws.append(kw)
         value = answers[tuple(argv)]
         if isinstance(value, Exception):
             raise value
@@ -418,14 +469,69 @@ def fake_run(answers, calls=None):
     return run
 
 
+class Ran:
+    """A stand-in for `subprocess.run` that is a `sysctl` whose figures follow
+    its locale: a comma decimal unless the caller's environment says `C`."""
+
+    def __init__(self, hang=False):
+        self.calls, self.hang = [], hang
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw))
+        if self.hang:
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+        text = {
+            "kern.memorystatus_vm_pressure_level": "1\n",
+            "vm.swapusage": SWAPUSAGE,
+        }[argv[-1]]
+        if (kw.get("env") or {}).get("LC_ALL") != "C":
+            text = text.replace(".", ",")
+        return subprocess.CompletedProcess(argv, 0, text, "")
+
+
+def test_the_sysctl_reads_run_in_the_c_locale_by_their_full_path(monkeypatch):
+    """templet:3161 -- under a comma-decimal locale `sysctl` writes `7168,00M`:
+    the reads are made with `LC_ALL=C` in their environment (the rest of the
+    environment kept), so the figures are the kernel's, and `sysctl` is run by
+    its path, so a PATH without `/usr/sbin` is not a failed read."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    ran = Ran()
+    monkeypatch.setattr(real_probes.subprocess, "run", ran)
+    got = REAL_PROBE_PRESSURE()
+    assert got["swap_total"] == 7168 * MIB
+    assert got["swap_used"] == round(5913.25 * MIB)
+    assert len(ran.calls) == 2
+    for argv, kw in ran.calls:
+        assert argv[0] == SYSCTL
+        assert kw["env"]["LC_ALL"] == "C" and kw["env"]["PATH"]
+        assert "LANG" not in kw["env"] or kw["env"]["LANG"] == "C"
+
+
+def test_a_hung_sysctl_is_a_short_bounded_failed_read(monkeypatch):
+    """templet:3161 -- each pressure read has its own short bound, a few
+    seconds (`PRESSURE_TIMEOUT_S`, not the ten of the other probes), so one
+    stuck `sysctl` cannot cost a placement long; the timeout is a ProbeError
+    naming the probe."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert 1 <= real_probes.PRESSURE_TIMEOUT_S <= 5
+    ran = Ran(hang=True)
+    monkeypatch.setattr(real_probes.subprocess, "run", ran)
+    with pytest.raises(ProbeError, match="probe_pressure"):
+        REAL_PROBE_PRESSURE()
+    assert len(ran.calls) == 1, "the first failed read ends it"
+    assert ran.calls[0][1]["timeout"] == real_probes.PRESSURE_TIMEOUT_S
+
+
 def test_probe_pressure_on_macos_asks_sysctl_twice_and_nothing_else(monkeypatch):
     """templet:3161 -- on macOS the read is two `sysctl -n` calls (the level
     and the swap), with nothing from `vm_stat` or `ps`, and a failure of either
     is a ProbeError naming the probe."""
     calls = []
     answers = {
-        ("sysctl", "-n", "kern.memorystatus_vm_pressure_level"): "2\n",
-        ("sysctl", "-n", "vm.swapusage"): SWAPUSAGE,
+        (SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"): "2\n",
+        (SYSCTL, "-n", "vm.swapusage"): SWAPUSAGE,
     }
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(real_probes, "_run", fake_run(answers, calls))
@@ -504,11 +610,14 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
     monkeypatch, capsys
 ):
     """templet:3161 -- the read for real, here, read-only: on macOS the level is
-    1, 2 or 4 and the swap figures are bytes with used within total; on Linux
-    the level is 1 or 2, or None where the kernel has no PSI. Nothing is
-    allocated to provoke a reading."""
+    1, 2 or 4 and the swap figures agree with `sysctl`'s own text, read apart
+    in the C locale (to a gibibyte, since swap moves between the two reads), also
+    when this process runs under a comma-decimal locale, so a figure misread as
+    bytes or in the wrong unit is caught; on Linux the level is 1 or 2, or None
+    where the kernel has no PSI. Nothing is allocated to provoke a reading."""
     if not sys.platform.startswith(("darwin", "linux")):
         pytest.skip(f"no real reader for {sys.platform}")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
     got = REAL_PROBE_PRESSURE()
     with capsys.disabled():
         print(f"\nREAL READ {sys.platform}: {json.dumps(got)}")
@@ -517,6 +626,19 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
     else:
         assert got["level"] in (1, 2, None)
     assert 0 <= got["swap_used"] <= got["swap_total"]
+    assert got["swap_total"] % MIB == 0
+    if sys.platform == "darwin":
+        env = {**os.environ, "LC_ALL": "C"}
+        text = subprocess.run(
+            [SYSCTL, "-n", "vm.swapusage"], capture_output=True, text=True, env=env
+        ).stdout
+        apart = {
+            name: float(number) * MIB
+            for name, number in re.findall(r"(total|used|free) = ([0-9.]+)M", text)
+        }
+        assert set(apart) == {"total", "used", "free"}, text
+        assert abs(got["swap_total"] - apart["total"]) <= GIB, (got, text)
+        assert abs(got["swap_used"] - apart["used"]) <= GIB, (got, text)
 
 
 def test_a_file_that_is_not_there_is_absent_and_one_not_readable_is_an_error(

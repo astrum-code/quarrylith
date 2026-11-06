@@ -21,7 +21,10 @@ pins:
       - src/quarrylith/record/contract.py::Record.finish_run
       - src/quarrylith/record/contract.py::Record.record_reading
       - src/quarrylith/record/contract.py::Record.state
-    paths: [src/quarrylith/allocator/, src/quarrylith/alloc_cli.py]
+    paths:
+      - src/quarrylith/allocator/
+      - src/quarrylith/alloc_cli.py
+      - src/quarrylith/cli.py
     at: 77fd64c4
 ---
 
@@ -602,8 +605,11 @@ document names. On top of the seam it has:
   `document`, for a document not yet declared, which `resolve` passes,
   `progress(number, total, peak)`, called after each sample, and `sleep`):
   the consumer's probe, sampled every `every` seconds for `seconds`, `seconds /
-  every + 1` times, each from one `ps`. A probe that finds nothing resident is
-  a `ProbeError`. It returns the
+  every + 1` times, each from one `ps`. A consumer with nothing resident at the
+  first sample is a `ProbeError` there, naming why, so a service that is down
+  is not waited on for the window (10 minutes at the default), nor is a
+  `declare` of a `"measure"` consumer that is down; a consumer up at the first
+  sample and gone later is sampled to the end. It returns the
   **declared size**: the peak resident size × 1.25, rounded up to a whole
   256 MiB. This is how the yard is measured for `"measure"`. Its supervisor,
   store and services are one process tree under the pid file.
@@ -770,7 +776,9 @@ Every `alloc` command:
   GiB, free 46.0 GiB, capacity 48.0 GiB, waits`) and each write (`write:
   reserve(...)`), a write line for each event the command makes;
 - **prints its phases with elapsed time once one passes five seconds** (the
-  CLI rule of #3157): `resolving: 6.2 s`, and while a consumer is sampled a
+  CLI rule of #3157): `resolving: 6.2 s`, and, while a phase is still running
+  past the bound, `measuring: still running, 5.0 s`, so a call that hangs is
+  not silent until it is cut; while a consumer is sampled a
   phase line with the samples done, the peak and the elapsed `m:ss`, the
   first once five seconds have passed and then every 30 seconds;
 - prints only figures and names the record holds. A document's free text (a
@@ -1396,3 +1404,8 @@ later: nothing in the effort runs sessions through the queue.
   uses; and a pid file left behind while another process holds the number is
   read as that process, a limit named under the measurement and left as it is
   (this PR)
+- 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`
+  at its first sample, not after the window; a command's phase that passes the
+  slow bound says `<phase>: still running, N s` while it runs, as well as its
+  time when it ends; and the page pins `src/quarrylith/cli.py`, which holds the
+  exit-code mapping (this PR)

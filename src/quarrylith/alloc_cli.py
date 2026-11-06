@@ -15,6 +15,7 @@ import dataclasses
 import json
 import re
 import sys
+import threading
 import time
 from contextlib import contextmanager
 
@@ -206,10 +207,27 @@ class Session:
         given = getattr(self.args, "now", None)
         return given if given is not None else self.raw.now_ms()
 
+    @contextmanager
     def phase(self, name):
+        """A phase of the command: timed, said when it ends past the slow
+        bound (as the order commands do), and said while it runs once it has
+        passed the bound, so a call that hangs is not silent."""
         from . import cli
 
-        return cli._phase(name, self.times)
+        started = time.perf_counter()
+
+        def running():
+            elapsed = time.perf_counter() - started
+            print(f"{name}: still running, {elapsed:.1f} s", file=sys.stderr)
+
+        timer = threading.Timer(cli.SLOW_PHASE_S, running)
+        timer.daemon = True
+        timer.start()
+        with cli._phase(name, self.times):
+            try:
+                yield
+            finally:
+                timer.cancel()
 
     def sampling(self, name, number, total, peak):
         """A consumer sampled `number` of `total` times, `peak` bytes at most:

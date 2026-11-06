@@ -447,6 +447,12 @@ class HostPlacement(Placement):
         top, why = 0, ""
         for number in range(1, total + 1):
             found, why = self.probes.resident(probe, self.probes.process_table())
+            if number == 1 and found is None:
+                # down at the first sample: nothing to wait the window out for
+                raise ProbeError(
+                    f"sample_consumer: nothing is resident under {name}'s probe"
+                    + (f" ({why})" if why else "")
+                )
             top = max(top, found or 0)
             if progress is not None:
                 progress(number, total, top)

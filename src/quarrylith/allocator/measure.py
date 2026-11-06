@@ -160,3 +160,16 @@ def ended(entry):
         name = entry["what"].split(" ")[1]
         return f"allocator: {name} memory is back within its declaration"
     return "allocator: undeclared use of memory has ended"
+
+
+def absent_began(name, why):
+    """The line for a consumer that is down, or whose probe sees nothing."""
+    return f"allocator: {name} is absent: {why}"
+
+
+def absent_ended(name, back):
+    """The line for a consumer that was absent: back, or no longer probed
+    (the document stopped naming a probe for it)."""
+    if back:
+        return f"allocator: {name} is back"
+    return f"allocator: {name} is no longer probed"

@@ -21,6 +21,8 @@ from .budget import allowance, budget_shorts, providers_of
 from .measure import (
     KIND as MEASURE_KIND,
     SOURCE as MEASURE_SOURCE,
+    absent_began,
+    absent_ended,
     began,
     drift_entries,
     ended,
@@ -290,7 +292,8 @@ class HostPlacement(Placement):
         raises `ProbeError` naming it; with no document declared there is
         nothing that names the node, the work disk or the consumers, and it
         refuses. It writes the reading, and a statement when a drift begins or
-        ends, and never a capacity or a reservation."""
+        ends and when a consumer goes absent or comes back, and never a
+        capacity or a reservation."""
         record = self.record
         with record.reading():
             stored = self._stored()
@@ -302,11 +305,13 @@ class HostPlacement(Placement):
             document = stored[0]
             free, capacity = self._memory_table(document, now)
             row = latest(record)
-        before = []
+        before, before_absent = [], {}
         if row is not None and isinstance(row["value"], dict):
             same = row["value"].get("node") == document.node
             drift = row["value"].get("drift")
             before = drift if same and isinstance(drift, list) else []
+            absent = row["value"].get("absent")
+            before_absent = absent if same and isinstance(absent, dict) else {}
         probes = self.probes
         memory = probes.probe_memory()
         value = {
@@ -337,6 +342,15 @@ class HostPlacement(Placement):
         for entry in before:
             if entry.get("what") not in now_whats:
                 record.state("observation", ended(entry), where="allocator")
+        # a consumer that goes absent, or comes back, is said once, so a probe
+        # that has gone blind is seen as well as a service that is down
+        for name, why in value["absent"].items():
+            if name not in before_absent:
+                record.state("observation", absent_began(name, why), where="allocator")
+        for name in before_absent:
+            if name not in value["absent"]:
+                line = absent_ended(name, name in value["consumers"])
+                record.state("observation", line, where="allocator")
         record.record_reading(MEASURE_SOURCE, MEASURE_KIND, value)
         return value
 

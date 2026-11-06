@@ -502,6 +502,37 @@ def test_a_follower_in_another_process_gets_every_event_by_watch(single):
 # -- crashes ----------------------------------------------------------------------
 
 
+def test_a_group_a_dead_writer_committed_is_there_at_the_next_open(single):
+    """templet:3159 -- Henge: `run.pgid` is an event like any other. A writer
+    that dies once its journal put is answered leaves it committed, and the
+    next open redoes it onto the run."""
+    url = single.url()
+    clock = Clock()
+    rec = opened(url, clock)
+    rec.init()
+    admitted(rec)
+    rec.declare_node("n1", ["process"], [])
+    rec.set_capacity("n1", "slots", 3, "slots")
+    task = rec.file_task("job", needs={"slots": 1}, effort="0001", sandbox="process")
+    run = rec.start_run(
+        task, "alpha", fence=None, node="n1", sandbox="process", expect_s=60
+    )
+    s = henge.spaces(rec.name)
+    seq = rec.head() + 1
+    rec.store = Crashing(rec.store, lambda sp, key: sp == s["journal"], after=True)
+    with pytest.raises(Crash):
+        rec.run_pgid(run, 4321)
+    abandon(rec)
+    rec = opened(url, clock)
+    try:
+        assert rec.head() == seq
+        assert rec.get("runs", run)["pgid"] == 4321
+        assert rec.events(seq - 1)[0].kind == "run.pgid"
+        assert rec.check() == []
+    finally:
+        rec.close()
+
+
 def test_a_crash_after_the_journal_put_is_recovered_at_the_next_open(single):
     """templet:3159 -- Henge: a crash after the journal put and before applied
     is recovered at the next open, and the replay still equals the records."""
@@ -916,6 +947,101 @@ def test_a_refusal_for_good_gives_up_at_once(path, exc, want):
     assert took < timeout_s / 2, took
     if want is Unknown:
         assert rec._closed is not None
+
+
+def _a_load_stopped_part_way(fake, dump):
+    """A record `dump`'s load stopped in, its writer gone: a new handle on it."""
+    rec = fake_record(fake, "w", via="load")
+    rec.init()
+    journal = henge.spaces("rec")["journal"]
+    rec.store = Crashing(rec.store, lambda sp, key: sp == journal and key == [2])
+    with pytest.raises(Crash):
+        rec.load(dump)
+    abandon(rec)
+    return fake_record(fake, "w2", via="load")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "an open's report",
+        "an open's sync",
+        "an open's read",
+        "an operation's read",
+        "a new ack's read",
+        "a caller's read",
+        "a load's emptiness check",
+        "a resumed load's read",
+    ],
+)
+def test_what_is_not_tried_again_is_unavailable_at_once(path):
+    """templet:3159 -- Henge: an open (its report, its sync and its reads), an
+    operation's reads before its commit, a new `ack`'s read, a caller's read, a
+    load's emptiness check and a resumed load's read of its journal are not
+    tried again: the store's one refusal is `Unavailable`, well before the
+    timeout, nothing is committed, the handle stays usable, and each goes
+    through once the store answers."""
+    timeout_s = 5.0
+    refused = errors.Unavailable("refused at once")
+    tries = []
+    fake = FakeStore()
+    rec = fake_record(fake, "w")
+    rec.init()
+    admitted(rec)
+    item(rec, "first")
+    dump = rec.dump()
+    rec.timeout_s = timeout_s
+    reopen = lambda: fake_record(fake, "w2", timeout_s=timeout_s)  # noqa: E731
+    if path == "an open's report":
+        rec.close()
+        _counted(fake, "durability", "journal", exc=refused, tries=tries)
+        start = reopen
+    elif path == "an open's sync":
+        rec.close()
+        _counted(fake, "sync", "journal", exc=refused, tries=tries)
+        start = reopen
+    elif path == "an open's read":
+        rec.close()
+        _counted(fake, "get", "state", ["schema"], exc=refused, tries=tries)
+        start = reopen
+    elif path == "an operation's read":
+        _counted(fake, "get", "rec", ["items", 404], exc=refused, tries=tries)
+        start = lambda: rec.move(404, "done", "no such item")  # noqa: E731
+    elif path == "a new ack's read":
+        _counted(fake, "get", "rec", ["cursors", "c"], exc=refused, tries=tries)
+        start = lambda: rec.ack("c", 1)  # noqa: E731
+    elif path == "a caller's read":
+        _counted(fake, "get", "rec", ["items", 404], exc=refused, tries=tries)
+        start = lambda: rec.get("items", 404)  # noqa: E731
+    elif path == "a load's emptiness check":
+        fake = FakeStore()
+        rec = fake_record(fake, "w", via="load", timeout_s=timeout_s)
+        rec.init()
+        _counted(fake, "get_many", "idx", exc=refused, tries=tries)
+        start = lambda: rec.load(dump)  # noqa: E731
+    else:
+        fake = FakeStore()
+        rec = _a_load_stopped_part_way(fake, dump)
+        rec.timeout_s = timeout_s
+        _counted(fake, "get_many", "journal", exc=refused, tries=tries)
+        start = lambda: rec.load(dump)  # noqa: E731
+    got, took = _within(fake, start, timeout_s)
+    assert type(got) is Unavailable, got
+    assert len(tries) == 1, tries
+    assert took < timeout_s / 2, took
+    fake.faults.clear()
+    if path.startswith("an open"):
+        rec = reopen()
+    assert rec._closed is None
+    if "load" in path:
+        rec.load(dump)
+        assert rec.dump()["journal"] == dump["journal"]
+    else:
+        head = rec.head()
+        assert head == len(dump["journal"])  # nothing was committed
+        item(rec, "after")
+        assert rec.head() == head + 1
+    assert rec.check() == []
 
 
 # -- the mirror: a put one copy did not take ----------------------------------------

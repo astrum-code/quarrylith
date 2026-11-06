@@ -23,7 +23,7 @@ PAIRS = (
     {("triage", "ready")}
     | {(f, "claimed") for f in ("ready", "blocked")}
     | {("claimed", t) for t in ("blocked", "in-review", "ready")}
-    | {("ready", "blocked"), ("blocked", "ready")}
+    | {("ready", "blocked"), ("blocked", "ready"), ("in-review", "blocked")}
     | {("in-review", "reviewed"), ("reviewed", "merge-ready")}
     | {("merge-ready", "reviewed")}
     | {
@@ -405,6 +405,30 @@ def test_moves_are_the_pages_pairs():
         assert pair in MOVES
     assert ("in-review", "done") in MOVES
     assert ("triage", "claimed") not in MOVES
+
+
+@over_backends
+def test_an_item_in_review_may_be_blocked_and_the_move_replays(record):
+    """templet:3159 -- `in-review` to `blocked` is a move, the one a hand-over
+    that no next run of the author could cure ends in: it replays to the
+    records and `check()` reports nothing of it. No other pair into `blocked`
+    comes from a state that was not there before."""
+    admitted(record)
+    n = task(record, "handed over", effort="0001")
+    for state in ("claimed", "in-review"):
+        _walk(record, n, state)
+    record.move(n, "blocked", "no next run could cure it", expect="in-review")
+    assert record.get("items", n)["state"] == "blocked"
+    assert [e.kind for e in record.events(0)][-1] == "item.state"
+    dump = record.dump()
+    assert replay(dump) == dump["records"]
+    assert record.check() == []
+    record.move(n, "ready", "cured")
+    assert {f for f, t in MOVES if t == "blocked"} == {
+        "ready",
+        "claimed",
+        "in-review",
+    }
 
 
 def _walk(record, n, to):

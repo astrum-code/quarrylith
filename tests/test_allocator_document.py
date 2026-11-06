@@ -337,3 +337,52 @@ def test_a_loaded_document_is_read_only_data():
         doc.node = "other"
     with pytest.raises(AttributeError):
         doc.classes[0].name = "other"
+
+
+# -- the document as data (build step 2) -------------------------------------------
+
+FIGURES = {
+    "capacity": {"memory": 48 * GIB, "disk": 200 * GIB},
+    "consumers": {"yard": {"memory": 3 * GIB // 2}},
+}
+
+
+def test_a_document_round_trips_through_plain_data():
+    """templet:3161 -- the document, as plain data, keeps each "measure" until
+    figures are given and then holds them as numbers; the data survives JSON
+    and loads back to the same document."""
+    import json
+
+    from quarrylith.allocator import document_from_data, to_data
+
+    doc = load_document(sample_text())
+    data = to_data(doc)
+    assert data["capacity"]["memory"] == "measure"
+    assert "lane.widgets" not in data["capacity"]
+    assert data["lane"] == [{"name": "widgets", "labels": ["repo:widgets"], "max": 4}]
+    assert document_from_data(json.loads(json.dumps(data))) == doc
+    resolved = to_data(doc, FIGURES)
+    assert resolved["capacity"]["memory"] == 48 * GIB
+    assert resolved["capacity"]["disk"] == 200 * GIB
+    (yard,) = [c for c in resolved["consumer"] if c["name"] == "yard"]
+    assert yard["memory"] == 3 * GIB // 2
+    back = document_from_data(json.loads(json.dumps(resolved)))
+    assert back.capacity["memory"] == 48 * GIB
+    assert back.capacity["lane.widgets"] == 4
+    assert back.consumers[2].amounts == {"memory": 3 * GIB // 2}
+    assert back.classes == doc.classes
+    assert to_data(back) == resolved
+
+
+def test_data_with_a_measure_and_no_figure_is_refused_naming_the_key():
+    """templet:3161 -- resolving the document with a figure missing is
+    refused, with the key named."""
+    from quarrylith.allocator import to_data
+
+    doc = load_document(sample_text())
+    with pytest.raises(DocumentError, match="capacity.disk"):
+        to_data(doc, {"capacity": {"memory": GIB}, "consumers": FIGURES["consumers"]})
+    with pytest.raises(DocumentError, match="consumer.yard.memory"):
+        to_data(doc, {"capacity": FIGURES["capacity"], "consumers": {}})
+    with pytest.raises(DocumentError, match="capacity.memory"):
+        to_data(doc, {"capacity": {"memory": -1, "disk": 1}, "consumers": {}})

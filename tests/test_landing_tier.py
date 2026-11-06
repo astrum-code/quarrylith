@@ -281,6 +281,48 @@ def test_at_most_review_slots_landing_runs_at_once(backend, record, clock):
 
 
 @over_backends
+def test_the_cap_comes_after_the_role_cut_and_before_a_hold(backend, record, clock):
+    """templet:3163 -- `check` tests the role, the landing limit, the cap and
+    the hold, in that order: a landing review cut for two reasons is given the
+    first (a landing review is exempt from the landing limit, so the limit
+    never cuts it)."""
+    world(record, clock)
+    for n in (8, 9):
+        land_run(record, landing_review(record, role=f"r{n}"))
+    busy = item(record, "busy", role="r1")
+    run_of(record, task_of(record, busy), fence=grant(record, busy))
+    first = landing_review(record, role="r1")
+    second = landing_review(record, role="r2")
+    third = landing_review(record, role="r3")
+    settings = Settings(review_slots=2, hold_after_s=0)
+    sequence = settle(record, settings)
+    assert sequence.counts["landing"] == 2
+    by_item = {c.item: c for c in sequence.candidates}
+    assert [by_item[n].exempt for n in (first.review, second.review)] == ["review"] * 2
+    walk = Walk(sequence, settings=settings)
+    # the role is at its instances and the cap is full: the role's text
+    assert walk.check(by_item[first.review]) == "role r1: 1 of 1 busy"
+    # the role is free and the cap is full: the cap's
+    assert walk.check(by_item[second.review]) == "landing reviews: 2 of 2 busy"
+    # held behind a refused candidate and at the cap: the cap's, not the hold's
+    walk.refused(by_item[second.review], refusal("memory", text="short"))
+    assert walk.check(by_item[third.review], {"memory": 1}) == (
+        "landing reviews: 2 of 2 busy"
+    )
+    # the cap free, the hold: the hold's
+    wider = Settings(review_slots=3, hold_after_s=0)
+    again = settle(record, wider)
+    held = Walk(again, settings=wider)
+    held.refused(
+        next(c for c in again.candidates if c.item == second.review),
+        refusal("memory", text="short"),
+    )
+    assert "held behind" in held.check(
+        next(c for c in again.candidates if c.item == third.review), {"memory": 1}
+    )
+
+
+@over_backends
 def test_the_cap_counts_only_landing_candidates(backend, record, clock):
     """templet:3163 -- live landing runs cut a landing candidate and nothing
     else: admitted work still starts at the cap."""

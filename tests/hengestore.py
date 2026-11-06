@@ -80,12 +80,7 @@ class Running:
         if placement == "mirror":
             command.append("--mirror")
         self._command = command + [str(self.folder)]
-        self.proc = subprocess.Popen(
-            self._command,
-            stdout=self.log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        self.proc = self._spawn()
         self.address = f"ipc://{self.folder}/henge.sock"
         self._wait()
 
@@ -130,14 +125,29 @@ class Running:
             os.killpg(self.proc.pid, signal.SIGKILL)
         self.proc.wait()
 
-    def restart(self):
-        """A store gone: start it again on the same folder."""
-        self.proc = subprocess.Popen(
-            self._command,
+    def _spawn(self):
+        """The store under `storeguard.py`, in a session of its own: the guard
+        ends the group, and removes the folder, once this process is gone, by
+        however it went."""
+        return subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("storeguard.py")),
+                "--parent",
+                str(os.getpid()),
+                "--root",
+                str(self.root),
+                "--",
+                *self._command,
+            ],
             stdout=self.log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+
+    def restart(self):
+        """A store gone: start it again on the same folder."""
+        self.proc = self._spawn()
         self._wait()
 
     def stop(self):
@@ -146,7 +156,8 @@ class Running:
             try:
                 self.proc.wait(30)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.proc.pid, signal.SIGKILL)
                 self.proc.wait()
         self.log.close()
         shutil.rmtree(self.root, ignore_errors=True)

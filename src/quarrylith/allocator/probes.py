@@ -16,6 +16,8 @@ from collections import namedtuple
 #: The one `ps` call: pid, parent, resident size in KiB and the executable's
 #: name. No column carries arguments.
 PS = ["ps", "-A", "-o", "pid=,ppid=,rss=,comm="]
+#: Where macOS keeps `ps`, run by its path so a PATH without `/bin` is no failure.
+PS_DARWIN = "/bin/ps"
 #: What a probe reads at most: the bytes of `ps`'s output and the rows of its
 #: table, the files of a folder it sizes, and the bytes of a small file.
 MAX_BYTES = 8 * 2**20
@@ -122,10 +124,10 @@ def probe_memory():
     available is `vm_stat`'s free, inactive, purgeable and speculative pages
     (the memory the system gives back); on Linux `MemAvailable`."""
     if sys.platform == "darwin":
-        total = _run("probe_memory", ["sysctl", "-n", "hw.memsize"]).strip()
+        total = _run("probe_memory", [SYSCTL, "-n", "hw.memsize"]).strip()
         if not total.isdigit():
             raise ProbeError("probe_memory: sysctl hw.memsize is not a number")
-        available = parse_vm_stat(_run("probe_memory", ["vm_stat"]))
+        available = parse_vm_stat(_run("probe_memory", [VM_STAT]))
         return {
             "memory_total": int(total),
             "memory_available": available,
@@ -153,6 +155,7 @@ PSI_FULL_WARN = 5.0
 #: the two pressure reads may take: a few seconds, so one stuck `sysctl` cannot
 #: cost a placement long.
 SYSCTL = "/usr/sbin/sysctl"
+VM_STAT = "/usr/bin/vm_stat"
 PRESSURE_TIMEOUT_S = 3
 #: The share of memory that is free, in whole percent, on macOS.
 MEMORY_LEVEL = "kern.memorystatus_level"
@@ -348,7 +351,10 @@ def parse_ps(text):
 
 def process_table():
     """The processes of this host, from one `ps`."""
-    return parse_ps(_run("ps", PS))
+    argv = list(PS)
+    if sys.platform == "darwin" and argv[0] == "ps":
+        argv[0] = PS_DARWIN
+    return parse_ps(_run("ps", argv))
 
 
 def probe_tree(pid, table=None):

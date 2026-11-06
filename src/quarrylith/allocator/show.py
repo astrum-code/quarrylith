@@ -9,7 +9,7 @@ document's free text."""
 from .document import document_from_data
 from .measure import KIND as MEASURE_KIND
 from .measure import SOURCE as MEASURE_SOURCE
-from .measure import _number, began
+from .measure import MEMORY_FREE_UNDER_PERCENT, _number, began
 from .seam import _size, _when
 
 DOCUMENT = ("allocator", "document")
@@ -175,10 +175,11 @@ def _pressure_lines(pressure):
     if pressure["refused"]:
         line = "pressure: " + "; ".join(pressure["refused"]) + "; new work is refused"
         if any(r.startswith("swap") for r in pressure["refused"]):
-            # swap in use is a stock: it stays until the pages are touched
+            # the swap refusal ends with the memory, not with the swap
             line += (
-                "; swap in use falls only when its pages are read back "
-                "or the host restarts"
+                f"; it clears once {MEMORY_FREE_UNDER_PERCENT}% or more of "
+                "memory is free again (a process that exits frees its memory "
+                "and its swap)"
             )
         return [line]
     parts = []

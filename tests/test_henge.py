@@ -1507,6 +1507,8 @@ def test_on_a_mirror_a_resumed_load_settles_the_loading_it_read(monkeypatch):
         reads[s["state"]] = "w0"
         rec = opened(url, actor="loader", via="load", timeout_s=5.0)
         reads.clear()
+        # a batch of 3: the crash is at the next batch's first entry
+        monkeypatch.setattr(henge, "LOAD_BATCH", 3)
         rec.store = Crashing(
             rec.store, lambda space, key: space == s["journal"] and key == [4]
         )
@@ -1599,7 +1601,8 @@ def test_on_a_mirror_an_open_settles_a_loading_it_goes_on_past(monkeypatch, read
         def nth(space, key):
             if space == s["state"] and key == ["loading"]:
                 puts.append(key)
-                return len(puts) == (2 if read == "null" else 1)
+                # the load's start, its batch's commit point, its end
+                return len(puts) == (3 if read == "null" else 1)
             return False
 
         def armed(space, key, value):
@@ -2172,7 +2175,9 @@ def test_on_a_mirror_a_resumed_load_refuses_events_that_are_not_the_dumps(monkey
 # -- the resumable load ------------------------------------------------------------
 
 
-def test_a_load_stopped_part_way_goes_on_with_the_same_dump(single, tmp_path):
+def test_a_load_stopped_part_way_goes_on_with_the_same_dump(
+    single, tmp_path, monkeypatch
+):
     """templet:3159 -- Henge: a load stopped part-way continues from head() + 1
     at the next open when given the same dump, refuses a different dump, and
     refuses every other operation until it ends."""
@@ -2189,6 +2194,8 @@ def test_a_load_stopped_part_way_goes_on_with_the_same_dump(single, tmp_path):
     rec = opened(url, actor="loader", via="load")
     rec.init()
     s = henge.spaces(rec.name)
+    # a batch of 5: the crash is at the next batch's first entry
+    monkeypatch.setattr(henge, "LOAD_BATCH", 5)
     rec.store = Crashing(
         rec.store, lambda space, key: space == s["journal"] and key == [6]
     )
@@ -2491,7 +2498,7 @@ OUTCOMES = {
     4: Unknown,
     5: Unknown,
     9: Unavailable,
-    10: Unknown,
+    10: None,
     11: None,
     12: Unavailable,
     13: Unavailable,
@@ -2601,7 +2608,12 @@ class Writers:
         for who, rec in list(self.live.values()):
             rec.close()
         reader = fake_record(self.fake, "reader", clock=self.clock)
-        assert reader.check() == []
+        # not torn; and a load the race left in progress is reported as that
+        findings = reader.check()
+        in_progress = [f for f in findings if "a load is in progress" in f]
+        loading = self.fake.value(self.s["state"], ["loading"])
+        assert bool(in_progress) == isinstance(loading, dict), findings
+        assert [f for f in findings if f not in in_progress] == []
         dump = reader.dump()
         reader.close()
         # a writer that ended in Unknown or Unavailable put nothing after its
@@ -2769,10 +2781,38 @@ def _run_row(fake, clock, row, case):
         writers.get("w2").init()
         source = _source_dump(clock)
         w1 = writers.open("w1")
+        if row == 10:
+            # a load in progress is stopped by no other writer: this one meets
+            # its entries, stops, and opens again, redoing a batch that is
+            # committed and none that is not, and is refused; the held put
+            # meets any version the redo moved, and the load ends
+            def other_opens():
+                def note(r):
+                    return r.note("past", "the other writer")
+
+                for _ in range(3):
+                    writers.run("w2", note)
+
+            match = (
+                _and(_who("w1"), _in("journal"), lambda w, sp, k, v: k == [3])
+                if case == "between its entries"
+                else _and(_who("w1"), _nth(_in("rec", "items"), 3))
+            )
+            result = race(
+                writers,
+                "w1",
+                lambda: w1.load(source),
+                match,
+                during=other_opens,
+                past=False,
+            )
+            _ended_as(row, result, w1)
+            assert w1.dump()["journal"] == source["journal"]
+            writers.live.pop("w2", None)
+            writers.interleave(200, seed=row * 1000)
+            return writers.finish()
         if row == 9:
             match = _and(_who("w1"), _in("state"), lambda w, sp, k, v: k == ["loading"])
-        elif row == 10:
-            match = _and(_who("w1"), _nth(_in("rec", "items"), 3))
         else:
             match = _and(
                 _who("w1"),
@@ -2958,6 +2998,8 @@ RUNS = [
     (8, None),
     (9, None),
     (10, None),
+    (10, "a batch"),
+    (10, "between its entries"),
     (11, None),
     (12, None),
     (13, None),
@@ -2975,7 +3017,7 @@ def test_every_row_of_the_put_table_has_a_run():
 
 
 @pytest.mark.parametrize("row,case", RUNS, ids=[f"row{r}-{c}" for r, c in RUNS])
-def test_two_live_writers_never_tear_the_record(row, case, small_chunks):
+def test_two_live_writers_never_tear_the_record(row, case, small_chunks, monkeypatch):
     """templet:3159 -- Henge, two live writers, every row of the put table:
     two writers on one record (the lock bypassed for the second) run 200
     interleaved operations over a store fake that can hold back any one put
@@ -2983,7 +3025,12 @@ def test_two_live_writers_never_tear_the_record(row, case, small_chunks):
     row until the other writer has committed past it. Each run: the replay
     equals the records, check() is clean, applied, head and every cursor
     never step back, and a writer that ends in Unknown or Unavailable made no
-    put after a check found journal/[high+1]."""
+    put after a check found journal/[high+1]. Row 10 holds a load, whose entries
+    no other writer commits past: at one event a batch and at a real batch, past
+    its commit point, and between a batch's entries. The other writer stops, and
+    the load ends. `test_load_two_writers.py` runs that at every call of a load."""
+    if row == 10 and case is None:
+        monkeypatch.setattr(henge, "LOAD_BATCH", 1)
     if case == "each of its puts":
         # an open whose recovery is held at each of its own puts in turn,
         # until it makes no more

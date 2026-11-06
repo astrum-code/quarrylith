@@ -2172,7 +2172,9 @@ def test_on_a_mirror_a_resumed_load_refuses_events_that_are_not_the_dumps(monkey
 # -- the resumable load ------------------------------------------------------------
 
 
-def test_a_load_stopped_part_way_goes_on_with_the_same_dump(single, tmp_path):
+def test_a_load_stopped_part_way_goes_on_with_the_same_dump(
+    single, tmp_path, monkeypatch
+):
     """templet:3159 -- Henge: a load stopped part-way continues from head() + 1
     at the next open when given the same dump, refuses a different dump, and
     refuses every other operation until it ends."""
@@ -2189,6 +2191,8 @@ def test_a_load_stopped_part_way_goes_on_with_the_same_dump(single, tmp_path):
     rec = opened(url, actor="loader", via="load")
     rec.init()
     s = henge.spaces(rec.name)
+    # a batch of 5: the crash is at the next batch's first entry
+    monkeypatch.setattr(henge, "LOAD_BATCH", 5)
     rec.store = Crashing(
         rec.store, lambda space, key: space == s["journal"] and key == [6]
     )

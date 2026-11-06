@@ -208,7 +208,7 @@ def test_a_batch_reads_what_it_needs_at_once(tmp_path, monkeypatch):
 
 
 def test_a_batch_is_named_and_within_one_read():
-    """templet:3159 -- Henge: the batch is one named constant, and a crashed
+    """templet:3159 -- Henge: the batch is one named constant, and a committed
     batch's entries come back in one `get_many`."""
     assert 1 <= henge.LOAD_BATCH <= henge.MANY
     assert henge.LOAD_BATCH * 50 <= henge.KEPT
@@ -360,24 +360,66 @@ def test_a_redo_of_a_batch_settles_a_directory_and_shrinks_its_split(
     assert rec.check() == []
 
 
-def test_an_open_redoes_a_cut_batch_and_settles_each_entry(dump, monkeypatch):
-    """templet:3159 -- Henge: an open that finds a load's entries past `applied`
-    redoes them whole, each put again with the version read before it goes on
-    past it ("Only past an answer"), so `head()` and `check()` read a whole
-    prefix of the dump, with no resume."""
+def committed_at(puts, to):
+    """The put that commits a batch: `loading`, naming its last seq."""
+    state = henge.spaces("rec")["state"]
+    return next(
+        i
+        for i, p in enumerate(puts)
+        if p[0] == state
+        and p[1] == ["loading"]
+        and isinstance(p[2], dict)
+        and p[2].get("to") == to
+    )
+
+
+def test_an_open_redoes_a_committed_batch_and_settles_each_entry(dump, monkeypatch):
+    """templet:3159 -- Henge: an open that finds a load's batch committed and not
+    applied redoes exactly that batch, each entry put again with the version
+    read before it goes on past it ("Only past an answer"), then `applied`, one
+    sync and `head` (row 6), so `head()` and `check()` read a whole prefix of
+    the dump, with no resume."""
     base, puts = load_log(dump, BATCH, monkeypatch)
     journal = henge.spaces("rec")["journal"]
-    entries = [i for i, p in enumerate(puts) if p[0] == journal]
-    fake = holding(base + puts[: entries[4] + 1])
+    state = henge.spaces("rec")["state"]
+    fake = holding(base + puts[: committed_at(puts, BATCH) + 1])
     client = Spy(fake.client("w2"))
     rec = henge.HengeRecord(client, "rec", actor="l", via="load", timeout_s=1.0)
     rec.clock = Clock()
-    assert rec.head() == 5
+    assert rec.head() == BATCH
     put_again = [c[2] for c in client.calls if c[0] == "put" and c[1] == journal]
-    assert put_again == [[s] for s in range(1, 6)]
+    assert put_again == [[s] for s in range(1, BATCH + 1)]
+    assert fake.value(state, ["applied"]) == BATCH
+    assert fake.value(state, ["head"]) == BATCH
+    calls = [c[:3] for c in client.calls]
+    applied = calls.index(("put", state, ["applied"]))
+    head = calls.index(("put", state, ["head"]), applied)
+    assert ("sync", journal, None) in calls[applied:head]
+    assert any("load is in progress" in f for f in rec.check())
+    rec.load(dump)
+    assert rec.dump() == dump
+    assert rec.check() == []
+
+
+def test_an_open_redoes_no_entry_of_a_batch_not_committed(dump, monkeypatch):
+    """templet:3159 -- Henge: entries past what `loading` names are a batch that
+    was not committed. A part of a batch is another plan than the whole, and its
+    loader may be alive, so an open redoes none of them and puts none of them:
+    `head()` is the last batch's, and they are the load's to put again."""
+    base, puts = load_log(dump, BATCH, monkeypatch)
+    journal = henge.spaces("rec")["journal"]
     state = henge.spaces("rec")["state"]
-    assert fake.value(state, ["applied"]) == 5
-    assert fake.value(state, ["head"]) == 5
+    start = committed_at(puts, BATCH) + 1
+    entries = [i for i, p in enumerate(puts) if p[0] == journal and i > start]
+    fake = holding(base + puts[: entries[2] + 1])
+    before = {s: fake.value(journal, [s]) for s in range(BATCH + 1, BATCH + 4)}
+    client = Spy(fake.client("w2"))
+    rec = henge.HengeRecord(client, "rec", actor="l", via="load", timeout_s=1.0)
+    rec.clock = Clock()
+    assert rec.head() == BATCH
+    assert not [c for c in client.calls if c[0] == "put" and c[1] == journal]
+    assert fake.value(state, ["applied"]) == BATCH
+    assert before == {s: fake.value(journal, [s]) for s in before}
     assert any("load is in progress" in f for f in rec.check())
     rec.load(dump)
     assert rec.dump() == dump
@@ -410,7 +452,7 @@ def test_a_resumed_load_refuses_a_batch_that_is_not_the_dumps(dump, monkeypatch)
     other["event"]["actor"] = "somebody else"
     fake = holding(left + [(journal, [4], other)])
     rec = on_fake(fake, "w2")
-    assert rec.head() == 4
+    assert rec.head() == 0
     with pytest.raises(Refused, match="not the dump's"):
         rec.load(dump)
     assert fake.value(state, ["loading"])["digest"]
@@ -456,7 +498,11 @@ def kill_points(events):
         Point(space="state", key=["head"], value=seq)
         for seq in range(BATCH, events + 1, BATCH)
     ]
+    batches = math.ceil(events / BATCH)
     points += [
+        Point(space="state", key=["loading"], nth=2, after=False),
+        Point(space="state", key=["loading"], nth=2),
+        Point(space="state", key=["loading"], nth=batches + 2, after=False),
         Point(space="state", key=["applied"], value=BATCH),
         Point(op="sync", nth=1),
         Point(op="sync", nth=1, after=False),
@@ -467,7 +513,7 @@ def kill_points(events):
         Point(space="journal", key=[BATCH + 3], after=False),
         Point(space="rec", nth=2),
         Point(space="idx", nth=2),
-        Point(space="state", key=["loading"], nth=2),
+        Point(space="state", key=["loading"], nth=batches + 2),
     ]
     return points
 
@@ -569,9 +615,9 @@ STORE_PLACEMENTS = ["single", "mirror"]
 @pytest.mark.parametrize("placement", STORE_PLACEMENTS)
 def test_a_store_killed_inside_a_load_resumes(placement, tmp_path, monkeypatch):
     """templet:3159 -- Henge: SIGKILL of the store at a batch boundary and inside
-    a batch. The load gives `Unknown` or `Unavailable`, never returns; the
-    store restarted on its folder, the record opens, and the same dump ends it
-    with the same dump."""
+    a batch, and at the load's end. The load gives `Unknown` or `Unavailable`,
+    never returns; the store restarted on its folder, the record opens, and the
+    same dump ends it with the same dump."""
     monkeypatch.setattr(henge, "LOAD_BATCH", BATCH)
     dump = a_dump(tmp_path / "source")
     events = len(dump["journal"])
@@ -582,6 +628,12 @@ def test_a_store_killed_inside_a_load_resumes(placement, tmp_path, monkeypatch):
         Point(space="rec", nth=BATCH + 1),
         Point(space="idx", nth=3),
         Point(space="state", key=["loading"], nth=2),
+        Point(
+            space="state",
+            key=["loading"],
+            nth=math.ceil(events / BATCH) + 2,
+            after=False,
+        ),
     ]
     assert events > 2 * BATCH
     with own_store(placement) as running:

@@ -6,6 +6,8 @@
   Unix socket's path is at most 104 bytes on macOS) and stopped at exit. A
   record's name is fresh per test (`fresh_name`). Without henge-store-serve
   installed, the Henge tests skip with that reason, never pass.
+- `own_store(placement)`: a store for one test alone, which it may `kill()`
+  and `restart()` on the same folder.
 - `Guarded`: the client every record of the suite gets. It passes on only
   the operations the record may use (`put`, `get`, `get_many`, `sync`,
   `durability`, `close`), and refuses a delete, any listing, and a
@@ -77,8 +79,9 @@ class Running:
         command = [str(Path(sys.executable).parent / "henge"), "single"]
         if placement == "mirror":
             command.append("--mirror")
+        self._command = command + [str(self.folder)]
         self.proc = subprocess.Popen(
-            command + [str(self.folder)],
+            self._command,
             stdout=self.log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -121,6 +124,22 @@ class Running:
     def url(self, name=None):
         return f"henge:{self.folder}#{name or fresh_name()}"
 
+    def kill(self):
+        """SIGKILL the store, every process of it, and wait until it is gone."""
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        self.proc.wait()
+
+    def restart(self):
+        """A store gone: start it again on the same folder."""
+        self.proc = subprocess.Popen(
+            self._command,
+            stdout=self.log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        self._wait()
+
     def stop(self):
         if self.proc.poll() is None:
             self.proc.send_signal(signal.SIGTERM)
@@ -143,6 +162,20 @@ def store(placement="single"):
         if placement not in _STORES:
             _STORES[placement] = Running(placement)
         return _STORES[placement]
+
+
+@contextlib.contextmanager
+def own_store(placement="single"):
+    """A store of `placement` for this test alone, one it may kill. Skips when
+    no store can run here."""
+    why = missing()
+    if why:
+        pytest.skip(why)
+    running = Running(placement)
+    try:
+        yield running
+    finally:
+        running.stop()
 
 
 def stop_all():

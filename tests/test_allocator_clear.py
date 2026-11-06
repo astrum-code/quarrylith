@@ -361,6 +361,7 @@ def test_the_command_matches_the_provider_without_case_or_space(
         capsys, "clear", url, " Anthropic ", "--why", "gone", "--now", str(clock())
     )
     assert code == 0, err
+    assert out.startswith("cleared anthropic five_hour (by ")
     assert readings(opener)[-1]["value"]["provider"] == "anthropic"
 
 

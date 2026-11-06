@@ -426,6 +426,52 @@ def test_an_open_redoes_no_entry_of_a_batch_not_committed(dump, monkeypatch):
     assert rec.check() == []
 
 
+@pytest.mark.parametrize("committed", [False, True])
+def test_the_guard_reads_what_a_load_has_committed(dump, monkeypatch, committed):
+    """templet:3159 -- Henge, the guard: a writer open before the load checks
+    `journal/[high+1]` before a put of what it read. An entry a load has not
+    committed is no other writer's commit, and it goes on; one that `loading`
+    names is, and it puts nothing more and closes."""
+    base, puts = load_log(dump, BATCH, monkeypatch)
+    journal = henge.spaces("rec")["journal"]
+    fake = holding(base)
+    other = on_fake(fake, "w2")
+    at = committed_at(puts, BATCH)
+    last = at + 1 if committed else at
+    assert puts[at - 1][0] == journal
+    for space, key, value in puts[:last]:
+        fake._apply_put("loader", space, key, value, None)
+    if committed:
+        with pytest.raises(Unavailable, match="journal/\\[1\\] is there"):
+            other.ack("c1", 0)
+        assert other._closed is not None
+    else:
+        other.ack("c1", 0)
+        assert other._closed is None
+    other.close()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_a_writer_that_meets_a_load_stops(dump, monkeypatch, committed):
+    """templet:3159 -- Henge: a writer open before the load, whose commit put
+    meets the load's entry, stops and redoes nothing, whether the batch is
+    committed or not: it closes, and puts nothing more."""
+    base, puts = load_log(dump, BATCH, monkeypatch)
+    state = henge.spaces("rec")["state"]
+    fake = holding(base)
+    other = on_fake(fake, "w2")
+    at = committed_at(puts, BATCH)
+    for space, key, value in puts[: at + 1 if committed else at]:
+        fake._apply_put("loader", space, key, value, None)
+    mark = len(fake.log)
+    with pytest.raises(Unavailable, match="a load is in progress"):
+        other.note("past", "the other writer")
+    assert other._closed is not None
+    landed = [c for c in fake.log[mark:] if c[1] == "put" and isinstance(c[4], bytes)]
+    assert landed == []
+    assert fake.value(state, ["applied"]) == 0
+
+
 def test_entries_past_applied_with_no_load_mean_another_writer(dump, monkeypatch):
     """templet:3159 -- Henge: only a load in progress explains more than one
     entry past `applied`. With `loading` null, a second entry is another

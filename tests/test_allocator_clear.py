@@ -744,3 +744,33 @@ def test_a_cleared_status_over_the_limit_is_a_stop(effort, clock, by, why):
         0,
         None,
     )
+
+
+@over_backends
+def test_the_command_writes_out_a_window_name_that_forges_a_line(
+    backend, effort, url, clock, capsys
+):
+    """templet:3161 -- the window is a writer's text too: a reading whose
+    `kind` holds a newline prints on one line in each place the command names
+    a window (the raw reset, `cleared`, `still held`, and a refusal)."""
+    record = effort
+    declared(record, clock)
+    week = clock() + 5 * HOUR
+    odd, held = "five\nforged: 1", "seven\rforged: 2"
+    reading(record, clock, kind=odd, status="rejected", resets_at=10**18)
+    reading(record, clock, kind=held, status="rejected", resets_at=week)
+    now = str(clock())
+    one_writer(backend, record)
+    code, out, err = alloc(
+        capsys, "clear", url, "anthropic", "--why", "x", "--now", now
+    )
+    assert (code, err) == (0, "")
+    assert len(out.splitlines()) == 3 and "\r" not in out
+    assert "cleared anthropic five\\nforged: 1" in out
+    assert "anthropic five\\nforged: 1: resets_at" in out
+    assert "anthropic seven\\rforged: 2: still held" in out
+    code, out, err = alloc(
+        capsys, "clear", url, "anthropic", "--why", "x", "--now", now
+    )
+    assert code == 2 and len(err.splitlines()) == 1
+    assert "seven\\rforged: 2 until" in err

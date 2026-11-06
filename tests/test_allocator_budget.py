@@ -53,8 +53,9 @@ def test_at_a_warning_a_run_is_refused_once_the_providers_weight_passes_the_max(
     agents(record, clock, placement, 1)
     assert isinstance(refused(placement, record, clock), Fit)
     agents(record, clock, placement, 1)
+    third = make_task(record)
     head = record.head()
-    answer = refused(placement, record, clock)
+    answer = placement.place(third, now=clock())
     assert record.head() == head
     short = budget_short(answer)
     assert (short.asked, short.free, short.node) == (1, 0, "laptop")

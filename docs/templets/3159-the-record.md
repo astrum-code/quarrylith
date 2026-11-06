@@ -723,12 +723,16 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
       there, but a limit this page's "A directory also needs a byte bound"
       does not state. Rows 6 and 7 of the put table assert no outcome in
       `two_live_writers`, where every other raced row does.
-    - **`ack` and `beat`, the lock bypassed.** A second `ack` reads the directory,
-      another `ack` splits, and the second then reads the shrunk chunk: its key lands
-      outside the chunk's new range, the `ack` is answered, and `read("cursors")`
-      misses it. `check()` stays clean, since it compares no index of an unjournaled
-      kind. Old code does the same (henge's review of this page's load, round 3,
-      `ack_probe.py`); it has no issue yet.
+    - **`ack` and `beat`, the lock bypassed.** Two paths lose an answered key from
+      `read("cursors")` or `read("beats")`, and `check()` stays clean on both, since
+      it compares no index of an unjournaled kind. Old code does the same on both
+      (henge's review of this page's load, rounds 3 and 4); neither has an issue yet.
+      - **Out of range.** A second `ack` reads the directory, another `ack` splits,
+        and the second then reads the shrunk chunk: its key lands outside the chunk's
+        new range (`ack_probe.py`).
+      - **A new chunk overwritten.** One `ack` stops between its new chunks and its
+        directory. Another finds the number unlisted and puts over its chunk, and the
+        first goes on and lists it (`live_ack.py`).
     - **For the services' step.** An open during a store's restart is
       refused at once (see "The record's timeout"); whether a service's
       start should ride out a restart is that step's to say. On Henge
@@ -1037,7 +1041,7 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   |---|---|---|---|---|---|
   | 1 | the commit, step 2 (re-sent after an error) | `journal/[seq]` | `absent`; this entry read back, the version read | itself: one entry per seq | its `Conflict` is read back: this entry is put again with the version read, and goes on once answered; another entry, recovery (row 6) and `Unavailable` |
   | 2 | the event's records, step 3 (`meta` counters included) | `.rec` | decide's read, or own put | the commit put | `Unknown` |
-  | 3 | the event's index edits and a split, step 3 | chunks; a directory only in a split (with no split, rows 6, 12 and 13 put it again); new chunks `absent`, or the chunk already there. Another chunk at a number a fresh read of the directory lists means a stale plan, and the writer stops; at a number none lists it is a dead `ack`'s or `beat`'s leftover, and is put over, with the version read | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
+  | 3 | the event's index edits and a split, step 3 | chunks; a directory only in a split (with no split, rows 6, 12 and 13 put it again); new chunks `absent`, or the chunk already there. Another chunk at a number a fresh read of the directory lists means a stale plan, and the writer stops; at a number none lists it is put over, with the version read: with one writer an unlisted number can only be a dead `ack`'s or `beat`'s leftover, and two live ones, the lock bypassed, can overwrite one another's, as on the follow-up list | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
   | 4 | `applied` and `head`, step 4, only upward | `.state` | decide's read, or own put | the commit put | `Unknown` |
   | 5 | a retry after an error or `Conflict` at rows 2-4; nothing left to put, the value read put again | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
   | 6 | recovery's redo of one entry, or, at open with a load in progress, of the batch `loading` commits, whole, and of nothing with no such batch: the entry put again first, then rows 2-4, a split's redo included, and a directory with no split left put again as read before its chunks; nothing left to put, the value read put again. No entry: at open, `applied` and then `head` put again as read; after a step-2 `Conflict`, `head` only brought up, and `applied` put again as read by the writer's next commit, before its commit put | `journal/[a+1]`, then as rows 2-4; no entry, `.state` | the entry's version as read; fresh read | a redo: `journal/[a+2]` (the entry's put needs none). No entry: recovery's read of `journal/[a+1]` (the next commit's put, read again after an error, `journal/[high+1]`). A second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
@@ -2323,10 +2327,12 @@ shrunk chunk:
   another: a new chunk goes `absent` or is the same chunk, and a number the
   directory lists that holds another stops the plan (row 3), so it never overwrites
   a listed one. A split lists its numbers before it shrinks its chunk, so a plan
-  that read the shrunk chunk finds its number listed. An unlisted number can only
-  be a leftover: a commit's split is redone, but nothing redoes a dead `ack`'s or
-  `beat`'s, and stopping there would refuse every later split of that index, with
-  the lock held. It is put over, as it always was (henge's review, round 3).
+  that read the shrunk chunk finds its number listed. With one writer, an unlisted
+  number can only be a leftover: a commit's split is redone, but nothing redoes a
+  dead `ack`'s or `beat`'s, and stopping there would refuse every later split of
+  that index, with the lock held. Two live `ack`s or `beat`s, the lock bypassed, can
+  overwrite one another's, as on the follow-up list. It is put over, as it always was
+  (henge's review, rounds 3 and 4).
 
 Chunk 0 has no lower bound, so a key below every key so far needs no
 directory write. Pieces are filled to half the bounds, so a chunk just
@@ -2816,7 +2822,8 @@ client alone is the dependency (above).
   commit, to the open and to the guard (Recovery, row 6, the guard, invariant 13's
   clause on what recovery redoes, and (F1) and (F2)). A split's new chunk goes
   `absent` or is the same, as row 3 said, stops at a number the directory lists, and
-  is put over a leftover none lists. Invariant 13's two
+  is put over one none lists, which with one writer can only be a leftover. Invariant
+  13's two
   live writers stand as written, and henge's reviews of rounds 1 and 2 are why.
   `check()` reports a load in progress. The event format,
   `ack`, `beat` and every other write do not change (this PR)

@@ -1,0 +1,2 @@
+bump: minor
+- a provider's budget stop (a `rejected` reading, or `utilization` from `stop_at`) now holds until its own `resets_at` however old the reading, and one that names no reset holds until a newer reading, which the refusal says; a status that is missing or unknown is paced like a warning; `status` is matched without case or surrounding space, `utilization` may be numeric text, and a `resets_at` in seconds is read as seconds; `Short` gains an optional `note`

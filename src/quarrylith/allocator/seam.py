@@ -56,7 +56,7 @@ class Short:
     waits: bool  # can waiting alone ever make it fit?
     until: int | None  # a time after which it may fit, else None
     holders: list  # the largest live holders of the resource: [(holder, amount)]
-    note: str | None = None  # plain words the numbers do not say, for the line
+    detail: str = ""  # one line for a cause the figures do not say: why, or the floor
 
     def __post_init__(self):
         if self.cause not in CAUSES:
@@ -127,7 +127,13 @@ def _size(resource, amount, unit=True):
 def _part(short):
     """One short as words."""
     what, node = short.resource, short.node
-    if short.cause in ("room", "measured", "budget"):
+    if short.cause == "measured":
+        part = (
+            f"{what} {_size(what, short.asked)} asked, "
+            f"{_size(what, short.free)} available"
+        )
+        return f"{part}, {short.detail} [measured]" if short.detail else part
+    if short.cause in ("room", "budget"):
         part = (
             f"{what} {_size(what, short.asked)} asked, {_size(what, short.free)} free"
         )
@@ -138,9 +144,10 @@ def _part(short):
             part += f" ({held})"
         if short.cause == "room":
             return part
-        return f"{part} [{short.cause}]" + (f" -- {short.note}" if short.note else "")
+        part = f"{part} [{short.cause}]"
+        return f"{part} -- {short.detail}" if short.detail else part
     if short.cause == "unmeasured":
-        return "unmeasured: the host's reading is missing or stale"
+        return f"unmeasured: {short.detail or 'the host reading is missing or stale'}"
     if short.cause == "undeclared":
         return f"undeclared: {what} has no capacity on {node}"
     if short.cause == "unclassified":

@@ -195,7 +195,7 @@ class Short:
     waits: bool           # can waiting alone ever make it fit?
     until: int | None     # a time after which it may fit (a budget reset), else None
     holders: list         # the three largest live holders of the resource, [(holder, amount)]
-    note: str | None = None  # plain words the numbers do not say; the line adds them
+    detail: str = ""      # a line for a cause the figures do not say: the floor, or why unmeasured
 
 @dataclass(frozen=True)
 class Refusal:
@@ -227,7 +227,7 @@ allocator: task 12 (agent) refused on laptop: memory 2.0 GiB asked, 1.3 GiB free
 - `measured` and `unmeasured`: always true. Memory frees and a reading comes.
 - `budget`: true, on `resource` `budget.<provider>`. `until` is the reading's `resets_at` at a stop or a
   rejection, and None while pacing at a warning, and at a stop that names no
-  end, whose `note` says so.
+  end, whose `detail` says so.
 - `undeclared`, `unclassified`, `driver` and `node`: false. Only a change to
   the document, the node or the task can help.
 
@@ -1258,9 +1258,9 @@ later: nothing in the effort runs sessions through the queue.
   `allowed_warning` below `stop_at`); an unrecognised or garbled reading is
   paced like a warning and lifts nothing (the coordinator's ruling on the
   review of this PR, in the effort's log) (this PR)
-- 2026-11-06 proposed: `Short` gains `note: str | None = None`, plain words
-  the numbers do not say, which the line prints after a `budget` short as
-  " -- <note>"; a stop that names no end has one naming the provider (this
+- 2026-11-06 proposed: a `budget` short's `detail`, the trailing field of
+  `Short` the measurement's step adds, is printed after the short as
+  " -- <detail>"; a stop that names no end has one naming the provider (this
   PR)
 - 2026-11-06 proposed: the budget's history is read in two steps, the newest
   `READ_LIMIT` readings and, when those fill it, the whole history, so a stop

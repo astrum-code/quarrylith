@@ -136,7 +136,7 @@ def test_a_stop_with_no_readable_reset_holds_until_a_newer_reading(
         short = budget_short(answer)
         assert short.until is None and short.waits is True
         assert answer.until is None and answer.waits is True
-        assert short.note and "anthropic" in short.note
+        assert short.detail and "anthropic" in short.detail
         assert "no reset time" in answer.text and "newer reading" in answer.text
         assert "anthropic" in answer.text
     reading(record, clock)
@@ -158,16 +158,16 @@ def test_a_stop_without_a_reset_beside_one_with_one_holds_without_an_end(effort,
 
 
 @over_backends
-def test_a_stop_with_a_reset_has_no_note(effort, clock):
-    """templet:3161 -- the plain words are for a stop with no reset only: a
-    stop with a reset, and a warning, carry none."""
+def test_a_stop_with_a_reset_has_no_detail(effort, clock):
+    """templet:3161 -- the plain words (the short's detail) are for a stop
+    with no reset only: a stop with a reset, and a warning, carry none."""
     record = effort
     placement = declared(record, clock)
     reading(record, clock, status="rejected", resets_at=clock() + HOUR)
-    assert budget_short(refused(placement, record, clock)).note is None
+    assert budget_short(refused(placement, record, clock)).detail == ""
     reading(record, clock, status="allowed_warning")
     agents(record, clock, placement, 2)
-    assert budget_short(refused(placement, record, clock)).note is None
+    assert budget_short(refused(placement, record, clock)).detail == ""
 
 
 # -- a warning that is stale guards nothing -------------------------------------

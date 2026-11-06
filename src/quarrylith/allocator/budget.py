@@ -26,8 +26,8 @@ FIRST_RESET = 946_684_800_000
 LAST_RESET = 253_402_300_799_999
 
 STOP, WARN, ALLOWED = "stop", "warn", "allowed"
-#: What a stop that names no end says, in the refusal.
-NOTE = (
+#: What a stop that names no end says, in the refusal (a Short's `detail`).
+DETAIL = (
     "{provider} is stopped by a reading with no reset time: held until a newer reading"
 )
 
@@ -70,7 +70,7 @@ def _resets(value):
     and year 9999. A relative number, a count, microseconds and nanoseconds
     are not times of ours: they name no end."""
     resets = value.get("resets_at")
-    if not _number(resets) or not math.isfinite(resets) or resets <= 0:
+    if not _number(resets) or not math.isfinite(resets):
         return None
     resets = resets * 1000 if resets < SECONDS_BELOW else resets
     return int(resets) if FIRST_RESET <= resets <= LAST_RESET else None
@@ -209,7 +209,7 @@ def budget_shorts(reader, document, node, needs, *, now):
                     True,
                     until,
                     holders,
-                    NOTE.format(provider=provider) if unended else None,
+                    DETAIL.format(provider=provider) if unended else "",
                 )
             )
         return shorts

@@ -28,6 +28,7 @@ from .measure import (
     measured_room,
     measured_shorts,
     measurement,
+    reading_state,
 )
 from .probes import (  # noqa: F401 (the probes are the host plugin's, too)
     ProbeError,
@@ -154,8 +155,8 @@ class HostPlacement(Placement):
             if live:
                 shorts += table_shorts(record, node, needs, now=now)
                 shorts += budget_shorts(record, document, node, needs, now=now)
-                found = measurement(record, document, node, now=now)
-                shorts += measured_shorts(found, document, node, needs)
+                found, why = reading_state(record, document, node, now=now)
+                shorts += measured_shorts(found, document, node, needs, why)
                 free = table_free(record, node, needs, now=now)
         if shorts:
             return refuse(task, run_class.name, needs, shorts, node=node)
@@ -240,10 +241,10 @@ class HostPlacement(Placement):
                 shorts += table_shorts(record, node, needs, now=now)
                 if measured and (stored is None or stored[0].node == node):
                     document = stored[0] if stored else None
-                    found = None
+                    found, why = None, "no allocation document is declared"
                     if document is not None:
-                        found = measurement(record, document, node, now=now)
-                    shorts += measured_shorts(found, document, node, needs)
+                        found, why = reading_state(record, document, node, now=now)
+                    shorts += measured_shorts(found, document, node, needs, why)
         if shorts:
             return refuse(task, None, needs, shorts, node=node)
         return record.reserve(
@@ -315,22 +316,28 @@ class HostPlacement(Placement):
             "method": memory["method"],
             "disk_free": probes.probe_disk(document.disk_path),
             "consumers": {},
+            "absent": {},
         }
         probed = [c for c in document.consumers if c.probe is not None]
         table = probes.process_table() if probed else []
         for consumer in probed:
-            found = probes.resident(consumer.probe, table)
-            value["consumers"][consumer.name] = {"memory": found}
+            found, why = probes.resident(consumer.probe, table)
+            if found is None:
+                value["absent"][consumer.name] = why
+            else:
+                value["consumers"][consumer.name] = {"memory": found}
         value["drift"] = drift_entries(document, value, free, capacity)
-        record.record_reading(MEASURE_SOURCE, MEASURE_KIND, value)
         now_whats = {entry["what"] for entry in value["drift"]}
         before_whats = {entry.get("what") for entry in before}
+        # the statements come first: one that fails leaves no reading that
+        # holds a drift nobody was told of
         for entry in value["drift"]:
             if entry["what"] not in before_whats:
                 record.state("observation", began(entry), where="allocator")
         for entry in before:
             if entry.get("what") not in now_whats:
                 record.state("observation", ended(entry), where="allocator")
+        record.record_reading(MEASURE_SOURCE, MEASURE_KIND, value)
         return value
 
     def drift(self, *, now):
@@ -409,9 +416,10 @@ class HostPlacement(Placement):
             raise Refused(f"no probed consumer {name!r} in the allocation document")
         probe = found[0].probe
         total = seconds // every + 1
-        top = 0
+        top, why = 0, ""
         for number in range(1, total + 1):
-            top = max(top, self.probes.resident(probe, self.probes.process_table()))
+            found, why = self.probes.resident(probe, self.probes.process_table())
+            top = max(top, found or 0)
             if progress is not None:
                 progress(number, total, top)
             if number < total:
@@ -419,6 +427,7 @@ class HostPlacement(Placement):
         if top == 0:
             raise ProbeError(
                 f"sample_consumer: nothing is resident under {name}'s probe"
+                + (f" ({why})" if why else "")
             )
         return default_probes.declared_size(top)
 

@@ -36,7 +36,12 @@ def _run(probe, argv):
     `probe`."""
     try:
         done = subprocess.run(
-            argv, capture_output=True, timeout=TIMEOUT, text=True, check=False
+            argv,
+            capture_output=True,
+            timeout=TIMEOUT,
+            text=True,
+            errors="replace",
+            check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise ProbeError(f"{probe}: {argv[0]} did not run ({error})") from None
@@ -216,18 +221,43 @@ def probe_process(match, table=None):
     return sum(row.rss for row in table if match in row.comm)
 
 
+def _pid_of(path):
+    """`(pid, None)` read from the pid file `path`, or `(None, why)`: a service
+    that is down has no file, or one that holds no number."""
+    try:
+        with open(path, "rb") as handle:
+            text = handle.read(MAX_SMALL).decode("utf-8", "replace").strip()
+    except FileNotFoundError:
+        return None, f"pid file {path} is missing"
+    except OSError:
+        return None, f"pid file {path} is not readable"
+    if not text.isdigit():
+        return None, f"pid file {path} does not hold a process number"
+    return int(text), None
+
+
 def resident(probe, table):
-    """The resident bytes a consumer's `probe` (`{pidfile: PATH}`,
-    `{pid: N}` or `{process: TEXT}`) finds in `table`."""
+    """`(bytes, None)`: the resident bytes a consumer's `probe` (`{pidfile:
+    PATH}`, `{pid: N}` or `{process: TEXT}`) finds in `table`; or `(None,
+    why)` when the consumer is not there: no pid file, no number in it, no
+    such process. A consumer that is down is no failed probe."""
     kind, value = next(iter(probe.items()))
     if kind == "process":
-        return probe_process(value, table)
-    if kind == "pid":
-        return probe_tree(value, table)
-    text = _small("probe_pidfile", value).strip()
-    if not text.isdigit():
-        raise ProbeError(f"probe_pidfile: {value} does not hold a process number")
-    return probe_tree(int(text), table)
+        found = [row.rss for row in table if value in row.comm]
+        if not found:
+            return None, f"no process named {value}"
+        return sum(found), None
+    if kind == "pidfile":
+        pid, why = _pid_of(value)
+        if pid is None:
+            return None, why
+    else:
+        pid = value
+    if not any(row.pid == pid for row in table):
+        return None, f"no process {pid}" + (
+            f" (pid file {value})" if kind == "pidfile" else ""
+        )
+    return probe_tree(pid, table), None
 
 
 def declared_size(peak, block=256 * 2**20):

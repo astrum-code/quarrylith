@@ -21,22 +21,34 @@ def latest(reader):
     return rows[0] if rows else None
 
 
-def measurement(reader, document, node, *, now):
-    """The value of the latest host reading when it counts: of this `node`, no
-    older than `floor.max_age_s`, and with its memory and disk figures as
-    numbers. None otherwise, which is `unmeasured`: a missing or stale
-    reading is never passed on an assumption."""
+def reading_state(reader, document, node, *, now):
+    """`(value, "")` of the latest host reading when it counts, else `(None,
+    why)`: it counts when it is of this `node`, no older than
+    `floor.max_age_s`, and has its memory and disk figures as numbers. A
+    missing or stale reading is never passed on an assumption."""
     row = latest(reader)
     if row is None:
-        return None
+        return None, "no host reading"
     value = row["value"]
-    if not isinstance(value, dict) or value.get("node") != node:
-        return None
-    if now - row["at"] > document.floor.max_age_s * 1000:
-        return None
+    if not isinstance(value, dict) or not isinstance(value.get("node"), str):
+        return None, "the host reading names no node"
+    if value["node"] != node:
+        return None, f"the host reading is of {value['node']}, not {node}"
+    age = now - row["at"]
+    if age > document.floor.max_age_s * 1000:
+        return None, (
+            f"the host reading is {-(-age // 1000)} s old, past the "
+            f"{document.floor.max_age_s} s it counts for"
+        )
     if not all(_number(value.get(k)) for k in ("memory_available", "disk_free")):
-        return None
-    return value
+        return None, "the host reading has no figures for memory and disk"
+    return value, ""
+
+
+def measurement(reader, document, node, *, now):
+    """The value of the latest host reading when it counts, else None, which
+    is `unmeasured`."""
+    return reading_state(reader, document, node, now=now)[0]
 
 
 def measured_room(value, document):
@@ -48,32 +60,37 @@ def measured_room(value, document):
     }
 
 
-def measured_shorts(value, document, node, needs):
+def measured_shorts(value, document, node, needs, why=""):
     """The shorts of `needs` by the measurement: one `unmeasured` (every
-    resource) when there is no `value`; else a `measured` short for a memory
-    or disk need that would leave less than the floor. All wait: memory frees
-    and a reading comes."""
+    resource, saying `why`) when there is no `value`; else a `measured` short
+    for a memory or disk need that would leave less than the floor, with the
+    available figure as `free` and the floor in its `detail`. All wait: memory
+    frees and a reading comes."""
     if value is None:
-        return [Short("unmeasured", node, None, None, None, None, True, None, [])]
+        return [Short("unmeasured", node, None, None, None, None, True, None, [], why)]
     room = measured_room(value, document)
     capacity = value.get("memory_total")
     capacity = capacity if _number(capacity) else None
+    floors = {"memory": document.floor.memory, "disk": document.floor.disk}
     shorts = []
     for resource in ("memory", "disk"):
         asked = needs.get(resource)
         if asked is not None and asked > room[resource]:
-            total = capacity if resource == "memory" else None
+            available = value[
+                "memory_available" if resource == "memory" else "disk_free"
+            ]
             shorts.append(
                 Short(
                     "measured",
                     node,
                     resource,
                     asked,
-                    room[resource],
-                    total,
+                    available,
+                    capacity if resource == "memory" else None,
                     True,
                     None,
                     [],
+                    f"floor {_size(resource, floors[resource])}",
                 )
             )
     return shorts

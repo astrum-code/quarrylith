@@ -24,8 +24,9 @@ from dataclasses import dataclass
 from ..record import contract, schema
 from . import schedule as schedules
 
-#: Every rule a candidate can name: the tiers' own and an effort's.
-RULES = ("floor", "resume", "unblocks-then-age", "listed", "landing")
+#: Every rule a candidate can name: the tiers' own and an effort's. The
+#: record takes the same list in a start's `placed`.
+RULES = contract.PLACED_RULES
 
 #: The rules an effort's `order` json can name.
 EFFORT_RULES = ("unblocks-then-age", "listed")

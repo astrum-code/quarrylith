@@ -187,7 +187,10 @@ def test_landable_follows_the_efforts_standing(world, clock):
     assert numbers(landable(world, clock)) == ([made.review], [made.task])
     world.set_standing("0002", "admitted", "go")
     assert numbers(landable(world, clock)) == ([], [])
-    assert numbers(world.ready(now=clock())) == ([made.review], [made.task])
+    assert numbers(world.ready(now=clock())) == (
+        [made.target, made.review],
+        [made.task],
+    )
     world.set_standing("0002", "parked", "pause")
     assert numbers(landable(world, clock)) == ([made.review], [made.task])
     assert world.ready(now=clock()) == {"items": [], "tasks": []}
@@ -537,7 +540,7 @@ def test_a_landing_start_takes_a_parked_efforts_review(world, clock):
     assert [(r["resource"], r["amount"]) for r in live] == [("slots", 1)]
     event = start_event(world)
     assert event["data"]["placed"] == PLACED and event["data"]["run"] == run
-    assert numbers(landable(world, clock)) == ([made.review], [])
+    assert numbers(landable(world, clock)) == ([], [])
     replay(world)
     assert world.check() == []
 
@@ -659,6 +662,7 @@ def test_a_landing_start_keeps_the_lease_node_and_reservation_checks(world, cloc
     node's room is refused as ever, and writes nothing."""
     made = review_of(world)
     fence = grant(world, made.review)
+    world.edit_task(made.task, needs={"slots": 4})
     head, dump = world.head(), world.dump()
     with pytest.raises(Refused, match="fence"):
         start(world, made.task, placed=dict(PLACED))
@@ -668,7 +672,6 @@ def test_a_landing_start_keeps_the_lease_node_and_reservation_checks(world, cloc
         start(world, made.task, fence=fence, holder="beta", placed=dict(PLACED))
     with pytest.raises(Refused, match="does not run"):
         start(world, made.task, fence=fence, sandbox="vm", placed=dict(PLACED))
-    world.edit_task(made.task, needs={"slots": 4})
     with pytest.raises(Refused, match="no room"):
         start(world, made.task, fence=fence, placed=dict(PLACED))
     assert world.head() == head and world.dump() == dump

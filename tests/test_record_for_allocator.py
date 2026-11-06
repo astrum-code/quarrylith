@@ -539,3 +539,25 @@ def test_measured_is_computed_from_the_record_alone(record, clock):
         ({"node": "n1", "resource": "disk", "holder": ""}, 900),
         ({"node": "n1", "resource": "memory", "holder": ""}, 3000),
     ]
+
+
+@over_backends
+def test_measured_reads_all_the_readings_once_for_a_node_never_measured(
+    record, clock, monkeypatch
+):
+    """templet:3159 -- a live node that has never been measured is an ordinary
+    state, so its search ends: the window doubles to a bound and then one read
+    without a limit gives every reading, and the gauge stops. It does not read
+    the table again and again."""
+    monkeypatch.setattr(gauges, "FULL_READ_AT", 16)
+    host(record)
+    host(record, name="idle")
+    for i in range(40):
+        clock.step()
+        measure(record, clock, node="n1", memory_available=i)
+    seen = Counting(record)
+    got = gauges.by_name("measured").compute(seen, now=clock(), window_ms=MIN)
+    assert [(lab["node"], v) for lab, v in got if lab["resource"] == "memory"] == [
+        ("n1", 39)
+    ]
+    assert seen.limits == [4, 8, 16, None]

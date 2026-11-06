@@ -4,7 +4,7 @@ readings, taken per window, narrow what `place` and `headroom` allow, and
 never the capacity. Every test runs over every backend in BACKENDS."""
 
 from backends import over_backends
-from test_allocator_host import GIB, SAMPLE, declared, make_task, run
+from test_allocator_host import GIB, declared, make_task, run, sample_text
 
 from quarrylith.allocator import Fit, Refusal, load_document
 
@@ -163,7 +163,7 @@ def test_an_old_or_missing_reading_guards_nothing_and_a_local_harness_is_never_r
     or none, guards nothing; another provider's reading does not count; and a
     harness with no budget resource is never refused `budget`."""
     record = effort
-    text = SAMPLE.read_text().replace('"slots.local" = 0', '"slots.local" = 1')
+    text = sample_text().replace('"slots.local" = 0', '"slots.local" = 1')
     placement = declared(record, clock, load_document(text))
     assert isinstance(refused(placement, record, clock), Fit)
     reading(record, clock, provider="openai", status="rejected")

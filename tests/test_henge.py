@@ -2601,7 +2601,12 @@ class Writers:
         for who, rec in list(self.live.values()):
             rec.close()
         reader = fake_record(self.fake, "reader", clock=self.clock)
-        assert reader.check() == []
+        # not torn; and a load the race left in progress is reported as that
+        findings = reader.check()
+        in_progress = [f for f in findings if "a load is in progress" in f]
+        loading = self.fake.value(self.s["state"], ["loading"])
+        assert bool(in_progress) == isinstance(loading, dict), findings
+        assert [f for f in findings if f not in in_progress] == []
         dump = reader.dump()
         reader.close()
         # a writer that ended in Unknown or Unavailable put nothing after its
@@ -2769,6 +2774,32 @@ def _run_row(fake, clock, row, case):
         writers.get("w2").init()
         source = _source_dump(clock)
         w1 = writers.open("w1")
+        if case == "a batch":
+            # the load's entries are all past `applied` when its third record
+            # is held, so the other writer's open redoes them, finds a load in
+            # progress and commits nothing; the held put meets its Conflict,
+            # is put again, and the load ends
+            def other_opens():
+                def note(r):
+                    return r.note("past", "the other writer")
+
+                for _ in range(3):
+                    writers.run("w2", note)
+
+            match = _and(_who("w1"), _nth(_in("rec", "items"), 3))
+            result = race(
+                writers,
+                "w1",
+                lambda: w1.load(source),
+                match,
+                during=other_opens,
+                past=False,
+            )
+            assert result.get("error") is None, result
+            assert w1.dump()["journal"] == source["journal"]
+            writers.live.pop("w2", None)
+            writers.interleave(200, seed=row * 1000)
+            return writers.finish()
         if row == 9:
             match = _and(_who("w1"), _in("state"), lambda w, sp, k, v: k == ["loading"])
         elif row == 10:
@@ -2958,6 +2989,7 @@ RUNS = [
     (8, None),
     (9, None),
     (10, None),
+    (10, "a batch"),
     (11, None),
     (12, None),
     (13, None),
@@ -2975,7 +3007,7 @@ def test_every_row_of_the_put_table_has_a_run():
 
 
 @pytest.mark.parametrize("row,case", RUNS, ids=[f"row{r}-{c}" for r, c in RUNS])
-def test_two_live_writers_never_tear_the_record(row, case, small_chunks):
+def test_two_live_writers_never_tear_the_record(row, case, small_chunks, monkeypatch):
     """templet:3159 -- Henge, two live writers, every row of the put table:
     two writers on one record (the lock bypassed for the second) run 200
     interleaved operations over a store fake that can hold back any one put
@@ -2983,7 +3015,11 @@ def test_two_live_writers_never_tear_the_record(row, case, small_chunks):
     row until the other writer has committed past it. Each run: the replay
     equals the records, check() is clean, applied, head and every cursor
     never step back, and a writer that ends in Unknown or Unavailable made no
-    put after a check found journal/[high+1]."""
+    put after a check found journal/[high+1]. Row 10's own case holds a load
+    at one event a batch, where the other writer can commit past it; `a batch`
+    holds one with its whole batch past `applied`."""
+    if row == 10 and case is None:
+        monkeypatch.setattr(henge, "LOAD_BATCH", 1)
     if case == "each of its puts":
         # an open whose recovery is held at each of its own puts in turn,
         # until it makes no more

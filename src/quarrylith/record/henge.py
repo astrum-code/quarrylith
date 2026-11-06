@@ -6,7 +6,9 @@ Henge gives one object's compare-and-set and nothing wider, so an operation is
 one **journal entry**, put `absent` at the next seq: that put is the commit
 point. The event's records, its index chunks and the `.state` keys follow it,
 each put with the version the writer expects, then one `sync` of the store,
-then `head`. Recovery redoes at most the one entry past `applied`.
+then `head`. Recovery redoes at most the one entry past `applied`. A load is
+the one write that commits many entries at once (`LOAD_BATCH`, `_store_batch`),
+and an open that finds a load in progress redoes all it left (`_redo_batch`).
 
     quarrylith.<name>.journal  [seq]                  {"event", "priors"}
     quarrylith.<name>.rec      [kind, *key]           the record, and `_seq`
@@ -968,6 +970,9 @@ class HengeRecord(Record):
                 seq += MANY
         except _StoreDown as e:
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
+        if not rows:
+            # read at a+1 and a+2 a moment ago: a copy that lacks them answered
+            raise Unavailable(f"the record {self.name}: journal/[{a + 1}] went")
         try:
             pairs = [
                 (ev.Event.from_dict(row[0]["event"]), row[0]["priors"])

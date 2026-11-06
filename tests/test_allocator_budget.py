@@ -69,13 +69,14 @@ def test_at_a_warning_a_run_is_refused_once_the_providers_weight_passes_the_max(
 @over_backends
 def test_a_budget_short_comes_beside_the_others_in_causes_order(effort, clock):
     """templet:3161 -- a budget short is collected with the table's, and the
-    Refusal lists them in `CAUSES` order: room first, then budget."""
+    Refusal lists them in `CAUSES` order: room, measured, then budget."""
     record = effort
     placement = declared(record, clock)
     reading(record, clock, status="rejected", resets_at=clock() + HOUR)
     answer = refused(placement, record, clock, needs={"memory": 100 * GIB})
     assert [(s.cause, s.resource) for s in answer.shorts] == [
         ("room", "memory"),
+        ("measured", "memory"),
         ("budget", "budget.anthropic"),
     ]
     assert answer.waits is False and answer.until is None

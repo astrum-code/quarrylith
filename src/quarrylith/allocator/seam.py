@@ -155,7 +155,13 @@ def _part(short):
 
 
 def _when(ms):
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    """A time as `YYYY-MM-DDTHH:MMZ`; a number no date holds is printed as it
+    is, so a line is built for any time a short names."""
+    try:
+        when = datetime.fromtimestamp(ms / 1000, timezone.utc)
+        return when.strftime("%Y-%m-%dT%H:%MZ")
+    except (ValueError, OverflowError, OSError):
+        return str(ms)
 
 
 def _line(task, run_class, shorts, waits, until, node):

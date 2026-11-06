@@ -13,14 +13,17 @@ from .table import holders_of
 #: Where a budget reading is kept: `source`, with the window as its `kind`.
 SOURCE = "budget"
 PREFIX = "budget."
-#: The windows read even when the newest readings do not show them, and the
-#: most readings one read of the history returns: the newest of the source
-#: (to find the windows) and the newest of each window.
-WINDOWS = ("five_hour", "seven_day")
+#: The most readings the first read of the history returns. A history that
+#: fills it is read whole, so no provider's window is lost under the newer
+#: readings of others (an unsaturated history, the common case, is one read).
 READ_LIMIT = 100
 #: `resets_at` is milliseconds, as the record's clock. A number below this is
 #: before March 1973 in milliseconds, so it is a time in seconds.
 SECONDS_BELOW = 10**11
+#: A reset is a time between these, in milliseconds: 2000-01-01 and the last
+#: millisecond of year 9999. Any other number is no reset.
+FIRST_RESET = 946_684_800_000
+LAST_RESET = 253_402_300_799_999
 
 STOP, WARN, ALLOWED = "stop", "warn", "allowed"
 #: What a stop that names no end says, in the refusal.
@@ -39,37 +42,44 @@ def providers_of(resources):
     return [r[len(PREFIX) :] for r in sorted(resources) if unit_of(r) == "budget"]
 
 
+def _same(named, provider):
+    """Whether a reading's `provider` is `provider`, without case or
+    surrounding space."""
+    return isinstance(named, str) and named.strip().lower() == provider.strip().lower()
+
+
 def _history(reader, provider):
-    """The latest reading of each window of `provider`, newest window first
-    as found. The windows are the defaults and those in the newest readings;
-    each is read apart, a bounded number of rows deep."""
-    newest = reader.read("readings", source=SOURCE, desc=True, limit=READ_LIMIT)
-    kinds = dict.fromkeys([*WINDOWS, *(row["kind"] for row in newest)])
-    found = []
-    for kind in kinds:
-        rows = reader.read(
-            "readings", source=SOURCE, kind=kind, desc=True, limit=READ_LIMIT
-        )
-        for row in rows:
-            value = row["value"]
-            if isinstance(value, dict) and value.get("provider") == provider:
-                found.append(row)
-                break
-    return found
+    """`{window: [reading, ...]}`, `provider`'s readings of each window,
+    newest first. The newest `READ_LIMIT` readings of the source are read;
+    when they fill it the history is read whole, since the provider's
+    newest reading of a window may lie under any number of newer ones."""
+    rows = reader.read("readings", source=SOURCE, desc=True, limit=READ_LIMIT)
+    if len(rows) >= READ_LIMIT:
+        rows = reader.read("readings", source=SOURCE, desc=True)
+    windows = {}
+    for row in rows:
+        value = row["value"]
+        if isinstance(value, dict) and _same(value.get("provider"), provider):
+            windows.setdefault(row["kind"], []).append(row)
+    return windows
 
 
 def _resets(value):
     """A window's `resets_at` in milliseconds, or None when it names none: a
-    number above zero, in seconds when below `SECONDS_BELOW`."""
+    number, in seconds when below `SECONDS_BELOW`, that is a time between 2000
+    and year 9999. A relative number, a count, microseconds and nanoseconds
+    are not times of ours: they name no end."""
     resets = value.get("resets_at")
     if not _number(resets) or not math.isfinite(resets) or resets <= 0:
         return None
-    return int(resets * 1000) if resets < SECONDS_BELOW else int(resets)
+    resets = resets * 1000 if resets < SECONDS_BELOW else resets
+    return int(resets) if FIRST_RESET <= resets <= LAST_RESET else None
 
 
 def _used(value):
-    """`(utilization, readable)`: a number, or numeric text, is read; none
-    given is readable and unused; anything else cannot be read."""
+    """`(utilization, readable)`: a number, or numeric text, is read (text
+    can say `inf`); none given is readable and unused; anything else cannot
+    be read."""
     used = value.get("utilization")
     if used is None:
         return None, True
@@ -78,45 +88,61 @@ def _used(value):
             used = float(used.strip())
         except ValueError:
             return None, False
-    if not _number(used) or not math.isfinite(used):
+    if not _number(used) or math.isnan(used):
         return None, False
     return used, True
 
 
 def _state(document, value):
-    """`stop`, `warn` or `allowed`. `rejected`, or a utilization from
-    `stop_at`, is a stop; `allowed_warning`, a status that is not recognised
-    (missing, unknown, of another type) and a utilization that cannot be read
-    are paced as a warning; else `allowed`. The status is matched without case
-    or surrounding space."""
+    """`(state, recognised)`: `stop`, `warn` or `allowed`, and whether the
+    reading is one we know. `rejected`, or a utilization from `stop_at`, is a
+    stop; `allowed_warning` is a warning; `allowed` is allowed. A status that
+    is not recognised (missing, unknown, of another type), and a utilization
+    that cannot be read, are paced as a warning and are not recognised. The
+    status is matched without case or surrounding space."""
     status = value.get("status")
     status = status.strip().lower() if isinstance(status, str) else None
     used, readable = _used(value)
     if status == "rejected" or (used is not None and used >= document.budget.stop_at):
-        return STOP
-    if status == "allowed_warning" or not readable:
-        return WARN
-    return ALLOWED if status == "allowed" else WARN
+        return STOP, True
+    if readable and status == "allowed_warning":
+        return WARN, True
+    if readable and status == "allowed":
+        return ALLOWED, True
+    return WARN, False
 
 
 def _windows(reader, document, provider, now):
-    """`(kind, state, resets)` of each window of `provider` that still guards
-    anything, by its latest reading. A stop guards until its `resets_at`,
-    however old the reading, or until a newer reading when it names none; a
-    warning guards while it is no older than `budget.max_age_s` and before its
-    `resets_at`. A window's older readings are never read again once a newer
-    one is there."""
+    """`(kind, state, resets)` of each guard of `provider` that still holds.
+    Per window, the newest recognised reading counts, and an unrecognised
+    reading newer than it is paced like a warning without lifting it: only a
+    recognised non-stop lifts a stop. A stop holds until its `resets_at`,
+    however old the reading, or until a newer recognised reading when it names
+    none; a warning, and an unrecognised reading, holds while it is no older
+    than `budget.max_age_s` and before its `resets_at`."""
     limit = document.budget.max_age_s * 1000
     found = []
-    for row in _history(reader, provider):
-        value = row["value"]
-        resets = _resets(value)
-        state = _state(document, value)
-        if resets is not None and now >= resets:
-            continue
-        if state != STOP and now - row["at"] > limit:
-            continue
-        found.append((row["kind"], state, resets))
+    for kind, rows in _history(reader, provider).items():
+        paced, anchor = None, None
+        for row in rows:
+            state, recognised = _state(document, row["value"])
+            if recognised:
+                anchor = row, state
+                break
+            if paced is None:
+                paced = row
+        guards = []
+        if paced is not None:
+            guards.append((paced, WARN))
+        if anchor is not None:
+            guards.append(anchor)
+        for row, state in guards:
+            resets = _resets(row["value"])
+            if resets is not None and now >= resets:
+                continue
+            if state != STOP and now - row["at"] > limit:
+                continue
+            found.append((kind, state, resets))
     return found
 
 

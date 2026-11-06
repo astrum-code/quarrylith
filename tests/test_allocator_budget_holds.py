@@ -104,6 +104,16 @@ NO_RESET = [
     0,
     -5,
     [1],
+    # a "time" before 2000 is no reset: a relative number, a count, seconds
+    # since some start
+    1,
+    86_400,
+    5 * 10**11,
+    # past year 9999 in milliseconds: microseconds, nanoseconds, a huge int
+    253_402_300_800_000,
+    1_700_000_000_000_000,
+    1_700_000_000_000_000_000,
+    2**62,
 ]
 
 
@@ -285,7 +295,16 @@ def test_a_warning_given_a_reset_in_seconds_lifts_at_that_instant(effort, clock)
 @over_backends
 @pytest.mark.parametrize(
     "used,stops",
-    [("0.99", True), (" 0.95 ", True), ("0.2", False), ("1e-1", False)],
+    [
+        ("0.99", True),
+        (" 0.95 ", True),
+        ("0.2", False),
+        ("1e-1", False),
+        ("inf", True),
+        ("Infinity", True),
+        ("1e999", True),
+        ("-inf", False),
+    ],
 )
 def test_a_utilization_given_as_text_is_read(effort, clock, used, stops):
     """templet:3161 -- a numeric `utilization` as text is not ignored: it is
@@ -302,7 +321,7 @@ def test_a_utilization_given_as_text_is_read(effort, clock, used, stops):
 
 
 @over_backends
-@pytest.mark.parametrize("used", ["high", True, [0.99], "nan", {"a": 1}])
+@pytest.mark.parametrize("used", ["high", True, [0.99], "nan", {"a": 1}, "99%"])
 def test_a_utilization_that_cannot_be_read_is_paced_like_a_warning(effort, clock, used):
     """templet:3161 -- a `utilization` that is neither a number nor numeric
     text is not ignored as `allowed`: the reading is paced like a warning."""
@@ -313,21 +332,11 @@ def test_a_utilization_that_cannot_be_read_is_paced_like_a_warning(effort, clock
     assert budget_short(refused(placement, record, clock)).until is None
 
 
-# -- the read is bounded -------------------------------------------------------------
+# -- the read escalates until the provider's windows are seen -------------------------
 
 
-@over_backends
-def test_the_read_of_the_readings_is_bounded(effort, clock, monkeypatch):
-    """templet:3161 -- no read of the readings returns more than
-    `READ_LIMIT` rows, however long the history; a stop in a window whose
-    readings are far down the history (a seven-day reading under many newer
-    five-hour readings of another provider) is still found."""
-    record = effort
-    placement = declared(record, clock)
-    resets = clock() + 6 * HOUR
-    reading(record, clock, kind="seven_day", status="rejected", resets_at=resets)
-    for _ in range(3 * budget.READ_LIMIT):
-        reading(record, clock, provider="openai", kind="five_hour")
+def readings_read(record, monkeypatch):
+    """The sizes of the reads of the readings, as the record answers them."""
     returned = []
     real = record.read
 
@@ -338,9 +347,103 @@ def test_the_read_of_the_readings_is_bounded(effort, clock, monkeypatch):
         return rows
 
     monkeypatch.setattr(record, "read", spy)
+    return returned
+
+
+@over_backends
+def test_a_short_history_is_read_within_the_bound(effort, clock, monkeypatch):
+    """templet:3161 -- with fewer than `READ_LIMIT` readings, the common
+    case, one read of at most `READ_LIMIT` rows sees them all."""
+    record = effort
+    placement = declared(record, clock)
+    resets = clock() + 6 * HOUR
+    reading(record, clock, kind="seven_day", status="rejected", resets_at=resets)
+    for _ in range(budget.READ_LIMIT // 2):
+        reading(record, clock, provider="openai", kind="five_hour")
+    returned = readings_read(record, monkeypatch)
     assert budget_short(refused(placement, record, clock)).until == resets
-    assert returned and max(returned) <= budget.READ_LIMIT
-    assert sum(returned) <= (2 + 2) * budget.READ_LIMIT
+    assert returned == [budget.READ_LIMIT // 2 + 1]
+
+
+@over_backends
+@pytest.mark.parametrize("newer", [1, 2, 3], ids=["under", "at", "over"])
+def test_a_stop_under_many_newer_readings_of_another_provider_is_found(
+    effort, clock, monkeypatch, newer
+):
+    """templet:3161 -- a stop is never lost for the readings that come after
+    it: under `READ_LIMIT` - 1, `READ_LIMIT` and twice as many newer readings
+    of its own window by another provider (whose reader is alive while the
+    stopped provider's is quiet), it holds until its reset. When the newest
+    `READ_LIMIT` readings hold none of the provider's, the read goes on."""
+    record = effort
+    placement = declared(record, clock)
+    resets = clock() + 6 * HOUR
+    reading(record, clock, status="rejected", resets_at=resets)
+    count = {1: budget.READ_LIMIT - 1, 2: budget.READ_LIMIT, 3: 2 * budget.READ_LIMIT}
+    for _ in range(count[newer]):
+        reading(record, clock, provider="openai", kind="five_hour")
+    returned = readings_read(record, monkeypatch)
+    answer = refused(placement, record, clock)
+    assert budget_short(answer).until == resets
+    if newer > 1:
+        assert max(returned) > budget.READ_LIMIT
+    reading(record, clock, utilization=0.1)
+    assert isinstance(refused(placement, record, clock), Fit)
+
+
+@over_backends
+def test_a_stop_with_no_reset_under_many_newer_readings_is_found(effort, clock):
+    """templet:3161 -- a stop that names no end holds until a newer reading
+    of its own, however many readings of others are written after it."""
+    record = effort
+    placement = declared(record, clock)
+    reading(record, clock, status="rejected")
+    for _ in range(budget.READ_LIMIT + 5):
+        reading(record, clock, provider="openai")
+    answer = refused(placement, record, clock)
+    assert budget_short(answer).until is None and "newer reading" in answer.text
+
+
+@over_backends
+def test_a_window_with_any_name_is_found(effort, clock):
+    """templet:3161 -- a window need not be `five_hour` or `seven_day`: a stop
+    of a `monthly` window, absent from the newest `READ_LIMIT` readings of the
+    source, is found."""
+    record = effort
+    placement = declared(record, clock)
+    resets = clock() + 6 * HOUR
+    reading(record, clock, kind="monthly", status="rejected", resets_at=resets)
+    for _ in range(budget.READ_LIMIT + 5):
+        reading(record, clock, kind="five_hour", provider="openai")
+    assert budget_short(refused(placement, record, clock)).until == resets
+
+
+@over_backends
+def test_a_provider_with_no_reading_pays_for_a_full_read_and_is_never_refused(
+    effort, clock, monkeypatch
+):
+    """templet:3161 -- a provider none of whose readings is among the newest
+    `READ_LIMIT` is looked for through the whole history before it is said to
+    have none; with none, nothing is guarded."""
+    record = effort
+    placement = declared(record, clock)
+    for _ in range(budget.READ_LIMIT + 5):
+        reading(record, clock, provider="openai", status="rejected")
+    returned = readings_read(record, monkeypatch)
+    assert isinstance(refused(placement, record, clock), Fit)
+    assert max(returned) == budget.READ_LIMIT + 5
+
+
+@over_backends
+@pytest.mark.parametrize("name", ["Anthropic", " anthropic ", "ANTHROPIC\n"])
+def test_the_provider_is_matched_without_case_or_surrounding_space(effort, clock, name):
+    """templet:3161 -- the provider is matched as the status is: a reading
+    of `Anthropic` or `anthropic ` is the provider's."""
+    record = effort
+    placement = declared(record, clock)
+    resets = clock() + HOUR
+    reading(record, clock, provider=name, status="rejected", resets_at=resets)
+    assert budget_short(refused(placement, record, clock)).until == resets
 
 
 # -- what the warning counts (the live runs of the asked node only) -------------------
@@ -373,3 +476,76 @@ def other_run(record, clock):
     return record.start_run(
         task, "remote", node="elsewhere", sandbox="harness", fence=None, expect_s=60
     )
+
+
+# -- only a recognised non-stop lifts a stop -------------------------------------------
+
+
+def stop(record, clock, **kw):
+    resets = clock() + 6 * HOUR
+    reading(record, clock, status="rejected", resets_at=resets, **kw)
+    return resets
+
+
+GARBLED = [
+    {"status": "blocked"},
+    {"status": None},
+    {"status": 3},
+    {"status": ["allowed"]},
+    {"status": "allowed", "utilization": "high"},
+    {"status": "allowed", "utilization": True},
+    {"status": "allowed_warning", "utilization": [1]},
+    {},
+]
+
+
+@over_backends
+@pytest.mark.parametrize("value", GARBLED, ids=[repr(v) for v in GARBLED])
+def test_a_newer_unrecognised_reading_does_not_lift_a_stop(effort, clock, value):
+    """templet:3161 -- an unrecognised or garbled reading is paced like a
+    warning and does not lift a stop: the older stop holds until its reset,
+    and a recognised `allowed` after it lifts it."""
+    record = effort
+    placement = declared(record, clock)
+    resets = stop(record, clock)
+    clock.step(MIN)
+    record.record_reading("budget", "five_hour", {"provider": "anthropic", **value})
+    answer = refused(placement, record, clock)
+    assert budget_short(answer).until == resets
+    clock.step(HOUR)
+    assert budget_short(refused(placement, record, clock)).until == resets
+    reading(record, clock)
+    assert isinstance(refused(placement, record, clock), Fit)
+
+
+@over_backends
+def test_a_recognised_warning_below_the_stop_lifts_a_stop(effort, clock):
+    """templet:3161 -- `allowed_warning` below `stop_at` is recognised and
+    lifts a stop (and then paces); one at `stop_at` is a stop of its own."""
+    record = effort
+    placement = declared(record, clock)
+    stop(record, clock)
+    clock.step(MIN)
+    reading(record, clock, status="allowed_warning", utilization=0.5)
+    assert isinstance(refused(placement, record, clock), Fit)
+    agents(record, clock, placement, 2)
+    assert budget_short(refused(placement, record, clock)).until is None
+    resets = clock() + HOUR
+    reading(record, clock, status="allowed_warning", utilization=0.95, resets_at=resets)
+    assert budget_short(refused(placement, record, clock)).until == resets
+
+
+@over_backends
+def test_an_unrecognised_reading_over_an_allowed_one_is_paced(effort, clock):
+    """templet:3161 -- an unrecognised reading newer than a recognised
+    `allowed` is paced like a warning while it is fresh; stale, the `allowed`
+    under it is all there is, and guards nothing."""
+    record = effort
+    placement = declared(record, clock)
+    reading(record, clock)
+    clock.step(MIN)
+    record.record_reading("budget", "five_hour", {"provider": "anthropic"})
+    agents(record, clock, placement, 2)
+    assert budget_short(refused(placement, record, clock)).until is None
+    clock.step(MAX_AGE + 1000)
+    assert isinstance(refused(placement, record, clock), Fit)

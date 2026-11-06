@@ -357,3 +357,12 @@ def test_a_refusal_with_no_node_says_so_instead_of_naming_none():
         "allocator: task 4 refused: node: no allocation document is declared; never"
     )
     assert "None" not in text
+
+
+def test_a_line_is_built_for_any_time_a_short_names():
+    """templet:3161 -- the line never raises for the time a short names: a
+    time past year 9999, or before 1970, is printed as the number."""
+    for until in (2**62, 253_402_300_800_000, -(2**62), 0):
+        over = short(cause="budget", resource="budget.anthropic", until=until)
+        refusal = refuse(1, "agent", {"budget.anthropic": 1}, [over], node="laptop")
+        assert refusal.text.startswith("allocator: task 1")

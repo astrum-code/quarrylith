@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 484c2bc
+    at: f133c50
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -302,13 +302,17 @@ class Event:
   `item.edit`, `item.state`, `item.admit`, `dep.add`, `dep.lift`,
   `lease.grant`, `lease.renew`, `lease.release`, `task.file`, `task.edit`,
   `task.end`, `node.declare`, `node.retire`, `capacity.set`,
-  `reserve`, `reserve.release`, `run.start`, `run.phase`, `run.pgid`,
+  `reserve`, `reserve.release`, `reserve.replace`, `run.start`, `run.phase`,
+  `run.pgid`,
   `run.finish`,
   `change.open`, `change.edit`, `change.drop`, `check.record`,
   `review.file`, `review.verdict`, `review.read`, `merge`, `comment`,
   `question.ask`, `question.answer`, `statement`, `hold.set`, `hold.lift`,
   `reading`, `meta.set`, `note`, `import`. A new kind is a change to this
-  page.
+  page. The schema version does not move for a kind, so an older build
+  still opens, replays, checks and writes a record that holds `reserve.replace`;
+  what it cannot do is `load` a dump of that record, which it refuses at the
+  kind.
 - **`apply(view, event)`** writes `event.puts` into `view`, in order, by
   key. Nothing else. It reads no clock, no counter and no other record.
   Every rule is decided before the event exists, so applying one event
@@ -411,7 +415,7 @@ returns what it made (an id, a number, a fence).
 | deps | `add_dep(n, *, blocker|change|what, why)`: a cycle, or a dep already live. `lift_dep(id, by, why)` |
 | leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold (on the item, the holder or the role), `expect` not the state, or a state `MOVES` does not take to `claimed`. It moves the item to `claimed`; the holder's own second grant renews its lease and keeps its fence. `renew(n, holder, fence, *, paused_until=None)` (`paused_until`: a usage limit's reset): a stale fence, or a lease another holds. `release(n, by, why, *, fence=None)`: no live lease, or a stale fence; it moves a `claimed` or `blocked` item to `ready` |
 | tasks | `file_task(kind, *, number=None, effort=None, labels=(), flags=(), needs=None, sandbox, schedule=None, not_before=None, supervision=None, loop=None)` -> id: an item or effort not there, `needs` not `{resource: amount}` (an amount from 1); `loop` defaults to `{"max_attempts": 1, "interval_s": 0}` and `supervision` to `{"expect_s": null, "beat_s": null}`. `edit_task(id, **fields)`: an ended task, or its `needs` while a run is live. `end_task(id, state, why)` (done, failed, cancelled): an ended task, or one with a live run; it releases the task's own live reservations (the task's, with no run) in the same event |
-| allocation | `declare_node(name, drivers, labels)`: a retired node (a live one is declared anew; False when nothing changes). `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**), a task that has ended, or a run that is finished. `release_reservation(id, why)`: a reservation released already, or one whose run is live (`finish_run` releases it) |
+| allocation | `declare_node(name, drivers, labels)`: a retired node (a live one is declared anew; False when nothing changes). `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**), a task that has ended, or a run that is finished. `release_reservation(id, why)`: a reservation released already, or one whose run is live (`finish_run` releases it). `replace_reservation(id, amount, why)` -> id, in **one event** (`reserve.replace`): it releases the live reservation `id` and reserves `amount` of the same node, resource, holder and task from now with no end and no run, the room checked without the one it replaces and at every instant from now; refused whole for an `amount` that is not an int from 1, one that does not fit, a reservation released already, one a live run holds (`finish_run` releases it), and a retired node. The same amount, open ended, writes nothing and gives `id` back |
 | runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `run_pgid(id, pgid)`: a live run's process group, known only after its spawn, in an event of its own (`run.pgid`, data `{run, task, pgid}`), once: refused for a run with a `pgid`, whichever group is given, and for a finished run, and moving nothing else of the run (below). `beat(run)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
 | changes | `open_or_update_change(repo, branch, head, *, title, body, number, relation, base, position, draft, url, by)` -> id: a second open change on a branch, one whose `number` is not the open change's. With no open change on the branch it opens one (`change.open`), with the repo's next `n`, and a `title`; else it updates the open one (`change.edit`). A field not given keeps its value on an update and takes its default on an open (`body` "", `relation` part, `draft` false, the rest null). An open change with no `number` takes one by an update; one with a number keeps it, so another `number`, or `None` given, is a second open change. `pushed_at` moves when the head does, and an update that changes nothing writes nothing and returns its id. `drop_change(id, by, why)`: a change not open. `record_check(change, head, name, state, detail=None)`, by the actor: False when the check reads so already |
 | reviews | `file_review(target, round, kind, *, item=None, author, heads=None, pages=None, filed_by=None)` -> id: `heads` keyed by the ids of changes the record holds, each a non-empty sha. `heads` is written once and never edited. `record_verdict(id, reviewer, verdict, findings)`: a review that already has one. `review_read(id)`: False when it was read already |
@@ -1303,6 +1307,7 @@ prints them, as `name{label="value",...} value` lines under `# HELP` and
 | gauge | unit | labels | from |
 |---|---|---|---|
 | `capacity`, `reserved`, `free` | the resource's | node, resource | `capacity`, `reservations`; a live node's, `free` as `free(node, resource, from_at=now, until_at=None)` and `reserved` the capacity less it |
+| `measured` | the resource's | node, resource, holder (`""` for the host) | `readings` (`source="host"`, `kind="measure"`): per live node named by `value.node`, its latest reading, whatever its age: the host's `memory_available` as memory and `disk_free` as disk with holder `""`, and each `value.consumers[holder][resource]` as that holder's use. A reading with no live node, and a figure that is not a number, are skipped |
 | `queue_depth` | items, tasks | of (items, tasks), state, effort, label key:value | `items`, `tasks`, `effort_links`: the open ones; label `*` counts every one, and each other a record that carries it (a task's effective labels) |
 | `runs_active` | runs | phase, node | `runs` |
 | `run_age` | s | run | `runs` (`now - started_at`) |
@@ -1397,7 +1402,8 @@ What looked reusable but was not:
 6. **Reservations never exceed capacity**: for every node and resource, at
    every instant, the live reservations covering it sum to at most the
    capacity. A start or a reserve that would break it is refused, never
-   queued past it and never part-made, and `set_capacity` below what is
+   queued past it and never part-made, `replace_reservation` is checked
+   without the reservation it replaces, and `set_capacity` below what is
    reserved is refused.
 7. **Every running run started in the record holds live reservations for
    its task's needs** on its node, made in its `run.start` event and
@@ -1536,12 +1542,23 @@ Each item is a test marked `templet:3159`, run over every backend in
   `renew` are refused, and its `finish_run` records the outcome and
   releases its reservations
 - [ ] `set_capacity` below the reserved amount is refused
+- [ ] `replace_reservation` releases a live reservation and reserves the
+  new amount for the same node, resource, holder and task from now, in one
+  `reserve.replace` event, checked without the reservation it replaces and
+  at every instant from now; it is refused whole for an amount that does
+  not fit, and for a reservation a live run holds or one released already,
+  and writes nothing for the same amount
+- [ ] a record written before `reserve.replace` existed (a frozen dump)
+  loads, replays to its records, checks clean and takes a replace
 - [ ] a second open change on one branch is refused, and `record_merge` of
   a sha that is not the change's head is refused
 - [ ] `record_verdict` on a review that has one is refused, and no
   operation edits a review's `heads`
 - [ ] every gauge in `GAUGES` computes from a fixture record, through the
   contract only, to the expected values
+- [ ] `measured` gives, per node, the latest `host/measure` reading's host
+  and consumer figures, and skips a reading with no live node and a figure
+  that is not a number
 - [ ] `stalls` counts a run alive past `expect_until` + 5 min, or 10 min
   with no expectation, and not one inside its margin
 - [ ] `open_record(..., shared=True)` is refused on a backend whose
@@ -2464,6 +2481,16 @@ client alone is the dependency (above).
 - 2026-11-04 proposed: a mirror ignores a space's or a request's
   `write_ack` (`MirrorPlacement.write_ack`), cited where the page warned
   against a space declaring `write_ack: 1` (this PR)
+- 2026-11-05 proposed: `replace_reservation(id, amount, why)` and its event
+  kind `reserve.replace` (a kind added to the journal: an older build
+  still opens and writes the record, but cannot load a dump of it), with
+  the allocator's declaration as its use: the allocation row,
+  `EVENT_KINDS`, invariant 6 and two acceptance items. A record written
+  before the kind loads and replays as it did (this PR)
+- 2026-11-05 proposed: the gauge `measured` (labels node, resource, holder),
+  computed from the latest `host/measure` reading of each live node, which
+  names its node in `value.node`: a row in the gauges table and an acceptance
+  item (this PR)
 - 2026-11-05 proposed: `Record.acting(actor, via)`, a caller's actor and via
   for a span, under the record's lock (under "A caller's actor", with the
   acceptance items and the Rationale); `Record.run_pgid(id, pgid)` and the

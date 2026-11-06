@@ -18,8 +18,9 @@ KINDS = (
     "effort.file effort.edit effort.standing effort.conclude effort.link"
     " effort.unlink item.file item.edit item.state item.admit dep.add dep.lift"
     " lease.grant lease.renew lease.release task.file task.edit task.end"
-    " node.declare node.retire capacity.set reserve reserve.release run.start"
-    " run.phase run.pgid run.finish change.open change.edit change.drop check.record"
+    " node.declare node.retire capacity.set reserve reserve.release reserve.replace"
+    " run.start run.phase run.pgid run.finish change.open change.edit change.drop"
+    " check.record"
     " review.file review.verdict review.read merge comment question.ask"
     " question.answer statement hold.set hold.lift reading meta.set note import"
 ).split()

@@ -1823,6 +1823,74 @@ class Record(abc.ABC):
             op.put("reservations", {**r, "released_at": op.now, "why": why})
             op.data = {"id": id, "node": r["node"], "why": why}
 
+    def replace_reservation(self, id, amount, why):
+        """Replace a live reservation by one of `amount`, in one event: it
+        releases the old and reserves `amount` of the same node, resource,
+        holder and task from now with no end, with no run. The room is
+        checked without the old one, at every instant from now, and refused
+        whole when `amount` does not fit. Refused for a reservation released
+        already and for one a live run holds (`finish_run` releases it). The
+        same amount, open ended, writes nothing. Returns the new id (the
+        old, when nothing was written)."""
+        if not schema.is_int(amount) or amount < 1:
+            raise Refused(f"a reservation's amount is an int from 1, not {amount!r}")
+        replaced = id
+        with self._operation("replace_reservation", "reserve.replace") as op:
+            r = op.need("reservations", [id], "reservation")
+            op.subject = f"node:{r['node']}"
+            if r["released_at"] is not None:
+                raise Refused(f"reservation {id} is released already")
+            if r["run"] is not None:
+                run = op.get("runs", [r["run"]])
+                if run is not None and run["finished_at"] is None:
+                    raise Refused(
+                        f"reservation {id} is held by live run {r['run']}: "
+                        "finish_run releases it"
+                    )
+            self._live_node(op, r["node"])
+            if r["amount"] == amount and r["until_at"] is None:
+                op.nothing()
+            cap = op.get("capacity", [r["node"], r["resource"]])
+            others = [
+                o
+                for o in op.read("reservations", live=True, node=r["node"])
+                if o["resource"] == r["resource"] and o["id"] != id
+            ]
+            free = (cap["amount"] if cap else 0) - _peak(others, op.now, None)
+            if free < amount:
+                raise Refused(
+                    f"no room on node {r['node']}: {r['resource']} {amount} asked, "
+                    f"{max(free, 0)} free without reservation {id}"
+                )
+            op.put("reservations", {**r, "released_at": op.now, "why": why})
+            replaced = op.take("next:reservations")
+            op.put(
+                "reservations",
+                {
+                    "id": replaced,
+                    "node": r["node"],
+                    "resource": r["resource"],
+                    "amount": amount,
+                    "task": r["task"],
+                    "run": None,
+                    "holder": r["holder"],
+                    "from_at": op.now,
+                    "until_at": None,
+                    "released_at": None,
+                    "why": None,
+                },
+            )
+            op.data = {
+                "released": id,
+                "id": replaced,
+                "node": r["node"],
+                "resource": r["resource"],
+                "amount": amount,
+                "holder": r["holder"],
+                "why": why,
+            }
+        return replaced if op.seq is not None else id
+
     # -- runs -----------------------------------------------------------------
 
     def start_run(

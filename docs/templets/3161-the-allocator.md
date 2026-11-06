@@ -103,7 +103,7 @@ flowchart LR
 
 | module | holds |
 |---|---|
-| `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`, the document as plain data and back, `to_data(document, figures=None)` and `document_from_data(raw)`; the shared policy: `classify`, `needs_of`, `table_shorts(reader, node, needs, *, now)`, `budget_shorts` |
+| `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`, the document as plain data and back, `to_data(document, figures=None)` and `document_from_data(raw)`; the shared policy: `classify`, `needs_of`, `table_shorts(reader, node, needs, *, now)`, `budget_shorts(reader, document, node, needs, *, now)`, and `allowance(reader, document, node, provider, *, now)`, the budget's allowance that `budget_shorts` and `headroom` both read |
 | `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare` (which returns a `Declaration`: `wrote`, `refusals` by consumer, `failed`), `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
 | `quarrylith.cli` | gains `quarrylith alloc declare|show|place|measure|consumer` (below) |
 
@@ -485,7 +485,11 @@ document names. On top of the seam it has:
     hold: a consumer the failed document added and neither the last written
     document nor the new one names. It over-reserves and never over-commits.
     `declare` tracks no intended consumers. The way out is `release` of the
-    holder by a person, who sees it in `headroom`.
+    holder by a person. They see who holds what in the record's live
+    reservations (each has its holder, node and resource) and, from step 5,
+    in `alloc show`; `headroom` shows only the free amounts, so it tells that
+    room is gone and not whose it is. `release` with no `node` means the node
+    the current document names, so after a rename the old node is passed.
   - **A document that names another node** does not release the old node's
     holds or retire it. That is a person's act outside `declare`. A capacity
     row a document drops stays as well (the record has no remove).
@@ -1172,3 +1176,15 @@ later: nothing in the effort runs sessions through the queue.
   holds (or the same task's own); the limits under `declare` (a stale hold
   after a failed `declare` and a different document, a renamed node's holds,
   the `sha256` as fingerprint) (this PR)
+- 2026-11-06 proposed: where a person sees a stale hold: the record's live
+  reservations and, from step 5, `alloc show`, not `headroom`, which shows
+  only free amounts; and `release` with no `node` means the node the current
+  document names (this PR)
+- 2026-11-06 proposed: the budget's two functions and their signatures,
+  `budget_shorts(reader, document, node, needs, *, now)` and
+  `allowance(reader, document, node, provider, *, now)` (`(allowance, until)`;
+  None when the readings guard nothing). A `budget` short carries the
+  allowance as `free` and the table's capacity of `budget.<provider>`; a
+  warning counts the weight of the provider's live runs on the node, and the
+  guard of a window lifts at its `resets_at` with no new reading. `headroom`
+  narrows a budget resource of the declared node to the allowance (this PR)

@@ -595,7 +595,7 @@ def test_the_command_refuses_a_superseded_stop_naming_the_older_reset(
     )
     assert (code, err) == (0, "")
     assert "cleared anthropic monthly" in out and "five_hour" in out
-    assert f"still held until {_when(resets)}" in out
+    assert f"still held until {_when(resets)}, an earlier stop's reset" in out
 
 
 RAW = [1_790_000_000_000_000, 1_790_000_000_000_000_000, 86_400, "soon", True]

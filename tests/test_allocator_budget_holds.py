@@ -336,13 +336,13 @@ def test_a_utilization_that_cannot_be_read_is_paced_like_a_warning(effort, clock
 
 
 def readings_read(record, monkeypatch):
-    """The sizes of the reads of the readings, as the record answers them."""
+    """The sizes of the reads of the budget readings, as the record answers."""
     returned = []
     real = record.read
 
     def spy(kind, /, **kw):
         rows = real(kind, **kw)
-        if kind == "readings":
+        if kind == "readings" and kw.get("source") == "budget":
             returned.append(len(rows))
         return rows
 

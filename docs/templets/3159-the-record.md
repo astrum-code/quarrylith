@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: dac02efa
+    at: a34cefc
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -1333,7 +1333,7 @@ prints them, as `name{label="value",...} value` lines under `# HELP` and
 | gauge | unit | labels | from |
 |---|---|---|---|
 | `capacity`, `reserved`, `free` | the resource's | node, resource | `capacity`, `reservations`; a live node's, `free` as `free(node, resource, from_at=now, until_at=None)` and `reserved` the capacity less it |
-| `measured` | the resource's | node, resource, holder (`""` for the host) | `readings` (`source="host"`, `kind="measure"`): per live node named by `value.node`, its latest reading, whatever its age: the host's `memory_available` as memory and `disk_free` as disk with holder `""`, and each `value.consumers[holder][resource]` as that holder's use. A reading with no live node, and a figure that is not a number, are skipped |
+| `measured` | the resource's | node, resource, holder (`""` for the host) | `readings` (`source="host"`, `kind="measure"`): per live node named by `value.node`, its latest reading, whatever its age: the host's `memory_available` as memory and `disk_free` as disk with holder `""`, and each `value.consumers[holder][resource]` as that holder's use. A reading with no live node, and a figure that is not a number, are skipped. It reads the newest readings from twice the live nodes and doubles the window until every live node is found; from 1,024 readings one read without a limit ends the search, since a declared node that was never measured is an ordinary state |
 | `queue_depth` | items, tasks | of (items, tasks), state, effort, label key:value | `items`, `tasks`, `effort_links`: the open ones; label `*` counts every one, and each other a record that carries it (a task's effective labels) |
 | `runs_active` | runs | phase, node | `runs` |
 | `run_age` | s | run | `runs` (`now - started_at`) |
@@ -2571,3 +2571,7 @@ client alone is the dependency (above).
   eligibility check by `landable`'s, read in the same event, and invariant 9
   gains its sentence: the operations row, the invariant and an acceptance
   item (this PR)
+- 2026-11-06 proposed: the `measured` gauge's search for a live node's latest
+  reading stops doubling at 1,024 readings and reads them all once, so a
+  declared node never measured costs one full read, not several: the gauges
+  row (this PR)

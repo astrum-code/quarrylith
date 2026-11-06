@@ -4,7 +4,7 @@ readings, taken per window, narrow what `place` and `headroom` allow, and
 never the capacity. Every test runs over every backend in BACKENDS."""
 
 from backends import over_backends
-from test_allocator_host import GIB, SAMPLE, declared, make_task, run
+from test_allocator_host import GIB, declared, make_task, run, sample_text
 
 from quarrylith.allocator import Fit, Refusal, load_document
 
@@ -69,13 +69,14 @@ def test_at_a_warning_a_run_is_refused_once_the_providers_weight_passes_the_max(
 @over_backends
 def test_a_budget_short_comes_beside_the_others_in_causes_order(effort, clock):
     """templet:3161 -- a budget short is collected with the table's, and the
-    Refusal lists them in `CAUSES` order: room first, then budget."""
+    Refusal lists them in `CAUSES` order: room, measured, then budget."""
     record = effort
     placement = declared(record, clock)
     reading(record, clock, status="rejected", resets_at=clock() + HOUR)
     answer = refused(placement, record, clock, needs={"memory": 100 * GIB})
     assert [(s.cause, s.resource) for s in answer.shorts] == [
         ("room", "memory"),
+        ("measured", "memory"),
         ("budget", "budget.anthropic"),
     ]
     assert answer.waits is False and answer.until is None
@@ -163,7 +164,7 @@ def test_an_old_or_missing_reading_guards_nothing_and_a_local_harness_is_never_r
     or none, guards nothing; another provider's reading does not count; and a
     harness with no budget resource is never refused `budget`."""
     record = effort
-    text = SAMPLE.read_text().replace('"slots.local" = 0', '"slots.local" = 1')
+    text = sample_text().replace('"slots.local" = 0', '"slots.local" = 1')
     placement = declared(record, clock, load_document(text))
     assert isinstance(refused(placement, record, clock), Fit)
     reading(record, clock, provider="openai", status="rejected")

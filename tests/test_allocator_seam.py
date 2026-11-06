@@ -175,6 +175,7 @@ def test_the_answers_are_frozen_with_the_pages_fields():
         "waits",
         "until",
         "holders",
+        "detail",
     ]
     assert names(Refusal) == [
         "task",

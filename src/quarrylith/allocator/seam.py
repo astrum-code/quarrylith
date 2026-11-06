@@ -142,7 +142,10 @@ def _part(short):
         if short.holders:
             held = ", ".join(f"{h} {_size(what, n, False)}" for h, n in short.holders)
             part += f" ({held})"
-        return part if short.cause == "room" else f"{part} [{short.cause}]"
+        if short.cause == "room":
+            return part
+        part = f"{part} [{short.cause}]"
+        return f"{part} -- {short.detail}" if short.detail else part
     if short.cause == "unmeasured":
         return f"unmeasured: {short.detail or 'the host reading is missing or stale'}"
     if short.cause == "undeclared":
@@ -159,7 +162,13 @@ def _part(short):
 
 
 def _when(ms):
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    """A time as `YYYY-MM-DDTHH:MMZ`; a number no date holds is printed as it
+    is, so a line is built for any time a short names."""
+    try:
+        when = datetime.fromtimestamp(ms / 1000, timezone.utc)
+        return when.strftime("%Y-%m-%dT%H:%MZ")
+    except (ValueError, OverflowError, OSError):
+        return str(ms)
 
 
 def _line(task, run_class, shorts, waits, until, node):

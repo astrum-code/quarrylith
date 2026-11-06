@@ -220,11 +220,13 @@ def test_declare_with_a_changed_consumer_replaces_its_reservation_in_one_event(
     assert {k: now[k] for k in same} == {k: before[k] for k in same}
     clock.step()
     mark = record.head()
-    gone = sample(
+    desktop = (
         '[[consumer]]\nname = "desktop"\nmemory = "10GiB"\n'
-        'why = "the operating system and the user\'s own applications"\n',
-        "",
+        'why = "the operating system and the user\'s own applications"\n'
     )
+    text = SAMPLE.read_text().replace('memory = "15.4GiB"', 'memory = "16GiB"')
+    assert desktop in text
+    gone = load_document(text.replace(desktop, ""))
     result = HostPlacement(record).declare(gone, figures=FIGURES, now=clock())
     assert result.ok
     assert kinds(record, mark) == ["reserve.release", "reading"]
@@ -320,6 +322,36 @@ def test_declare_with_a_capacity_below_what_is_reserved_reports_what_failed(
     assert result.ok and len(result.wrote) == 2
     assert record.get("capacity", ["laptop", "slots.claude-code"])["amount"] == 0
     assert len(record.read("readings", source="allocator", kind="document")) == 2
+
+
+@over_backends
+def test_declare_orders_the_capacity_around_the_consumers(record, clock):
+    """templet:3161 -- a capacity that grows is set before the consumers that
+    need it, and one that shrinks after the consumers that shrink with it, so
+    a document that moves both at once is written whole, not refused."""
+    declared(record, clock)
+    clock.step()
+    # the machine shrinks to 8 GiB and the memory with it, below the 26.9 GiB
+    # the old consumers held: the capacity can only fall once the machine has
+    smaller = SAMPLE.read_text().replace('memory = "15.4GiB"', 'memory = "8GiB"')
+    figures = {**FIGURES, "capacity": {"memory": 22 * GIB, "disk": 200 * GIB}}
+    result = HostPlacement(record).declare(
+        load_document(smaller), figures=figures, now=clock()
+    )
+    assert result.ok, result
+    assert record.get("capacity", ["laptop", "memory"])["amount"] == 22 * GIB
+    assert standing(record)[("podman-machine", "memory")] == 8 * GIB
+    # the machine grows to 30 GiB with the memory: the capacity first
+    clock.step()
+    bigger = SAMPLE.read_text().replace('memory = "15.4GiB"', 'memory = "30GiB"')
+    figures = {**FIGURES, "capacity": {"memory": 60 * GIB, "disk": 200 * GIB}}
+    result = HostPlacement(record).declare(
+        load_document(bigger), figures=figures, now=clock()
+    )
+    assert result.ok, result
+    assert record.get("capacity", ["laptop", "memory"])["amount"] == 60 * GIB
+    assert standing(record)[("podman-machine", "memory")] == 30 * GIB
+    assert record.check() == []
 
 
 # -- place ------------------------------------------------------------------------
@@ -588,7 +620,7 @@ def test_hold_with_a_task_outlives_its_runs_and_is_released_by_end_task(effort, 
     `release`."""
     record = effort
     placement = declared(record, clock)
-    task = make_task(record, "job", "process")
+    task = make_task(record, "job", "process", loop={"max_attempts": 3})
     ids = placement.hold(
         "vm:mission", {"memory": 4 * GIB, "lab": 1}, task=task, now=clock()
     )

@@ -354,6 +354,213 @@ def test_declare_orders_the_capacity_around_the_consumers(record, clock):
     assert record.check() == []
 
 
+@over_backends
+def test_declare_checks_a_capacity_below_unchanged_consumers_before_any_write(
+    record, clock
+):
+    """templet:3161 -- the whole document is checked before any write, a
+    capacity that shrinks below consumers the document leaves unchanged
+    included: a Refusal per consumer that no longer fits, and nothing written
+    (not even the other capacities the document changes)."""
+    declared(record, clock)
+    clock.step()
+    head = record.head()
+    other = SAMPLE.read_text().replace('"slots.codex" = 3', '"slots.codex" = 5')
+    figures = {**FIGURES, "capacity": {"memory": 11 * GIB, "disk": 200 * GIB}}
+    result = HostPlacement(record).declare(
+        load_document(other), figures=figures, now=clock()
+    )
+    assert not result.ok and result.wrote == () and result.failed == ()
+    assert record.head() == head
+    assert record.get("capacity", ["laptop", "slots.codex"])["amount"] == 3
+    # desktop's 10 GiB fits in 11; the machine and the yard do not fit in 1
+    assert list(result.refusals) == ["podman-machine", "yard"]
+    (short,) = [s for s in result.refusals["podman-machine"].shorts]
+    assert (short.cause, short.free, short.capacity) == ("room", GIB, 11 * GIB)
+
+
+@over_backends
+def test_two_consumers_that_swap_amounts_on_an_exact_table_fit_in_any_order(
+    record, clock
+):
+    """templet:3161 -- the shrinks are checked and written before the grows, so
+    a document that swaps two consumers' amounts on a table with no spare room
+    is not refused for the order its consumers are written in."""
+    text = SAMPLE.read_text()
+    wide = text.replace('memory = "15.4GiB"', 'memory = "16GiB"')
+    exact = {
+        **FIGURES,
+        "capacity": {"memory": 55 * GIB // 2, "disk": 200 * GIB},
+    }
+    declared(record, clock, load_document(wide), exact)
+    ten = 'name = "desktop"\nmemory = "10GiB"'
+    swapped = wide.replace(ten, 'name = "desktop"\nmemory = "16GiB"').replace(
+        'name = "podman-machine"\nmemory = "16GiB"',
+        'name = "podman-machine"\nmemory = "10GiB"',
+    )
+    assert swapped != wide
+    for document in (swapped, wide):
+        clock.step()
+        result = HostPlacement(record).declare(
+            load_document(document), figures=exact, now=clock()
+        )
+        assert result.ok, result
+    now = standing(record)
+    assert now[("desktop", "memory")] == 10 * GIB
+    assert now[("podman-machine", "memory")] == 16 * GIB
+    assert record.check() == []
+
+
+@over_backends
+def test_declare_without_figures_is_refused_naming_the_key(record, clock):
+    """templet:3161 -- `figures=None` is a "measure" with no figure too: the
+    DocumentError names the key, and the record is unchanged."""
+    from quarrylith.allocator import DocumentError
+
+    head = record.head()
+    with pytest.raises(DocumentError, match="capacity.memory"):
+        HostPlacement(record).declare(sample(), figures=None, now=clock())
+    assert record.head() == head
+
+
+@over_backends
+def test_declare_with_changed_figures_and_an_equal_document_writes_the_new_ones(
+    record, clock
+):
+    """templet:3161 -- the same document with other figures has the same
+    sha256 and is not the same declaration: the capacity and a new reading are
+    written."""
+    declared(record, clock)
+    clock.step()
+    other = {**FIGURES, "capacity": {"memory": 64 * GIB, "disk": 200 * GIB}}
+    result = HostPlacement(record).declare(sample(), figures=other, now=clock())
+    assert result.ok and result.wrote
+    assert record.get("capacity", ["laptop", "memory"])["amount"] == 64 * GIB
+    first, second = record.read("readings", source="allocator", kind="document")
+    assert first["value"]["sha256"] == second["value"]["sha256"]
+    assert second["value"]["figures"] == other
+
+
+@over_backends
+def test_a_standing_hold_with_an_end_is_replaced_by_one_without(record, clock):
+    """templet:3161 -- a consumer's hold that has an end is not the declared
+    one even when its amount is: `declare` replaces it by one with no end."""
+    declared(record, clock)
+    (old,) = [
+        r["id"]
+        for r in record.read("reservations", live=True, node="laptop")
+        if r["holder"] == "desktop"
+    ]
+    record.release_reservation(old, "test")
+    clock.step()
+    record.reserve(
+        "laptop",
+        {"memory": 10 * GIB},
+        holder="desktop",
+        from_at=clock(),
+        until_at=clock() + 3_600_000,
+    )
+    mark = record.head()
+    result = declare(record, clock)
+    assert result.ok
+    assert kinds(record, mark) == ["reserve.replace"]
+    (made,) = [
+        r
+        for r in record.read("reservations", live=True, node="laptop")
+        if r["holder"] == "desktop"
+    ]
+    assert made["until_at"] is None and made["amount"] == 10 * GIB
+
+
+@over_backends
+def test_declare_leaves_the_old_node_of_a_renamed_node_alone(record, clock):
+    """templet:3161 -- a document that names another node does not release the
+    old node's holds or retire it: that is a person's act outside `declare`.
+    Both nodes show in `headroom`."""
+    placement = declared(record, clock)
+    before = standing(record)
+    clock.step()
+    renamed = sample('node = "laptop"', 'node = "desk"')
+    result = HostPlacement(record).declare(renamed, figures=FIGURES, now=clock())
+    assert result.ok
+    assert standing(record, "laptop") == before
+    assert record.get("nodes", "laptop")["retired_at"] is None
+    assert standing(record, "desk") == before
+    assert sorted(placement.headroom(now=clock())) == ["desk", "laptop"]
+
+
+@over_backends
+def test_a_hold_a_failed_declare_made_stays_until_a_person_releases_it(effort, clock):
+    """templet:3161 -- a `declare` that fails halfway and is followed by a
+    different document may leave a stale hold: one the failed document named
+    and neither the last written one nor the new one does. It over-reserves
+    and never over-commits, and `release` frees it."""
+    record = effort
+    placement = declared(record, clock)
+    run(record, placement, clock, make_task(record))
+    text = SAMPLE.read_text()
+    extra = '\n[[consumer]]\nname = "extra"\nmemory = "1GiB"\nwhy = "an addition"\n'
+    clock.step()
+    failing = text.replace('"slots.claude-code" = 4', '"slots.claude-code" = 0')
+    result = HostPlacement(record).declare(
+        load_document(failing + extra), figures=FIGURES, now=clock()
+    )
+    assert not result.ok and standing(record)[("extra", "memory")] == GIB
+    clock.step()
+    assert declare(record, clock).ok
+    assert standing(record)[("extra", "memory")] == GIB
+    assert placement.headroom(now=clock())["laptop"]["memory"] == (
+        48 * GIB - 10 * GIB - PODMAN - 3 * GIB // 2 - GIB - 2 * GIB
+    )
+    assert len(placement.release("extra", why="stale")) == 1
+    assert ("extra", "memory") not in standing(record)
+
+
+@over_backends
+def test_an_unreadable_document_reading_is_no_document(effort, clock):
+    """templet:3161 -- a stored reading that does not parse (an older shape, a
+    format that is not 1) is no document: `place` and `hold` answer `node`
+    instead of raising, `release` finds nothing, and `declare` writes a new
+    reading over it."""
+    record = effort
+    task = make_task(record, "job", "process")
+    placement = HostPlacement(record)
+    for bad in ({"sha256": "x"}, {"document": {"format": 2}}, {"document": 5}):
+        record.record_reading("allocator", "document", bad)
+        clock.step()
+        refusal = placement.place(task, now=clock())
+        assert [s.cause for s in refusal.shorts] == ["node"], bad
+        refusal = placement.hold("x", {"memory": 1}, now=clock())
+        assert [s.cause for s in refusal.shorts] == ["node"], bad
+        assert placement.release("x", why="none") == []
+    assert declare(record, clock).ok
+    assert isinstance(placement.place(task, now=clock()), Fit)
+
+
+@over_backends
+def test_place_reads_the_latest_document_after_a_redeclare(effort, clock):
+    """templet:3161 -- a document that changes a class is the one `place`
+    answers from once declared: the newest reading, not the first."""
+    record = effort
+    placement = declared(record, clock)
+    task = make_task(record)
+    assert placement.place(task, now=clock()).needs["memory"] == 2 * GIB
+    text = SAMPLE.read_text()
+    old = (
+        'name = "agent"\nmatch = { kind = ["agent", "review"] }\n'
+        'needs = { memory = "2GiB"'
+    )
+    assert old in text
+    clock.step()
+    result = HostPlacement(record).declare(
+        load_document(text.replace(old, old.replace("2GiB", "3GiB"))),
+        figures=FIGURES,
+        now=clock(),
+    )
+    assert result.ok
+    assert placement.place(task, now=clock()).needs["memory"] == 3 * GIB
+
+
 # -- place ------------------------------------------------------------------------
 
 
@@ -708,6 +915,61 @@ def test_hold_before_any_document_is_refused_node(record, clock):
     assert refusal.waits is False
 
 
+@over_backends
+def test_a_hold_of_another_resource_or_task_is_not_a_second_hold(effort, clock):
+    """templet:3161 -- a second hold is one holder's standing hold of the same
+    resource. The same holder's hold of another resource, a task's own hold
+    beside a standing one, and two tasks' holds under one holder are not."""
+    record = effort
+    placement = declared(record, clock)
+    assert placement.hold("session", {"memory": GIB}, now=clock())
+    assert placement.hold("session", {"disk": GIB}, now=clock())
+    one = make_task(record, "job", "process")
+    two = make_task(record, "job", "process")
+    assert placement.hold("vm:smoke", {"lab": 1}, task=one, now=clock())
+    assert placement.hold("vm:smoke", {"lab": 1}, task=two, now=clock())
+    assert placement.hold("session", {"memory": GIB}, task=one, now=clock())
+    with pytest.raises(Refused, match="vm:smoke"):
+        placement.hold("vm:smoke", {"lab": 1}, task=one, now=clock())
+
+
+@over_backends
+def test_declare_leaves_a_tasks_hold_of_a_consumers_name_alone(effort, clock):
+    """templet:3161 -- a task's own hold under a consumer's name is not the
+    consumer's: it neither blocks the consumer's hold nor is replaced or
+    released with it."""
+    record = effort
+    placement = declared(record, clock)
+    task = make_task(record, "job", "process")
+    (own,) = placement.hold("desktop", {"memory": GIB}, task=task, now=clock())
+    clock.step()
+    result = declare(record, clock, sample('memory = "10GiB"', 'memory = "11GiB"'))
+    assert result.ok
+    assert standing(record)[("desktop", "memory")] == 11 * GIB
+    kept = record.get("reservations", own)
+    assert kept["released_at"] is None and kept["amount"] == GIB
+    assert kept["task"] == task
+
+
+@over_backends
+def test_release_frees_only_the_node_asked_for(effort, clock):
+    """templet:3161 -- `release` of a holder on a node leaves its holds on
+    another node, and with no node means the declared one."""
+    record = effort
+    placement = declared(record, clock)
+    record.declare_node("other", ["process"], [])
+    record.set_capacity("other", "memory", 4 * GIB, "bytes")
+    assert placement.hold("session", {"memory": GIB}, now=clock())
+    assert placement.hold("session", {"memory": GIB}, node="other", now=clock())
+    assert len(placement.release("session", node="other", why="a")) == 1
+    assert standing(record, "laptop")[("session", "memory")] == GIB
+    assert ("session", "memory") not in standing(record, "other")
+    assert placement.hold("session", {"memory": GIB}, node="other", now=clock())
+    assert len(placement.release("session", why="b")) == 1
+    assert ("session", "memory") not in standing(record, "laptop")
+    assert standing(record, "other")[("session", "memory")] == GIB
+
+
 # -- headroom ---------------------------------------------------------------------
 
 
@@ -737,3 +999,31 @@ def test_headroom_gives_each_resources_free_on_each_live_node(effort, clock):
     for holder, _ in list(standing(record)):
         placement.release(holder, why="done")
     assert placement.headroom(now=clock())["laptop"]["memory"] == 48 * GIB - 2 * GIB
+
+
+@over_backends
+def test_headroom_lists_live_nodes_only_and_never_a_negative(effort, clock):
+    """templet:3161 -- a retired node is not in `headroom`, and a free the
+    record would give below zero is 0."""
+    record = effort
+    placement = declared(record, clock)
+    record.declare_node("spare", ["process"], [])
+    record.set_capacity("spare", "memory", GIB, "bytes")
+    assert sorted(placement.headroom(now=clock())) == ["laptop", "spare"]
+    record.retire_node("spare")
+    assert list(placement.headroom(now=clock())) == ["laptop"]
+
+    class Overdrawn:
+        """A reader whose table has been overdrawn: `free` is below zero."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def free(self, *args, **kw):
+            return -5
+
+    room = HostPlacement(Overdrawn(record)).headroom(now=clock())
+    assert room["laptop"] and set(room["laptop"].values()) == {0}

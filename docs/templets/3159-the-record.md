@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: f133c50
+    at: 40e284e
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -303,6 +303,7 @@ class Event:
   `lease.grant`, `lease.renew`, `lease.release`, `task.file`, `task.edit`,
   `task.end`, `node.declare`, `node.retire`, `capacity.set`,
   `reserve`, `reserve.release`, `reserve.replace`, `run.start`, `run.phase`,
+  `run.pgid`,
   `run.finish`,
   `change.open`, `change.edit`, `change.drop`, `check.record`,
   `review.file`, `review.verdict`, `review.read`, `merge`, `comment`,
@@ -336,6 +337,28 @@ backend's own settings, for tests only (SQLite's `synchronous` and
 before, after) -> None | str` is the caller's policy: a string refuses the
 operation with that reason. Who may move what (bin/lith's roles, a yard's
 grants) lives there, never in quarrylith.
+
+**A caller's actor.** `actor` and `via` are the handle's, and `with
+record.acting(actor, via):` replaces both for a span, for a service that is
+one writer for many callers. Inside it, an operation calls `authorize` with
+that actor, its event names that actor and via, and so does everything an
+operation stamps with its actor (the data's `by`, `added_by`, `set_by`,
+`released_by`, `declared_by` and `who`), and any rule that reads `via` (a
+`number` is taken only via `import`) reads the span's.
+
+- **It is taken under the record's lock**, and held until the span ends: one
+  thread's span never names another thread's operation, which waits for it
+  and is written under its own actor. So a span holds one caller's work, and
+  never a wait: `events(wait=)` inside it is refused, as inside `reading()`.
+  On one thread the lock is no guard, so a span is not left suspended (no
+  `await` in it).
+- **It ends with its body**, on an exception too, and a span inside a span
+  gives the outer one's actor back. An actor or via an open would refuse is
+  refused before the span begins.
+- **Bookkeeping names no one.** `ack` and `beat` run in a span as outside it:
+  no event, and they do not reach `authorize`, so a service that grants them
+  by caller checks that itself.
+- It changes no format: `actor` and `via` are on every event already.
 
 **Errors.** `Refused(reason)`: the operation broke a rule and wrote
 nothing. `Unavailable`: the store could not be read or written and **the
@@ -393,7 +416,7 @@ returns what it made (an id, a number, a fence).
 | leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold (on the item, the holder or the role), `expect` not the state, or a state `MOVES` does not take to `claimed`. It moves the item to `claimed`; the holder's own second grant renews its lease and keeps its fence. `renew(n, holder, fence, *, paused_until=None)` (`paused_until`: a usage limit's reset): a stale fence, or a lease another holds. `release(n, by, why, *, fence=None)`: no live lease, or a stale fence; it moves a `claimed` or `blocked` item to `ready` |
 | tasks | `file_task(kind, *, number=None, effort=None, labels=(), flags=(), needs=None, sandbox, schedule=None, not_before=None, supervision=None, loop=None)` -> id: an item or effort not there, `needs` not `{resource: amount}` (an amount from 1); `loop` defaults to `{"max_attempts": 1, "interval_s": 0}` and `supervision` to `{"expect_s": null, "beat_s": null}`. `edit_task(id, **fields)`: an ended task, or its `needs` while a run is live. `end_task(id, state, why)` (done, failed, cancelled): an ended task, or one with a live run; it releases the task's own live reservations (the task's, with no run) in the same event |
 | allocation | `declare_node(name, drivers, labels)`: a retired node (a live one is declared anew; False when nothing changes). `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**), a task that has ended, or a run that is finished. `release_reservation(id, why)`: a reservation released already, or one whose run is live (`finish_run` releases it). `replace_reservation(id, amount, why)` -> id, in **one event** (`reserve.replace`): it releases the live reservation `id` and reserves `amount` of the same node, resource, holder and task from now with no end and no run, the room checked without the one it replaces and at every instant from now; refused whole for an `amount` that is not an int from 1, one that does not fit, a reservation released already, one a live run holds (`finish_run` releases it), and a retired node. The same amount, open ended, writes nothing and gives `id` back |
-| runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `beat(run)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
+| runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `run_pgid(id, pgid)`: a live run's process group, known only after its spawn, in an event of its own (`run.pgid`, data `{run, task, pgid}`), once: refused for a run with a `pgid`, whichever group is given, and for a finished run, and moving nothing else of the run (below). `beat(run)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
 | changes | `open_or_update_change(repo, branch, head, *, title, body, number, relation, base, position, draft, url, by)` -> id: a second open change on a branch, one whose `number` is not the open change's. With no open change on the branch it opens one (`change.open`), with the repo's next `n`, and a `title`; else it updates the open one (`change.edit`). A field not given keeps its value on an update and takes its default on an open (`body` "", `relation` part, `draft` false, the rest null). An open change with no `number` takes one by an update; one with a number keeps it, so another `number`, or `None` given, is a second open change. `pushed_at` moves when the head does, and an update that changes nothing writes nothing and returns its id. `drop_change(id, by, why)`: a change not open. `record_check(change, head, name, state, detail=None)`, by the actor: False when the check reads so already |
 | reviews | `file_review(target, round, kind, *, item=None, author, heads=None, pages=None, filed_by=None)` -> id: `heads` keyed by the ids of changes the record holds, each a non-empty sha. `heads` is written once and never edited. `record_verdict(id, reviewer, verdict, findings)`: a review that already has one. `review_read(id)`: False when it was read already |
 | merges | `record_merge(change, sha, by, rule, *, commit=None)` -> id: a change not open, or `sha` not its head. It sets `merged_at` in the same event |
@@ -408,7 +431,10 @@ lease. `finish_run` is not: it records the outcome, releases the run's
 reservations and touches nothing of the item. So a run whose lease was
 released and granted again still frees what it held.
 
-**`MOVES`** is every state pair of the legacy board's `bin/lith::MOVES`. It
+**`MOVES`** is every state pair of the legacy board's `bin/lith::MOVES`, and
+`in-review` to `blocked`, which the legacy board lacks: a hand-over that no
+next run of the author could cure ends there, with the item seen (the
+connector's page, `3167-the-github-connector.md`, "From the record"). It
 leaves out that table's who and when columns, which are policy and go to
 `authorize`. `authorize` is given the records before and after, so a
 condition such as "an open change" or "merged" is the caller's to check.
@@ -418,7 +444,7 @@ condition such as "an open change" or "merged" is the caller's to check.
 | triage | ready |
 | ready, blocked | claimed |
 | claimed | blocked, in-review, ready |
-| ready | blocked |
+| ready, in-review | blocked |
 | blocked | ready |
 | in-review | reviewed |
 | reviewed | merge-ready |
@@ -471,6 +497,13 @@ replay, then the backend's own), `dump()`, `load(dump)`, `backup(dir)`,
     than its task's needs on its node, and a live reservation of a finished
     run. A dump made by hand can carry any of them, since `load` checks the
     fold, the limits and the links, not the reservations.
+  - `check()` also reports invariant 16 broken: a run's `pgid` changed by an
+    event other than `run.pgid`, set by a `run.pgid` when it already held
+    one, when the run was finished or when no `run.start` wrote the run, or
+    set to anything but an int above 1. A run first written by an event of
+    kind `import` keeps the group it came with, and one imported with a
+    group below 2 is reported. No other kind brings a group. `load` does not
+    check this either.
 - **A shared record is durable.** `open_record(..., shared=True)` is
   refused on a backend whose `durable` is false, unless it is given
   `allow_undurable=True` (tests and the bench only).
@@ -656,10 +689,19 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
       here; henge-2's round 5 probes (a power cut under operations, at a
       load's end, and `kill -9` of a writer, a loader and the store) are
       the start, and each takes minutes, so it may belong in a pipeline
-      step.
+      step. A directory never splits, so an index's directory is bounded
+      only by the store's object limit, about half a million of the longest
+      keys in one index: far past the queue's scale, and refused at once
+      there, but a limit this page's "A directory also needs a byte bound"
+      does not state. Rows 6 and 7 of the put table assert no outcome in
+      `two_live_writers`, where every other raced row does.
     - **For the services' step.** An open during a store's restart is
       refused at once (see "The record's timeout"); whether a service's
-      start should ride out a restart is that step's to say.
+      start should ride out a restart is that step's to say. On Henge
+      `quarrylith order show URL`, `order merge URL`, the gauges and landing
+      are refused while a writer holds the record, as for any second handle,
+      and the order's page (`3163-the-order.md`) shows the commands with no
+      word on it; that step's service is where they have to be answered.
 - **Only past an answer.** The writer goes on past a value only once the
   store has answered a put of it to this writer. On a mirror, a put that
   the second copy did not take in time is applied by the leader and
@@ -998,24 +1040,31 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   from its creation, in `dir` (`0700`).
 - **The record's timeout**, `timeout_s` (30 s; tests shorten it), is how
   long the record waits for the store at one put or sync, or at the read
-  inside a retry of one of them, before it gives an operation up: past the commit point that is `Unknown`, before it
-  `Unavailable`. An open or an operation with several blocked puts can take
-  one timeout for each. The client tries a call every 2 s, with the same request id, for that long.
+  inside a retry of one of them, before it gives an operation up: past the
+  commit point that is `Unknown`, before it `Unavailable`. An open or an
+  operation with several blocked puts can take one timeout for each. The
+  client tries a call every 2 s, with the same request id, for that long.
   A put, the commit put or a sync that the store refuses at once, and the
   read inside a retry of one of them, is tried again after a pause, 10 ms
   first and each the double of the one before, up to 2 s, so a store that
   refuses at once (a mirror's start, a worker dropped for silence) is not
   hit as fast as the loop turns. **Not retried:** an open (its reads and its
   `sync`), an operation's reads before its commit, a new `ack`'s read, a
-  caller's read and a load's emptiness check. While a store restarts (the
-  store's `RESTART_S`, 10 s by default) each is refused at once with
-  `Unavailable`, on one store too, before anything is committed, and the
-  handle stays usable; a service that starts then is refused, not waited
-  for. A refusal for good (`TooLarge`, `Invalid`,
+  caller's read, a load's emptiness check and a resumed load's read of its
+  journal. The record tries each once. While a store restarts (the store's
+  `RESTART_S`, 10 s by default) each is refused at once with `Unavailable`,
+  on one store too, before anything is committed, and the handle stays
+  usable; a service that starts then is refused, not waited for. "At once"
+  is the record's own: a real store answered each within milliseconds but
+  for the load's emptiness check, at about 2 s, the client's first interval
+  (henge-2's probe, round 5, for five of the six; the review of quarrylith#21
+  measured the sixth, a resumed load's read, at 0.019 s, though a resumed load
+  started in the window rode it out in 2.4 s, its first call being a retried
+  put). A refusal for good (`TooLarge`, `Invalid`,
   `Forbidden`) gives up at once, as the timeout would. The store also
   answers a role past its rate with `Forbidden`, a refusal that passes once
-  the rate allows; the single
-  store writes its policy with roles only, so the record never meets one.
+  the rate allows; the single store writes its policy with roles only, so
+  the record never meets one.
 - **`durable`** reads the store's report, `durability(space)`: it is
   `power_safe and ordered`. That is, the `sync` barrier is power-safe
   (`F_FULLFSYNC` on macOS, `fsync` on Linux), and the store is
@@ -1391,6 +1440,9 @@ What looked reusable but was not:
     checked by a test. The internal names are the polish lint's, run as
     the gate of a public-bound repo (`bin/lith polish quarrylith`), not as
     a test.
+16. **A run's `pgid` is set once**: by its `run.pgid`, while it is live, to
+    a group above 1. Nothing else moves it after, and no event but an
+    import's brings one.
 
 ## Acceptance
 
@@ -1439,7 +1491,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   item with a live hold; a must-fix machine-filed item is in it at once
 - [ ] `MOVES` holds exactly the pairs of the table above, which the test
   holds inline (among them a reopen from done or dropped, claimed to done,
-  and in-review to done); a move not in it is refused, and `move(...,
+  and in-review to done and to blocked, which replays and which `check()`
+  reports nothing of, on every backend); a move not in it is refused, and `move(...,
   expect=)` with a stale state is refused
 - [ ] `authorize` returning a reason refuses the operation with it
 - [ ] a second `grant` on an item with a live lease held by another is
@@ -1454,6 +1507,37 @@ Each item is a test marked `templet:3159`, run over every backend in
 - [ ] `start_run` with a fence that is not the live lease's, or past
   `loop.max_attempts`, is refused and reserves nothing
 - [ ] `finish_run` releases the run's reservations in its own event
+- [ ] inside `acting(actor, via)`, an operation calls `authorize` with that
+  actor and its event names that actor and via, and the data's `by`,
+  `added_by`, `set_by`, `released_by`, `declared_by` and `who` name that
+  actor; outside and after it, those fixed at open
+- [ ] a caller `authorize` denies inside `acting` writes nothing
+- [ ] a span ends with its body, on an exception too; a span inside a span
+  gives the outer one's actor back; `acting` refuses what an open refuses,
+  before the span begins
+- [ ] another thread's operation waits for a span to end, and is written
+  under its own actor
+- [ ] `events(wait=)` inside a span is refused, and that ends with the span;
+  `ack` and `beat` inside a span write no event and do not reach `authorize`
+- [ ] a span's via is the one the rule on `number` reads
+- [ ] `run_pgid` sets a live run's `pgid` in one event `run.pgid`, of the
+  run's subject, moving nothing else of the run; a later `run_phase` and
+  `finish_run` keep it
+- [ ] `run_pgid` is refused, writing nothing, for a run with a `pgid` (the
+  same group or another), a finished run, a run not there, a read-only handle,
+  a caller `authorize` denies, and any `pgid` but an int above 1
+- [ ] a record with `run.pgid` events replays, and its dump loads into an
+  empty record on any backend, the same and clean
+- [ ] `check()` reports a `pgid` set twice (the same group too), changed by
+  another kind, set on a finished run, set to no group, or brought by a
+  `run.start`, a run first written by a `run.phase` or a `run.pgid` with a
+  group, or an import with a group below 2; a run an import brought with a
+  group is clean
+- [ ] a dump written before `acting` and `run.pgid` loads on every backend,
+  and a SQLite file written before them opens with no migration; each is
+  clean, and its live run then takes a group
+- [ ] Henge: a `run.pgid` whose writer died once its journal put was answered
+  is redone onto the run at the next open
 - [ ] for a run whose lease was released and granted again, its `move` and
   `renew` are refused, and its `finish_run` records the outcome and
   releases its reservations
@@ -1565,10 +1649,12 @@ Each item is a test marked `templet:3159`, run over every backend in
 - [ ] Henge: a put, the commit put or a sync that the store refuses at once,
   and the read inside a retry of one of them, is tried again after a pause,
   each the double of the one before, up to `TRY_MS`, until the timeout; an
-  open, an operation's reads before its commit, a new `ack`'s read, a
-  caller's read and a load's emptiness check are not, and each is
-  `Unavailable` at once; a refusal for good (`TooLarge`, `Invalid`,
-  `Forbidden`) gives up at once
+  open (its report, its sync and its reads), an operation's reads before its
+  commit, a new `ack`'s read, a caller's read, a load's emptiness check and a
+  resumed load's read of its journal are not: each is tried once and is
+  `Unavailable` well before the timeout, with nothing committed and the
+  handle usable; a refusal for good (`TooLarge`, `Invalid`, `Forbidden`) gives
+  up at once
 - [ ] Henge: a load stopped part-way continues from `head() + 1` at the
   next open when given the same dump, refuses a different dump, and refuses
   every other operation until it ends
@@ -1602,8 +1688,8 @@ Each item is a test marked `templet:3159`, run over every backend in
   and every other item to `unsorted`
 - [ ] export: its document over the fixture board equals the sample import
   document step 4 ships (a copy kept in benchLith's tests)
-- [ ] export: `bin/lith::MOVES`' state pairs equal quarrylith's `MOVES`,
-  read from the quarrylith submodule's source (a literal, by `ast`, never
+- [ ] export: `bin/lith::MOVES`' state pairs equal quarrylith's `MOVES` but
+  for `in-review` to `blocked`, which only quarrylith's has, read from the quarrylith submodule's source (a literal, by `ast`, never
   an import); skipped with the reason when the submodule is not checked
   out
 - [ ] import: the report's pulled and left counts per table equal the rows
@@ -2123,6 +2209,31 @@ asks for the real one where it exists.
 (#3044) shaped the `efforts`, `effort_links` and `statements` records here,
 and gate evaluation stays its own.
 
+**A caller's actor, for a span.** The services' scheduler is the one writer
+and answers many callers, and on Henge the writer lock allows it one open, so
+an actor fixed at open would name it on every event, and its grants could not
+tell a yard user from a runner. A span (`3165-the-services.md`, "Each write
+carries its caller's actor") keeps every operation's signature as it is.
+Rejected: an `actor=` on each of some forty operations, for the same result;
+a thread-local actor, which would leave `actor` and `via` on the handle to mean
+something else, and let a span run beside another thread's operation, when the
+lock already orders them.
+
+**A run's group in an event of its own.** The group is known only after the
+spawn, which follows `start_run`. Rejected: `run_phase(..., pgid=)`, the other
+form the services' page offers. A runner that adopts a run sends a group it
+finds in the run's folder, and a phase with it would move `phase_at` and
+`expect_until`, which supervision reads as progress, for a run that has made
+none. **Once, the same group too**, as the services' page asks: a lost reply is
+the request memory's and a read's to resolve (`3165-the-services.md`, "At most
+once"), so a refusal naming the group it holds is all a caller needs. **Above
+1**, because `killpg(0)` is the caller's own group and `killpg(1)` is init's,
+and the services kill by this field after a restart. **No new schema version:**
+the field was always there and the fold is unchanged, so a record written
+before this opens and replays with no migration. The cost is one way: a copy
+from before this reads and replays a record with `run.pgid` events, and `load`
+there refuses a dump of one ("no kind"), so a dump moves forward only.
+
 **Nothing is left open for the user.** Round 2 left two questions, and the
 user answered both on 2026-10-30: `durable` means power-safe, and the
 client alone is the dependency (above).
@@ -2380,3 +2491,23 @@ client alone is the dependency (above).
   computed from the latest `host/measure` reading of each live node, which
   names its node in `value.node`: a row in the gauges table and an acceptance
   item (this PR)
+- 2026-11-05 proposed: `Record.acting(actor, via)`, a caller's actor and via
+  for a span, under the record's lock (under "A caller's actor", with the
+  acceptance items and the Rationale); `Record.run_pgid(id, pgid)` and the
+  event kind `run.pgid`, a live run's group, once, above 1, moving nothing
+  else of the run (the runs row, `EVENT_KINDS`, invariant 16, what `check()`
+  reports, the acceptance items and the Rationale): the two needs the
+  services' page names (`3165-the-services.md`, "From the record"). What is
+  not retried gains a resumed load's read, each item of it has a test, and
+  "at once" says what a real store measured; the follow-up list gains the
+  directory's bound, rows 6 and 7, and the order's commands on a held record
+  (this PR)
+- 2026-11-05 proposed: `("in-review", "blocked")` in `MOVES`, the connector's
+  page's need (`3167-the-github-connector.md`, "From the record", item 1): a
+  hand-over that no next run of the author could cure leaves the item
+  `in-review`, where the pair was refused, and `ready` then `blocked` has a
+  window a round could resume the author in. The table, the `MOVES` note and
+  the export acceptance item say it; `check()` is stricter on `pgid`: only a
+  run first written by an `import` is exempt, one imported with a group below 2
+  is reported, and a run first written by a `run.pgid` is reported too (the
+  review of quarrylith#21, round 1) (this PR)

@@ -57,7 +57,7 @@ MOVES = frozenset().union(
     _pairs(["triage"], ["ready"]),
     _pairs(["ready", "blocked"], ["claimed"]),
     _pairs(["claimed"], ["blocked", "in-review", "ready"]),
-    _pairs(["ready"], ["blocked"]),
+    _pairs(["ready", "in-review"], ["blocked"]),
     _pairs(["blocked"], ["ready"]),
     _pairs(["in-review"], ["reviewed"]),
     _pairs(["reviewed"], ["merge-ready"]),
@@ -135,6 +135,14 @@ CHANGE_FIELDS = {
 
 def wall_ms():
     return time.time_ns() // 1_000_000
+
+
+def _who(actor, via):
+    """Refused unless `actor` and `via` can name an operation."""
+    if not isinstance(actor, str) or not actor:
+        raise Refused("an actor is a non-empty str")
+    if via not in ev.VIAS:
+        raise Refused(f"no via {via!r}: one of {', '.join(ev.VIAS)}")
 
 
 def _key(kind, key):
@@ -496,10 +504,7 @@ class Record(abc.ABC):
     backend = None
 
     def __init__(self, *, actor, via, authorize=None, readonly=False, shared=False):
-        if not isinstance(actor, str) or not actor:
-            raise Refused("an actor is a non-empty str")
-        if via not in ev.VIAS:
-            raise Refused(f"no via {via!r}: one of {', '.join(ev.VIAS)}")
+        _who(actor, via)
         self.actor = actor
         self.via = via
         self.authorize = authorize
@@ -509,6 +514,7 @@ class Record(abc.ABC):
         self.clock = wall_ms
         self._lock = threading.RLock()
         self._reading_depth = 0
+        self._acting_depth = 0
         self._woken = threading.Condition()
         self._commits = 0
 
@@ -619,6 +625,26 @@ class Record(abc.ABC):
         with self._woken:
             self._commits += 1
             self._woken.notify_all()
+
+    @contextlib.contextmanager
+    def acting(self, actor, via):
+        """Operations in this span are `actor`'s, through `via`, in place of
+        those fixed at open: `authorize` sees them, the event names them, and
+        so does whatever an operation stamps with its actor. The span holds
+        the record's lock, so another thread's operation waits for it to end
+        and is written under its own actor: keep a span to the caller's one
+        operation. On one thread, a span must not be left suspended (no
+        `await` in it). A span inside a span gives the outer one's back."""
+        _who(actor, via)
+        with self._lock:
+            held = self.actor, self.via
+            self.actor, self.via = actor, via
+            self._acting_depth += 1
+            try:
+                yield
+            finally:
+                self._acting_depth -= 1
+                self.actor, self.via = held
 
     @contextlib.contextmanager
     def _operation(self, name, kind, subject=None):
@@ -832,7 +858,8 @@ class Record(abc.ABC):
         `wait`, up to that many seconds for the first one. A wait inside
         `reading()` is refused: the reading holds every other thread's
         operation back and its snapshot pins the read, so it could only end
-        empty."""
+        empty. A wait inside `acting()` is refused too: the span holds every
+        other thread's operation back."""
         if not schema.is_int(cursor) or cursor < 0:
             raise Refused(f"a cursor is a seq, from 0, not {cursor!r}")
         if not schema.is_int(limit) or limit < 1:
@@ -845,6 +872,8 @@ class Record(abc.ABC):
                 # here is this thread's own
                 if self._reading_depth:
                     raise Refused("events(wait=) does not wait inside reading()")
+                if self._acting_depth:
+                    raise Refused("events(wait=) does not wait inside acting()")
         end = time.monotonic() + wait
         while True:
             with self._lock:
@@ -928,7 +957,8 @@ class Record(abc.ABC):
         records, the seqs, each entry against its limit, the items with no
         effort link, the counters behind their ids, a node booked past its
         capacity (invariant 6), a running run without its reservations or a
-        finished one holding some (invariant 7), then the backend's own.
+        finished one holding some (invariant 7), a run's pgid not set once,
+        then the backend's own.
         Empty when the record is whole."""
         with self.reading():
             dump = self.dump()
@@ -1156,13 +1186,14 @@ class Record(abc.ABC):
         (made, parked, if it is not there). A machine-filed item is filed
         unadmitted unless it is a must-fix. `number` is taken only by an
         import. Returns the number."""
-        if number is not None and self.via != "import":
-            raise Refused("an item's number is given only by an import")
         try:
             labels, flags = sorted(labels), sorted(flags)
         except TypeError:
             raise Refused("labels and flags are lists of str") from None
         with self._operation("file_item", "item.file") as op:
+            # read under the lock: a span's via is this thread's own here
+            if number is not None and self.via != "import":
+                raise Refused("an item's number is given only by an import")
             if number is not None:
                 number = _key("items", [number])[0]
                 if op.get("items", [number]) is not None:
@@ -1971,6 +2002,23 @@ class Record(abc.ABC):
             )
             op.data = {"run": id, "task": run["task"], "phase": phase}
 
+    def run_pgid(self, id, pgid):
+        """Set a live run's process group, known only after its spawn, which
+        follows `start_run`. Once: refused when it is set, to this group or
+        another, and for a finished run. A `pgid` is an int above 1: to
+        `killpg`, 0 is the caller's own group and 1 is init's. It moves nothing
+        else of the run, so a group sent late does not touch `phase_at`."""
+        if not schema.is_int(pgid) or pgid < 2:
+            raise Refused(f"a pgid is a process group's id, above 1, not {pgid!r}")
+        with self._operation("run_pgid", "run.pgid", f"run:{id}") as op:
+            run = op.need("runs", [id], "run")
+            if run["finished_at"] is not None:
+                raise Refused(f"run {id} is finished")
+            if run["pgid"] is not None:
+                raise Refused(f"run {id}'s pgid is set, to {run['pgid']}")
+            op.put("runs", {**run, "pgid": pgid})
+            op.data = {"run": id, "task": run["task"], "pgid": pgid}
+
     def finish_run(self, id, outcome, reason, *, footprint, cost, result=None):
         """Finish a run with its outcome, and release its reservations in the
         same event; its task, running, is open again. Never refused for a
@@ -2590,6 +2638,39 @@ def _run_findings(dump):
     return findings
 
 
+def _pgid_findings(journal):
+    """A run's `pgid` is set once: by a `run.pgid`, on a live run, to a group
+    above 1. Only a run an import brought comes with a group, and keeps it."""
+    findings = []
+    held = {}
+    for raw in journal:
+        for kind, key, value in raw["puts"]:
+            if kind != "runs":
+                continue
+            id, pgid = key[0], value.get("pgid")
+            at = f"run {id}, event {raw['seq']}"
+            if id not in held and raw["kind"] == "import":
+                held[id] = pgid
+                if pgid is not None and (not schema.is_int(pgid) or pgid < 2):
+                    findings.append(f"{at}: its pgid imported as {pgid!r}")
+                continue
+            first = id not in held
+            was = held.get(id)
+            held[id] = pgid
+            if raw["kind"] != "run.pgid":
+                if pgid != was:
+                    findings.append(f"{at}: its pgid changed by a {raw['kind']}")
+            elif first and pgid is not None:
+                findings.append(f"{at}: its pgid set on a run no run.start wrote")
+            elif was is not None:
+                findings.append(f"{at}: its pgid set again, {was} to {pgid}")
+            elif value.get("finished_at") is not None:
+                findings.append(f"{at}: its pgid set when it is finished")
+            elif not schema.is_int(pgid) or pgid < 2:
+                findings.append(f"{at}: its pgid set to {pgid!r}")
+    return findings
+
+
 def _findings(dump):
     """What `check()` finds in a dump, whatever the backend."""
     findings = []
@@ -2635,6 +2716,7 @@ def _findings(dump):
             )
     findings += _capacity_findings(dump["records"])
     findings += _run_findings(dump)
+    findings += _pgid_findings(dump["journal"])
     return findings
 
 

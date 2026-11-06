@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: 30a5e6a
+    at: c611ba4
 ---
 
 # The allocator
@@ -810,13 +810,29 @@ status told apart from a provider's in the record by what it names, and it
 lifts a stop that names no end **and nothing else**: not a stop with a
 readable future reset, which holds until its own reset (the command refuses
 it, naming the reset, and a clear written by other means does not lift it
-either), and not a warning. A stop reading after a clear holds again: a clear is
-not a pass. A clear that names no one or no reason is not recognised. Where a
-provider has no stop it says "nothing to clear" and writes nothing; where one
-window has a reset and another has none, it clears the one and says the other
-holds until its reset. It is a person's command: **an agent must not be granted
-it through the services' socket**, since it would let an agent spend past a
-stop, which the services' grants must keep out.
+either), **nor a newer stop that names no reset while an older stop's reset in
+the window is still ahead** (that reset will come: the command refuses it,
+naming that reset, with no override, and once it has passed the clear lifts the
+window), and not a warning. What "names no reset" covers is the budget's
+reading of `resets_at`: a reset in the wrong unit (microseconds, nanoseconds, a
+relative number, before 2000) is none, and a person may clear it, so `alloc
+show` and `alloc clear` print its raw `resets_at` (`resets_at 1790000000000000
+is not read as a time`), `alloc clear` before it clears. A stop reading after a
+clear holds again: a clear is not a pass. A clear that names no one or no reason
+(or only space) is not recognised, and the utilization is read first, so a
+`cleared` status over the limit is a stop. `--why` and `--actor` are one
+printable line, refused with a control character, and the printers write out
+any control character a reading already holds (`--json` gives the text as it
+is); an empty provider is refused. Where a provider has no stop it says
+"nothing to clear" and writes nothing; where one window has a reset and another
+has none, it clears the one and says the other holds until its reset. It is a
+person's command: **an agent must not be granted any budget reading through
+the services' socket** (not `alloc clear`, not a `cleared` reading, not an
+`allowed`: a recognised non-stop reading newer than a stop lifts it, so the
+exposure is the writing of any `budget` reading), since it would let an agent
+spend past a stop. `by` is the writer's own claim, and `alloc show` is not
+authentication: the event that wrote the reading holds the actor the record
+checked.
 
 ### Needs from the record
 
@@ -1008,8 +1024,13 @@ which pass.
 - [ ] `alloc clear URL PROVIDER --why TEXT` writes one `cleared` reading, with
   who and why, in each window whose stop names no reset, and the provider is
   lifted; a stop with a readable future reset is refused, naming the reset, and
-  a `cleared` reading never lifts one; a stop reading after a clear holds
-  again; a clear with no stop before it, or that names no one or no reason,
+  a `cleared` reading never lifts one, nor does it lift a newer stop with no
+  reset over an older stop's reset still ahead (refused, naming that reset);
+  a reset not read as a time is printed raw by `alloc show` and by the command
+  before it clears; `--why` and `--actor` with a control character are
+  refused, a reading's text is written on one line by the printers, a blank
+  provider is refused and a `cleared` status over the limit is a stop; a stop
+  reading after a clear holds again; a clear with no stop before it, or that names no one or no reason,
   lifts nothing; a provider with no stop is `nothing to clear` and nothing is
   written; the refusal of a stop with no reset and `alloc show` name the
   command, and `alloc show` lists a clear in force with who and why
@@ -1440,5 +1461,12 @@ later: nothing in the effort runs sessions through the queue.
   a readable reset, nor a warning), and the budget section, the commands table,
   the refusal's and `alloc show`'s words and an acceptance item for it; it
   answers the open question of "The commands", no longer open; an agent must
-  not be granted it through the socket (the user's decision, 2026-11-06: a
-  person's command with no time limit, over a longest hold) (this PR)
+  not be granted any budget reading through the socket (the user's decision,
+  2026-11-06: a person's command with no time limit, over a longest hold).
+  Amended by the review of this PR: a newer stop with no reset does not hide an
+  older stop's reset that is still ahead (the clear lifts nothing until it has
+  passed, no override: the user's rule); a reset in the wrong unit is none,
+  which a person may clear, with its raw `resets_at` shown first; control
+  characters are refused in `--why` and `--actor` and written out by the
+  printers; a blank provider is refused; the utilization is read before a
+  `cleared` status (this PR)

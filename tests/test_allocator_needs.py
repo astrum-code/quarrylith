@@ -323,6 +323,23 @@ def test_a_consumer_the_document_names_is_not_counted_but_a_new_hold_is(effort, 
 
 
 @over_backends
+def test_a_reservation_that_has_ended_is_not_counted(effort, clock):
+    """templet:3161 -- a reservation made after the reading that ends before
+    now holds nothing now: with 3.0 GiB available (room 2), a 2 GiB reservation
+    over a span that is past leaves the next start its room, and the same span
+    still running does not."""
+    record = effort
+    placement = ready(record, clock, 3 * GIB)
+    t = clock()
+    record.reserve(
+        "laptop", {"memory": 2 * GIB}, holder="vm:t", from_at=t, until_at=t + 2000
+    )
+    assert isinstance(placement.place(make_task(record), now=clock()), Refusal)
+    clock.step(3000)
+    assert isinstance(placement.place(make_task(record), now=clock()), Fit)
+
+
+@over_backends
 def test_hold_and_headroom_are_net_of_what_was_reserved_since_the_reading(
     effort, clock
 ):

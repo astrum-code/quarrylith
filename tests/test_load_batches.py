@@ -182,8 +182,9 @@ def test_a_load_makes_fewer_puts_than_one_at_a_time(tmp_path, monkeypatch):
     """templet:3159 -- Henge: the point of a batch. A load at `LOAD_BATCH`
     makes less than half the puts of one at a time."""
     dump = a_dump(tmp_path / "source", items=20)
+    batch = henge.LOAD_BATCH
     one = spied_load(dump, 1, monkeypatch)[2]
-    many = spied_load(dump, henge.LOAD_BATCH_DEFAULT, monkeypatch)[2]
+    many = spied_load(dump, batch, monkeypatch)[2]
 
     def puts(spy):
         return sum(1 for c in spy.calls if c[0] == "put")
@@ -206,10 +207,9 @@ def test_a_batch_reads_what_it_needs_at_once(tmp_path, monkeypatch):
     assert len(many) <= 6 * batches + 40, len(many)
 
 
-def test_a_batch_is_named_and_within_one_read(monkeypatch):
+def test_a_batch_is_named_and_within_one_read():
     """templet:3159 -- Henge: the batch is one named constant, and a crashed
     batch's entries come back in one `get_many`."""
-    assert henge.LOAD_BATCH == henge.LOAD_BATCH_DEFAULT
     assert 1 <= henge.LOAD_BATCH <= henge.MANY
     assert henge.LOAD_BATCH * 50 <= henge.KEPT
 

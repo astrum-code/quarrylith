@@ -69,6 +69,13 @@ PIECE_BYTES = 256 * 1024
 JOURNAL_CHUNK = 8192
 #: The most keys one `get_many` takes (henge's `MANY`).
 MANY = 1000
+#: The most events a load writes as one batch (see `_store_batch`). The store
+#: has no put of many objects, so what a batch saves is puts of the same
+#: object: a chunk, a counter, `applied` and `head` go once a batch, not once
+#: an event. At this size a batch's one sync and its chunks' rewrites are
+#: small beside its puts of entries and records, a crash redoes at most this
+#: many events, and those entries come back in one `get_many`.
+LOAD_BATCH = MANY
 #: How long the record waits for the store at one put, read or sync before it
 #: gives an operation up: past the commit point that is `Unknown`, before it
 #: `Unavailable`.
@@ -770,6 +777,89 @@ class HengeRecord(Record):
                 self._fail(why, f"the commit put was not answered: {failed}", failed)
             tries.pause()
 
+    def _store_batch(self, events, priors):
+        """A load's next events as one commit: their entries in seq order,
+        each a commit put, then what they write, each object once, at its
+        last value, and then `applied`, one sync and `head`, for the last
+        seq. Each put is sent once the one before it is answered."""
+        self._live()
+        if events[0].seq != self._high + 1:
+            raise Unavailable(f"seq {events[0].seq} is not next after {self._high}")
+        if self._unsettled:
+            # the `applied` this commit goes on past was read, not answered
+            self._put(self.S, ["applied"], self._state_up(self._high), why="settle")
+            self._unsettled = False
+        pairs = list(zip(events, priors))
+        try:
+            plan = self._batch_plan(pairs)
+            self._look_many(self.S, [["applied"], ["head"]])
+        except _StoreDown as e:
+            raise Unavailable(f"the store at {self._where()}: {e}") from e
+        for event, prior in pairs:
+            self._commit_put(event.seq, {"event": event.to_dict(), "priors": prior})
+        self._apply(events[-1].seq, plan, "op")
+
+    def _batch_priors(self, events):
+        """Each event's priors, each seeing the events before it in the batch,
+        from one read of the records they touch."""
+        self._look_many(
+            self.R,
+            list({_ckey(k): k for k in self._record_keys(events)}.values()),
+        )
+        written = {}
+
+        def get(kind, key):
+            c = _ckey([kind, *key])
+            if c in written:
+                return written[c]
+            row = self._look(self.R, [kind, *key])
+            return None if row[0] is ABSENT else row[0]
+
+        out = []
+        for event in events:
+            priors = contract._priors(get, event)
+            self._check_entry(event, priors)
+            out.append(priors)
+            for kind, key, value in event.puts:
+                written[_ckey([kind, *key])] = value
+        return out
+
+    @staticmethod
+    def _record_keys(events):
+        return [[kind, *key] for event in events for kind, key, _ in event.puts]
+
+    def _batch_plan(self, pairs, *, redo=False):
+        """`_plan` of many events: each record once, at the last value the
+        events give it, then each index's edits together, a split's as one.
+        Its reads go at once, by `get_many`, so `_index_plan` finds them kept."""
+        records = {}
+        merged = collections.defaultdict(dict)
+        for event, priors in pairs:
+            for kind, key, value in event.puts:
+                rkey = [kind, *key]
+                records[_ckey(rkey)] = (rkey, {**value, "_seq": event.seq})
+            for ix, edits in index_edits(event, priors).items():
+                merged[ix].update(edits)
+        self._look_many(self.R, [rkey for rkey, _ in records.values()])
+        listed = [ix for ix in merged if ix[0] != "journal"]
+        self._look_many(self.I, [ix_key(ix, "dir") for ix in listed])
+        chunks = []
+        for ix, edits in merged.items():
+            if ix[0] == "journal":
+                numbers = {seq // JOURNAL_CHUNK for seq, _ in edits.values()}
+            else:
+                row = self._look(self.I, ix_key(ix, "dir"))
+                directory = [] if row[0] in (ABSENT, None) else row[0]
+                numbers = {chunk_of(k, directory) for k, _ in edits.values()}
+            chunks += [ix_key(ix, n) for n in sorted(numbers)]
+        self._look_many(self.I, chunks)
+        out = [
+            (self.R, rkey, lambda cur, v=stored: v) for rkey, stored in records.values()
+        ]
+        for ix, edits in sorted(merged.items(), key=_ix_order):
+            out += self._index_plan(ix, edits, redo=redo)
+        return out
+
     def _apply(self, seq, plan, why):
         """Steps 3 and 4: the plan's puts, `applied`, one sync, `head`."""
         for space, key, fn in plan:
@@ -782,9 +872,10 @@ class HengeRecord(Record):
         """At open, and after a commit put met another writer's entry: read
         `applied` (a), then journal/[a+1] and journal/[a+2]. None: at open,
         put `applied` again as read, then bring `head` up to a. One: redo it
-        whole. Two: another writer is live, and nothing is redone. After a
-        commit put met another writer's entry, `applied` with nothing to redo
-        is put again by the next commit, before it goes on past it."""
+        whole. Two: another writer is live, and nothing is redone, unless the
+        open finds a load in progress, whose batch left them: `_redo_batch`.
+        After a commit put met another writer's entry, `applied` with nothing
+        to redo is put again by the next commit, before it goes on past it."""
         self._forget()
         self._unsettled = False
         try:
@@ -793,8 +884,16 @@ class HengeRecord(Record):
             a = applied[0] if schema.is_int(applied[0]) else 0
             one = self._fetch(self.J, [a + 1])
             two = self._fetch(self.J, [a + 2])
+            batch = (
+                at_open
+                and two[0] is not ABSENT
+                and isinstance(self._fetch(self.S, ["loading"])[0], dict)
+            )
         except _StoreDown as e:
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
+        if batch:
+            self._redo_batch(a)
+            return
         if two[0] is not ABSENT:
             self._closed = f"recovery found journal/[{a + 1}] and [{a + 2}]"
             self._forget()
@@ -845,6 +944,53 @@ class HengeRecord(Record):
         except _StoreDown as e:
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
         self._apply(a + 1, plan, "recover")
+
+    def _redo_batch(self, a):
+        """At open, a load in progress with entries past `applied`, from `a +
+        1` to the first seq absent: what a batch left, redone as one, as
+        recovery redoes one entry. Each entry is put again with the version
+        read, then what they write, with fresh reads, a split's redo included,
+        then `applied`, one sync and `head`. Whether they are the dump's is
+        the resumed load's to say."""
+        rows, seq = [], a + 1
+        try:
+            while True:
+                seqs = list(range(seq, seq + MANY))
+                got = self._fetch_many(self.J, [[s] for s in seqs], keep=False)
+                ended = False
+                for s, row in zip(seqs, got):
+                    if row[0] is ABSENT:
+                        ended = True
+                        break
+                    rows.append((s, row))
+                if ended:
+                    break
+                seq += MANY
+        except _StoreDown as e:
+            raise Unavailable(f"the record {self.name}: recovery: {e}") from e
+        try:
+            pairs = [
+                (ev.Event.from_dict(row[0]["event"]), row[0]["priors"])
+                for _, row in rows
+            ]
+        except (KeyError, TypeError, ValueError) as e:
+            raise Unavailable(f"a journal entry past {a} is not an entry: {e}") from e
+        self._high = rows[-1][0]
+        for s, row in rows:
+            if self._settle(s, row[0], "recover", version=row[1]) is None:
+                self._fail(
+                    "recover",
+                    f"journal/[{s}] changed under recovery",
+                    _Found(f"journal/[{s}] changed"),
+                )
+        self._forget()
+        try:
+            plan = self._batch_plan(pairs, redo=True)
+            for key in (["applied"], ["head"]):
+                self._fetch(self.S, key)
+        except _StoreDown as e:
+            raise Unavailable(f"the record {self.name}: recovery: {e}") from e
+        self._apply(self._high, plan, "recover")
 
     # -- administration -------------------------------------------------------
 
@@ -964,12 +1110,13 @@ class HengeRecord(Record):
 
     def load(self, dump):
         """Load a dump into an empty record, resumably: `loading` is put first,
-        with the dump's digest; each event goes through the commit protocol;
-        `loading` is put to null at the end, and one sync follows, so a load
-        that returned is durable. A sync that is not answered gives
-        `Unavailable` with the load still in progress: the same dump finishes
-        it. A load stopped part-way goes on from `head() + 1` when given the
-        same dump, and refuses any other."""
+        with the dump's digest; the events go through the commit protocol
+        `LOAD_BATCH` at a time, as one commit (`_store_batch`), each batch
+        synced before `head` names it; `loading` is put to null at the end,
+        and one sync follows, so a load that returned is durable. A sync that
+        is not answered gives `Unavailable` with the load still in progress:
+        the same dump finishes it. A load stopped part-way goes on from
+        `head() + 1` when given the same dump, and refuses any other."""
         self._writable()
         journal = contract.check_dump(dump)
         digest = hashlib.sha256(schema.canonical(dump).encode("utf-8")).hexdigest()
@@ -1013,10 +1160,9 @@ class HengeRecord(Record):
                     # before the load goes on past it
                     self._put(self.S, ["loading"], resumed, why="load")
                     self._holds_only_the_dump(journal)
-                for event in journal[self._high :]:
-                    priors = contract._priors(self._get, event)
-                    self._check_entry(event, priors)
-                    self._store(event, priors)
+                for at in range(self._high, len(journal), LOAD_BATCH):
+                    events = journal[at : at + LOAD_BATCH]
+                    self._store_batch(events, self._batch_priors(events))
                 for kind in sorted(kept):
                     for row in dump["bookkeeping"].get(kind, []):
                         self._bookkeep(kind, schema.validate(kind, row), sync=False)
@@ -1202,9 +1348,9 @@ class HengeRecord(Record):
         )
 
     def _check_store(self):
-        """The Henge findings: a journal hole below `head`, `applied` behind
-        `head`, a record whose `_seq` is past `applied`, and an index chunk
-        that disagrees with the records."""
+        """The Henge findings: a load in progress, a journal hole below `head`,
+        `applied` behind `head`, a record whose `_seq` is past `applied`, and
+        an index chunk that disagrees with the records."""
 
         def check():
             findings = []
@@ -1219,8 +1365,15 @@ class HengeRecord(Record):
                 else:
                     entries[s] = row[0]
             state = {
-                k: self._fetch(self.S, [k])[0] for k in ("applied", "head", "schema")
+                k: self._fetch(self.S, [k])[0]
+                for k in ("applied", "head", "schema", "loading")
             }
+            if isinstance(state["loading"], dict):
+                findings.append(
+                    f"henge: a load is in progress, at seq {top} of "
+                    f"{state['loading'].get('events')}: load the same dump "
+                    "to finish it"
+                )
             if state["applied"] != state["head"]:
                 findings.append(
                     f"henge: applied {state['applied']} and head {state['head']}"

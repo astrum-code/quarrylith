@@ -6,7 +6,7 @@ declaration. `snapshot` is plain data; `lines` writes it as text. Both read
 the record only, and carry figures and names the record holds, never the
 document's free text."""
 
-from .budget import providers_of, report
+from .budget import plain, providers_of, report
 from .document import document_from_data
 from .measure import KIND as MEASURE_KIND
 from .measure import SOURCE as MEASURE_SOURCE
@@ -171,14 +171,21 @@ def _node(record, node, now, value, held_by):
 
 def _budget_line(stop):
     """One stop of a provider's budget, or the clear in force that lifted one,
-    as `alloc show` words it."""
-    head = f"budget {stop['provider']} {stop['window']}:"
+    as `alloc show` words it. Text a writer chose is written out on one line."""
+    head = f"budget {plain(stop['provider'])} {plain(stop['window'])}:"
     if stop["state"] == "cleared":
-        return f"{head} cleared by {stop['by']} at {_when(stop['at'])}: {stop['why']}"
+        who, why = plain(stop["by"]), plain(stop["why"])
+        return f"{head} cleared by {who} at {_when(stop['at'])}: {why}"
     if stop["resets"] is not None:
         return f"{head} stopped until {_when(stop['resets'])}"
+    if stop["ahead"] is not None:
+        return (
+            f"{head} stopped, no reset time; an earlier stop's reset "
+            f"{_when(stop['ahead'])} is still ahead, so it holds until then"
+        )
+    said = f" (resets_at {stop['raw']} is not read as a time)" if stop["raw"] else ""
     return (
-        f"{head} stopped, no reset time: clear it with "
+        f"{head} stopped, no reset time{said}: clear it with "
         f"`quarrylith alloc clear URL {stop['provider']} --why TEXT`"
     )
 

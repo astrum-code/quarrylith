@@ -108,19 +108,19 @@ def _state(document, value):
     """`(state, recognised)`: `stop`, `warn`, `allowed` or `clear`, and whether
     the reading is one we know. A `cleared` reading that names who and why is
     a clear; one that does not is not recognised. `rejected`, or a utilization
-    from `stop_at`, is a stop; `allowed_warning` is a warning; `allowed` is
-    allowed. A status that is not recognised (missing, unknown, of another
-    type), and a utilization that cannot be read, are paced as a warning and
-    are not recognised. The status is matched without case or surrounding
-    space."""
+    from `stop_at` (read first, whatever the status), is a stop;
+    `allowed_warning` is a warning; `allowed` is allowed. A status that is
+    not recognised (missing, unknown, of another type), and a utilization that
+    cannot be read, are paced as a warning and are not recognised. The status
+    is matched without case or surrounding space."""
     status = value.get("status")
     status = status.strip().lower() if isinstance(status, str) else None
-    if status == CLEARED:
-        named = all(_named(value.get(key)) for key in ("by", "why"))
-        return (CLEAR, True) if named else (WARN, False)
     used, readable = _used(value)
     if status == "rejected" or (used is not None and used >= document.budget.stop_at):
         return STOP, True
+    if status == CLEARED:
+        named = all(_named(value.get(key)) for key in ("by", "why"))
+        return (CLEAR, True) if named else (WARN, False)
     if readable and status == "allowed_warning":
         return WARN, True
     if readable and status == "allowed":
@@ -128,31 +128,43 @@ def _state(document, value):
     return WARN, False
 
 
-def _walk(document, rows):
-    """`(paced, anchor, cleared, lifted)` of one window's readings, newest
-    first: the newest unrecognised reading above any clear or recognised one;
-    the newest recognised one that is not a clear, with its state; the newest
-    clear above it; and whether that clear lifts the anchor. A clear lifts a
-    stop that names no end and nothing else: not a stop with a readable
-    reset, which holds until it, and not a warning."""
+def _walk(document, rows, now):
+    """`(paced, anchor, cleared, lifted, ahead)` of one window's readings,
+    newest first: the newest unrecognised reading above any clear or
+    recognised one; the newest recognised one that is not a clear, with its
+    state; the newest clear above it; whether that clear lifts the anchor; and
+    `ahead`, the latest readable reset still to come of an older stop in the
+    window, since its last recognised non-stop reading. A clear lifts a stop
+    that names no end and nothing else: not a stop with a readable reset,
+    which holds until it, not a newer stop that names none while an older
+    stop's reset is still ahead (that reset will come), and not a warning."""
     paced = anchor = cleared = None
+    seen = []
     for row in rows:
         state, recognised = _state(document, row["value"])
+        if anchor is not None:
+            if recognised and state == STOP:
+                seen.append(_resets(row["value"]))
+            elif recognised and state != CLEAR:
+                break
+            continue
         if state == CLEAR:
             cleared = cleared or row
             continue
         if recognised:
             anchor = row, state
-            break
+            continue
         if paced is None and cleared is None:
             paced = row
+    ahead = max((at for at in seen if at is not None and at > now), default=None)
     lifted = (
         cleared is not None
         and anchor is not None
         and anchor[1] == STOP
         and _resets(anchor[0]["value"]) is None
+        and ahead is None
     )
-    return paced, anchor, cleared, lifted
+    return paced, anchor, cleared, lifted, ahead
 
 
 def _windows(reader, document, provider, now):
@@ -167,7 +179,7 @@ def _windows(reader, document, provider, now):
     limit = document.budget.max_age_s * 1000
     found = []
     for kind, rows in _history(reader, provider).items():
-        paced, anchor, _, lifted = _walk(document, rows)
+        paced, anchor, _, lifted, _ = _walk(document, rows, now)
         guards = []
         if paced is not None:
             guards.append((paced, WARN))
@@ -183,15 +195,37 @@ def _windows(reader, document, provider, now):
     return found
 
 
+def _unread(value):
+    """A `resets_at` that is there and is not read as a time, as text for a
+    person (`1790000000000000`, `'soon'`), or None when it is absent, null or
+    a time."""
+    raw = value.get("resets_at")
+    if raw is None or _resets(value) is not None:
+        return None
+    text = repr(raw)
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+def plain(text):
+    """`text` on one line for a person: a character that is not printable (a
+    newline, a carriage return, an escape, a line separator) is written out,
+    so text a writer chose cannot forge a line of output."""
+    return "".join(
+        c if c.isprintable() else c.encode("unicode_escape").decode() for c in str(text)
+    )
+
+
 def report(reader, document, provider, *, now):
     """The stops of `provider` and the clears in force, one dict per window,
     by window name: `state` `stop` with its `resets` (None when it names no
-    end), or `cleared` with `by`, `why` and `at` of the clear that lifted a
+    end; `ahead` an older stop's reset still to come, which a newer stop that
+    names none does not hide; `raw` a `resets_at` that is there and not read as
+    a time), or `cleared` with `by`, `why` and `at` of the clear that lifted a
     stop which names no end. A stop whose reset has passed, and a clear with
     no stop under it, are not listed."""
     out = []
     for kind, rows in sorted(_history(reader, provider).items()):
-        _, anchor, cleared, lifted = _walk(document, rows)
+        _, anchor, cleared, lifted, ahead = _walk(document, rows, now)
         if lifted:
             value = cleared["value"]
             out.append(
@@ -206,7 +240,8 @@ def report(reader, document, provider, *, now):
                 }
             )
         elif anchor is not None and anchor[1] == STOP:
-            resets = _resets(anchor[0]["value"])
+            value = anchor[0]["value"]
+            resets = _resets(value)
             if resets is None or now < resets:
                 out.append(
                     {
@@ -214,25 +249,42 @@ def report(reader, document, provider, *, now):
                         "window": kind,
                         "state": "stop",
                         "resets": resets,
+                        "ahead": ahead,
+                        "raw": _unread(value),
                     }
                 )
     return out
 
 
+def clearable(view):
+    """The stops of a `report` a person may clear: those that name no reset and
+    have no older stop's reset ahead."""
+    return [
+        w
+        for w in view
+        if w["state"] == "stop" and w["resets"] is None and w["ahead"] is None
+    ]
+
+
 def clear(record, document, provider, why, *, by, now):
     """Clear `provider`'s stop that names no end: one `cleared` reading, with
     `by` and `why`, in each window whose stop names none. `(cleared, held)`:
-    the windows cleared, and the stops that name a future reset, which hold
-    until it and are not cleared. Nothing is written for a provider with no
+    the windows cleared, and `(window, until, own)` for each stop that holds
+    until a reset still to come, its own (`own`) or an older stop's that a newer
+    stop with none does not hide. Nothing is written for a provider with no
     such stop."""
     provider = provider.strip().lower()
     view = report(record, document, provider, now=now)
     stops = [w for w in view if w["state"] == "stop"]
-    cleared = [w["window"] for w in stops if w["resets"] is None]
+    cleared = [w["window"] for w in clearable(view)]
     for window in cleared:
         value = {"provider": provider, "status": CLEARED, "by": by, "why": why}
         record.record_reading(SOURCE, window, value)
-    held = [(w["window"], w["resets"]) for w in stops if w["resets"] is not None]
+    held = [
+        (w["window"], w["resets"] or w["ahead"], w["resets"] is not None)
+        for w in stops
+        if w["window"] not in cleared
+    ]
     return cleared, held
 
 

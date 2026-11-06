@@ -387,10 +387,16 @@ def _measure(args):
 
 
 def _clear(args):
+    for flag, text in (("--why", args.why), ("--actor", args.actor)):
+        if not text.isprintable():
+            raise Refused(f"{flag} is one printable line: no newline or control")
     why = args.why.strip()
     if not why or len(why) > budget.WHY_AT_MOST:
         raise Refused(f"--why says why, in 1 to {budget.WHY_AT_MOST} characters")
     provider = args.provider.strip().lower()
+    if not provider:
+        raise Refused("clear names a provider: the provider is empty")
+    said = budget.plain(provider)
     with _session(args, readonly=False) as s:
         with s.phase("reading"):
             stored = show._latest(s.record, *show.DOCUMENT)
@@ -401,24 +407,31 @@ def _clear(args):
             stops = budget.report(s.record, document, provider, now=now)
         with s.phase("clearing"):
             if not any(w["state"] == "stop" for w in stops):
-                print(f"nothing to clear: {provider} has no stop")
+                print(f"nothing to clear: {said} has no stop")
                 return 0
+            for w in budget.clearable(stops):
+                if w["raw"]:
+                    print(
+                        f"{said} {w['window']}: resets_at {w['raw']} "
+                        "is not read as a time"
+                    )
             cleared, held = budget.clear(
                 s.record, document, provider, why, by=s.raw.actor, now=now
             )
         with s.phase("printing"):
             if not cleared:
-                name = ", ".join(f"{w} until {_when(at)}" for w, at in held)
+                name = ", ".join(
+                    f"{w} until {_when(at)}" + ("" if own else " (an earlier stop's)")
+                    for w, at, own in held
+                )
                 raise Refused(
-                    f"{provider} {name}: a stop that names a reset holds until it"
+                    f"{said} {name}: a stop that names a reset holds until it"
                 )
             for window in cleared:
-                print(f"cleared {provider} {window} (by {s.raw.actor}): {why}")
-            for window, at in held:
-                print(
-                    f"{provider} {window}: still held until {_when(at)}, "
-                    "its own reset"
-                )
+                print(f"cleared {said} {window} (by {s.raw.actor}): {why}")
+            for window, at, own in held:
+                whose = "its own reset" if own else "an earlier stop's reset"
+                print(f"{said} {window}: still held until {_when(at)}, {whose}")
     return 0
 
 

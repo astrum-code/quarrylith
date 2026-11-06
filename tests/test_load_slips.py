@@ -224,7 +224,8 @@ def test_a_writer_killed_between_two_batches_is_finished(batches):
             break
         died += 1
         journal = henge.spaces("rec")["journal"]
-        committed = fake.value(journal, [BATCH + 1]) is not None
+        entry = fake.value(journal, [BATCH + 1])
+        committed = entry is not None and "load" not in entry
         assert findings_of(fake) == [], j
         rec = on_fake(fake, "reader")
         state = rec.get("items", [ids[0]])["state"]

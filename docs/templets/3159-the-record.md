@@ -788,7 +788,7 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
 
   | space | key | value |
   |---|---|---|
-  | `.journal` | `[seq]` | the **journal entry**: `{"event": the event, "priors": [[kind, key, {match field: value} or null], ...]}` |
+  | `.journal` | `[seq]` | the **journal entry**: `{"event": the event, "priors": [[kind, key, {match field: value} or null], ...]}`, and on a load's entry `"load": true` |
   | `.rec` | `[kind, *key]` | the record's fields, plus `_seq`, the event that last wrote it |
   | `.idx` | `[kind, field, value, chunk]`, `[kind, "*", chunk]`, `[journal, subject, chunk]`; for every record kind also its directory, `[kind, field, value, "dir"]` and `[kind, "*", "dir"]` | a chunk: the sorted keys of the records of `kind` whose `field` is `value` (`*`: all of the kind's keys; `journal`: the seqs of a subject). A directory: the chunk numbers, each with its lowest key |
   | `.state` | `["head"]`, `["applied"]`, `["writer"]`, `["schema"]`, `["loading"]` | the highest committed seq; the highest applied; the writer's pid, host and open time; the schema version; a load in progress, with its dump's digest and the last seq it committed (`to`). Not journaled, and apart from the `meta` record kind |
@@ -896,11 +896,13 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
     committed, and the other writer applied it at its own `Conflict` before
     it could commit past it. Anywhere else (an open's recovery, a load's
     `loading`, bookkeeping) it raises `Unavailable`.
-  - **The check finds an entry a load has not committed**: `loading` is a load
-    in progress and names no seq past `high`. That is no finding. The guard's
-    argument holds with `to` for the entry: a load puts an object for an event
-    past `high` only once `to` names it, and the check reads `to` after the
-    object.
+  - **The check finds a load's entry that is not committed**: the entry says it
+    is a load's (`"load": true`), and `loading` is a load in progress that names
+    no seq past `high`. Only that is no finding. The guard's argument holds with
+    `to` for the entry: a load puts an object for an event past `high` only once
+    `to` names it, and the check reads `to` after the object. Any other entry, a
+    writer's above all, is a finding, load in progress or not: a writer's entry is
+    its commit, and its objects may follow at once.
   - **A `Conflict` at the put** means the object moved after its version was
     seen. The writer reads it again, checks again, and puts again. The same
     applies after any error from the store at a put. A fresh read that
@@ -995,23 +997,29 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
       loader's plan, so a loader that is alive and a redo may race as a writer
       and a redo of one entry do. Whether they are the dump's is the resumed
       load's to say (row 9).
-    - **Otherwise nothing is redone.** Entries past `to` are a batch not
-      committed: another plan than any whole batch's, and its loader may be
-      alive. Nothing has been written for them. `high` stays a, and they are the
-      load's own to put again.
-    - **After a step-2 `Conflict`,** with a load in progress, a writer stops: it
-      closes, and raises `Unavailable`. It redoes nothing, whichever it met: it
-      opened before the load began, and an entry past `to` is not a commit. The
-      loader itself first puts the entry at a+1 again as read ("Only past an
-      answer"), so a resumed load's compare finds it on either copy.
-  - **A second entry, at a+2, with no load in progress: another writer is
+    - **A load's entry past `to` is redone by nobody.** It is a batch not
+      committed: another plan than any whole batch's, and its loader may be alive.
+      No object has been written for it, since a load writes none before `to`.
+      `high` stays a, and it is the load's own to put again.
+    - **A writer's entry is a commit, load or no load.** A load's entries say so
+      (`"load": true`), and an entry that does not is a writer's, one that opened
+      before the load and took that seq. Recovery treats it as it treats any
+      entry, below: it finishes one, and two mean another writer. So an event
+      whose journal entry was written is never lost, with a load in progress too,
+      and the resumed load then refuses it, since it is not the dump's.
+    - **After a step-2 `Conflict` with a load's entry,** a writer stops: it closes
+      and raises `Unavailable`, and redoes nothing, since it opened before the load
+      began. With a writer's entry there, or nothing, it goes on as below: it may
+      take the next seq between two batches, and that stops the load, its
+      `loading` in place, when its next commit put meets it.
+  - **A second entry, at a+2, not a load's: another writer is
     live.** It redoes nothing,
     and raises `Unavailable`: the open is refused, or the operation did not
     happen. A writer commits seq only once the store's `applied` is at least
     seq − 1 (its own step 4, or its recovery's put of it, at open or before
     its next commit), and `applied` never moves
-    back. So at rest, with no load in progress, at most
-    one entry lies past `applied`. A second one
+    back. So at rest at most
+    one writer's entry lies past `applied`. A second one
     means a writer moved `applied` and committed again during this scan.
     Redoing the older entry over the newer one's values is the tear of
     henge-2's round 4, so recovery never redoes past one entry.
@@ -1023,7 +1031,7 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   |---|---|---|---|---|---|
   | 1 | the commit, step 2 (re-sent after an error) | `journal/[seq]` | `absent`; this entry read back, the version read | itself: one entry per seq | its `Conflict` is read back: this entry is put again with the version read, and goes on once answered; another entry, recovery (row 6) and `Unavailable` |
   | 2 | the event's records, step 3 (`meta` counters included) | `.rec` | decide's read, or own put | the commit put | `Unknown` |
-  | 3 | the event's index edits and a split, step 3 | chunks; a directory only in a split (with no split, rows 6, 12 and 13 put it again); new chunks `absent` | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
+  | 3 | the event's index edits and a split, step 3 | chunks; a directory only in a split (with no split, rows 6, 12 and 13 put it again); new chunks `absent`, or the chunk already there: a number that holds another means a stale plan, and the writer stops | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
   | 4 | `applied` and `head`, step 4, only upward | `.state` | decide's read, or own put | the commit put | `Unknown` |
   | 5 | a retry after an error or `Conflict` at rows 2-4; nothing left to put, the value read put again | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
   | 6 | recovery's redo of one entry, or, at open with a load in progress, of the batch `loading` commits, whole, and of nothing with no such batch: the entry put again first, then rows 2-4, a split's redo included, and a directory with no split left put again as read before its chunks; nothing left to put, the value read put again. No entry: at open, `applied` and then `head` put again as read; after a step-2 `Conflict`, `head` only brought up, and `applied` put again as read by the writer's next commit, before its commit put | `journal/[a+1]`, then as rows 2-4; no entry, `.state` | the entry's version as read; fresh read | a redo: `journal/[a+2]` (the entry's put needs none). No entry: recovery's read of `journal/[a+1]` (the next commit's put, read again after an error, `journal/[high+1]`). A second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
@@ -1082,11 +1090,15 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   batch size ends with the same journal. Only the load does this: every other
   operation commits one event, and `ack` and `beat` keep their sync.
   - **A batch is one commit.** To everything that reads the record, a batch is
-    what one entry is to a commit: an open redoes it whole or not at all, and the
-    plan of a redo is the loader's plan. That is what lets the two race (a split
-    is a function of the chunk and the directory; an edit against a chunk that
-    already holds it changes nothing), and what the two-writer argument below
-    needs: "(F2)" holds with a batch for an entry.
+    what one entry is to a commit: an open redoes it whole or not at all, and a
+    redo has the same events as the loader. That is what lets the two race (an
+    edit against a chunk that already holds it changes nothing, and last wins by
+    key), and what the two-writer argument below needs: "(F2)" holds with a batch
+    for an entry. A redo may still read across the loader's split, its directory
+    before and its chunk after, since they are read apart. A chunk is never read
+    older than its directory, so a plain edit's range is wide, and keeps every key;
+    and a split of its own stops at the first number that holds another chunk
+    (row 3), before its directory or its shrunk chunk.
   - **Reported only once durable.** `head` is what a follower reads, and it
     moves past a batch's sync, which comes after the batch's every put. A load
     that returned has had its closing sync (row 11), after every put of it.
@@ -1810,6 +1822,17 @@ Each item is a test marked `templet:3159`, run over every backend in
   another writer; a resumed load refuses entries that are not the dump's, past
   `head` too; a commit put inside a batch that meets another entry stops the load
   with `loading` in place
+- [ ] Henge: a writer open before the load, killed at each put of an operation
+  between two batches or ahead of the load's first entry: the next open finishes
+  an entry that was committed, its item reads by its own state, and `check()` finds
+  a load in progress or nothing. A redo held across a writer's answered operation,
+  on the fake and on a real store, and across the next operation of the writer
+  whose entry it redoes: the answered operation stands. A redo holds to the `to` it
+  read, with the next batch's entries put meanwhile. A split's new chunk whose
+  number holds another stops the writer and leaves that chunk. Bounded, to a
+  ceiling: pairs of a loader's and a redo's calls around a split and a seeded sample
+  of the rest, and a seeded scheduler of a loader, fresh opens and a writer, with
+  deaths
 - [ ] Henge, two live writers at a real batch: the loader stopped at every call
   (between a batch's commit puts included) while fresh opens redo, on a batch that
   nets to nothing on a chunk it holds as its own put and on one that splits; a
@@ -2107,8 +2130,9 @@ throughout:
   seq − 1, and `applied` never moves back. So at rest at most one entry
   lies past `applied`. With a load in progress the same holds with a batch for
   an entry: a load commits a batch (`to`) only once `applied` is at its last,
-  so at most one committed batch lies past `applied`. Entries past `to` are no
-  commit; nobody but a load puts for them, and only past its own `to`.
+  so at most one committed batch lies past `applied`. A load's entries past `to`
+  are no commit, and a load puts for them only past its own `to`. A writer's entry
+  past `to` is a commit like any other, and the guard takes it as one.
 - **(G)** The guard. A put of W1 can land over a value W2 wrote for an event
   past W1's `high` only if W1's `expect` already shows that write. That
   version was then read after `journal/[high+1]` existed (F1), so the check
@@ -2173,11 +2197,13 @@ Row by row, with s the seq at stake:
      meets `Conflict`. An end's null against an old version meets
      `Conflict` and re-reads.
 - **Row 10, the load's events,** are rows 1 to 6, with a batch for an entry. A
-  writer open before the load meets the load's first entry at its commit put, and
-  stops. If it took that seq first, the load's commit put meets it, and the load
-  stops, its `loading` in place, and is refused when resumed. A fresh open redoes
-  a committed batch with the loader's plan, or nothing, and is refused every
-  operation.
+  writer open before the load meets the load's entry at its commit put, and stops.
+  If it took that seq first, ahead of the load's first entry or between two
+  batches, its entry is a commit: it is finished by itself, or by the next open if
+  it dies, and an older redo's late put meets the guard. The load's commit put
+  meets it, and the load stops, its `loading` in place, and is refused when
+  resumed. A fresh open redoes a committed batch, or nothing of a load's, and is
+  refused every operation.
 - **Rows 12 and 13, cursors and beats,** are not journaled, so they cannot tear the
     record. A put against a moved version meets `Conflict`, re-reads and
     puts the larger value or the later `at`, so neither steps back.
@@ -2232,6 +2258,18 @@ redoes at most that many events, and they come back in one `get_many`.
   else a second entry is still another writer. A load in progress refuses every
   other operation, so its entries are a loader's, and that loader may be alive;
   one that is not the dump's is refused by the resumed load's compare.
+- **A load's entry says it is one** (henge's review, round 2). The guard and an
+  open must tell a load's entry that is not committed from a writer's, which is a
+  commit. Told by the event alone, they cannot: the review had a stale redo put an
+  older value over a writer's answered operation, and a writer that died inside
+  one left unfinished. So a load's entry carries `"load": true`, beside the event,
+  which does not change. It costs about ten bytes an entry, inside the margin the
+  entry's limit keeps, and no read. Rejected, both tried in that review's scratch
+  copies and judged here: a writer that closes whenever it runs past a commit
+  `Conflict` during a load, since nothing then tears without it, and it only moves
+  which handle stops; and an open that finishes an entry past `to` whose own records
+  carry its `_seq`, since a fresh redo of a live writer's entry could then go on
+  past the writer's next commit, which the guard could not tell from a load's.
 - **Rejected: the plan made after the commit puts, with fresh reads.** Tried in
   round 1's review and judged here. It leaves an open redoing a part of a batch,
   so a stale plan's chunk put is still racing that redo's split, and it costs every
@@ -2267,8 +2305,11 @@ shrunk chunk:
   every load, the writer's own included, so a redo after the directory put
   finds the old chunk within its bounds and does not split it again
   (henge-2, round 3);
-- the split is a function of the chunk and the directory, so recovery
-  remakes the same split with the same numbers.
+- the split is a function of the chunk and the directory, so recovery of a
+  writer stopped inside it, reading them as it left them, remakes the same split
+  with the same numbers. Read apart, across a live writer's split, they can give
+  another: a new chunk goes `absent` or is the same chunk, and a number that holds
+  another stops the plan (row 3), so it never overwrites one.
 
 Chunk 0 has no lower bound, so a key below every key so far needs no
 directory write. Pieces are filled to half the bounds, so a chunk just
@@ -2753,8 +2794,11 @@ client alone is the dependency (above).
 - 2026-11-06 proposed: a load on Henge writes in batches of `LOAD_BATCH` (1,000),
   each one commit, whose commit point is `.state ["loading"]` naming its last seq,
   one put at a time, with one sync: "The load's batches", row 10 and its Rationale.
-  An open redoes a committed batch whole and no other entry past `applied`
-  (Recovery, row 6, the guard, invariant 13's clause on what recovery redoes, and
-  (F1) and (F2)); invariant 13's two live writers stand as written, and henge's
-  review of round 1 is why. `check()` reports a load in progress. The event format,
+  An open redoes a committed batch whole and no other of a load's entries, each of
+  which says it is one (`"load": true`, the journal's row); a writer's entry stays a
+  commit, to the open and to the guard (Recovery, row 6, the guard, invariant 13's
+  clause on what recovery redoes, and (F1) and (F2)). A split's new chunk goes
+  `absent` or is the same, as row 3 said, and stops otherwise. Invariant 13's two
+  live writers stand as written, and henge's reviews of rounds 1 and 2 are why.
+  `check()` reports a load in progress. The event format,
   `ack`, `beat` and every other write do not change (this PR)

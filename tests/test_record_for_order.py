@@ -264,6 +264,37 @@ def test_landable_follows_the_latest_review_record(world, clock):
 
 
 @over_backends
+def test_landable_orders_review_records_by_round_then_id(world, clock):
+    """templet:3159 -- the latest record is the highest round, whatever order
+    the records were filed in, and within a round the highest id."""
+    withchange = item(world)
+    change_of(world, withchange)
+    nochange = item(world)
+    # round 3 filed first: it stays the latest over a later id of round 2
+    first = review_of(world, change=False)
+    world.file_review(nochange, 3, "pool", item=first.review, author="alpha")
+    world.file_review(withchange, 2, "pool", item=first.review, author="alpha")
+    assert numbers(landable(world, clock)) == ([], [])
+    # the reverse: a round 3 naming a change, filed before a round 2 naming none
+    second = review_of(world, change=False)
+    world.file_review(withchange, 3, "pool", item=second.review, author="alpha")
+    world.file_review(nochange, 2, "pool", item=second.review, author="alpha")
+    assert numbers(landable(world, clock)) == ([second.review], [second.task])
+    # one round, two records: the later id is the latest
+    third = review_of(world, change=False)
+    world.file_review(nochange, 2, "pool", item=third.review, author="alpha")
+    world.file_review(withchange, 2, "pool", item=third.review, author="alpha")
+    assert numbers(landable(world, clock)) == (
+        [second.review, third.review],
+        [second.task, third.task],
+    )
+    other = review_of(world, change=False)
+    world.file_review(withchange, 2, "pool", item=other.review, author="alpha")
+    world.file_review(nochange, 2, "pool", item=other.review, author="alpha")
+    assert other.review not in numbers(landable(world, clock))[0]
+
+
+@over_backends
 def test_landable_leaves_out_an_item_that_is_not_admitted(world, clock):
     """templet:3159 -- a review item that is not admitted (filed by a machine)
     is not given, nor is its task; admitting it gives both."""
@@ -619,11 +650,11 @@ def test_a_landing_start_takes_an_admitted_efforts_task_for_nothing(world, clock
 
 
 @over_backends
-def test_a_landing_start_is_decided_in_its_own_event(world, clock):
-    """templet:3159 -- `landable` is read in the start's event, not before it:
-    a review `landable` gave, whose change was merged, whose effort was
-    admitted or whose task was started since, is refused, and a review not
-    given before it was when the start is made is taken."""
+def test_a_landing_start_never_reuses_an_earlier_read(world, clock):
+    """templet:3159 -- a start asks again: a review `landable` gave, whose
+    change was merged, whose effort was admitted or whose task was started
+    since, is refused, and a review not given before it was when the start is
+    made is taken."""
     stale = review_of(world)
     admitting = review_of(world)
     taken = review_of(world)
@@ -645,6 +676,25 @@ def test_a_landing_start_is_decided_in_its_own_event(world, clock):
         start(world, taken.task, fence=fences[taken.task], placed=dict(PLACED))
     world.set_standing("0002", "parked", "again")
     assert [r["task"] for r in world.read("runs")] == [taken.task]
+
+
+@over_backends
+def test_a_landing_start_reads_landable_inside_its_event(world, clock, monkeypatch):
+    """templet:3159 -- the landing check reads through the start's own
+    operation, never through the record before it: the lock and the write step
+    are what keep the state read the state written."""
+    made = review_of(world)
+    fence = grant(world, made.review)
+    readers = []
+    real = contract._unready
+
+    def spy(reader, *args, **kw):
+        readers.append((type(reader).__name__, kw.get("landing")))
+        return real(reader, *args, **kw)
+
+    monkeypatch.setattr(contract, "_unready", spy)
+    start(world, made.task, fence=fence, placed=dict(PLACED))
+    assert readers == [("_Op", True)]
 
 
 @over_backends
@@ -749,7 +799,10 @@ def test_a_task_of_a_parked_effort_starts_only_as_landable_gives_it(world, clock
         for kind in ("review", "agent"):
             for change in (True, False):
                 make(f"{label}/{kind}/{change}", kind, effort, change)
+    admitted(world, "0004")
     make("parked+admitted/review/True", "review", "0002", True, ("0001",))
+    # the admitted effort sorts after the parked one in the link list
+    make("parked+admitted-later/review/True", "review", "0002", True, ("0004",))
     make("parked+proposed/review/True", "review", "0002", True, ("0003",))
     given = set(numbers(landable(world, clock))[1])
     ready = set(numbers(world.ready(now=clock()))[1])
@@ -757,6 +810,7 @@ def test_a_task_of_a_parked_effort_starts_only_as_landable_gives_it(world, clock
     assert cases["parked/review/True"] in given
     assert cases["parked+proposed/review/True"] in given
     assert cases["parked+admitted/review/True"] in ready
+    assert cases["parked+admitted-later/review/True"] in ready
     started = set()
     for name, task in sorted(cases.items()):
         number = world.get("tasks", task)["number"]

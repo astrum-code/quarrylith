@@ -3,6 +3,7 @@
 (`Placement` and its answers), the allocation document, and the run classes
 that slice a host's capacity. It reads the record only through its contract."""
 
+from .budget import allowance, budget_shorts
 from .classes import classify, needs_of
 from .document import (
     Consumer,
@@ -44,6 +45,8 @@ __all__ = [
     "Refusal",
     "RunClass",
     "Short",
+    "allowance",
+    "budget_shorts",
     "classify",
     "document_from_data",
     "load_document",

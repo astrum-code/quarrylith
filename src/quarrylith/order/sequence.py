@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """The sequence: what may start next, and why.
 
-`order(record, now=, settings=)` takes the record's ready read, narrows it by
-schedules and flags, and sorts it into one list of candidates, each naming its
-effort, the rule that placed it and a line saying why. It never widens the
-ready read, writes nothing, reads no clock and reads the record only through
+`order(record, now=, settings=, never=)` takes the record's ready read,
+narrows it by schedules and flags, and sorts it into one list of candidates,
+each naming its effort, the rule that placed it and a line saying why. It
+never widens the ready read (nor, for the landing tier, the record's
+`landable`), writes nothing, reads no clock and reads the record only through
 its contract, inside one `reading()`.
 
 The tiers, in order: the floor (reviews, as many as `review_slots` less the
 admitted efforts' reviews running now), the resumes (work with a live lease),
-then each admitted effort's own order. Inside a tier, candidates sort by their
+then each admitted effort's own order. A fourth, the landing tier, holds the
+reviews of a parked effort's open changes that the record's `landable` gives;
+it comes only when none of the first three would be let start by the walk's
+cuts, and `never` (the candidates a walk saw refused for good) leaves
+candidates out before that is decided. Inside a tier, candidates sort by their
 effort (`rank`, then `id`), then by the effort's rule, then by key. An item
 with an open or running task is a candidate as its task, never beside it.
 
@@ -23,6 +28,7 @@ from dataclasses import dataclass
 
 from ..record import contract, schema
 from . import schedule as schedules
+from .walk import Walk
 
 #: Every rule a candidate can name: the tiers' own and an effort's. The
 #: record takes the same list in a start's `placed`.
@@ -45,7 +51,7 @@ class Candidate:
     key: tuple  # ("task", id), else ("item", number): the walk's key
     effort: str  # the effort whose order placed it
     rule: str  # one of RULES
-    tier: int  # 1 floor, 2 resume, 3 effort order
+    tier: int  # 1 floor, 2 resume, 3 effort order, 4 landing
     why: str  # one line
     unblocks: tuple  # the item numbers, nearest first
     role: str | None
@@ -149,24 +155,23 @@ class _Reading:
             self._efforts[id] = None if found is None else (found, effort_order(found))
         return self._efforts[id]
 
-    def admitted_efforts(self, task, item):
-        """The admitted efforts a task or item is linked to: an item's own
-        links, else its parent chain's; a task with no item has its own."""
+    def admitted_efforts(self, task, item, standing="admitted"):
+        """The efforts of `standing` (admitted, or parked for the landing
+        tier) a task or item is linked to: an item's own links, else its
+        parent chain's; a task with no item has its own."""
         if item is not None:
             ids = contract.efforts_of(self.record, item)
         else:
             ids = [] if task["effort"] is None else [task["effort"]]
         found = [self.effort(e) for e in ids]
         return [
-            e[0]["id"]
-            for e in found
-            if e is not None and e[0]["standing"] == "admitted"
+            e[0]["id"] for e in found if e is not None and e[0]["standing"] == standing
         ]
 
-    def first_effort(self, task, item):
+    def first_effort(self, task, item, standing="admitted"):
         """The one effort that places it: of several, the first by rank, then
         id."""
-        ids = self.admitted_efforts(task, item)
+        ids = self.admitted_efforts(task, item, standing)
         if not ids:
             return None
         return min(ids, key=self.effort_key)
@@ -321,10 +326,9 @@ def _sort_key(entry):
 
 
 def _gather(reading, ready):
-    """The ready set as (task, item) pairs: an item with an open task is
-    represented by that task, one with none by itself. An item whose only
-    tasks are running or not ready is left out, as is whatever the schedule
-    and the flags keep out."""
+    """The ready set (or the record's `landable`) as (task, item) pairs: an
+    item with an open task is represented by that task, one with none by
+    itself. An item whose only tasks are running or not ready is left out."""
     record = reading.record
     by_item = {"open": {}, "running": {}}
     for state, found in by_item.items():
@@ -357,17 +361,17 @@ def _gather(reading, ready):
     return pairs, left
 
 
-def _entries(reading, pairs):
-    """Each pair read for the order: its effort, its figures, or why it is
-    left out."""
+def _entries(reading, pairs, standing="admitted"):
+    """Each pair read for the order: its effort (of `standing`), its figures,
+    or why it is left out."""
     entries, left = [], []
     for task, item in pairs:
         flags = reading.flags(task, item)
         why = reading.kept_out(task, flags)
         if why is None:
-            effort = reading.first_effort(task, item)
+            effort = reading.first_effort(task, item, standing)
             if effort is None:
-                why = "no admitted effort"
+                why = f"no {standing} effort"
         if why is not None:
             left.append(_left(task, item, why))
             continue
@@ -416,6 +420,8 @@ def _detail(entry, rule, slot, slots):
         return f"held by {lease['holder']} since {since}"
     if rule == "listed":
         return f"{_ordinal(entry['listed'] + 1)} of {entry['listed_of']} listed"
+    if rule == "landing":
+        return "review of a parked effort's change"
     named = ", ".join(f"#{n}" for n in entry["unblocks"][:_NAMED])
     more = len(entry["unblocks"]) - _NAMED
     if more > 0:
@@ -444,29 +450,41 @@ def _tiers(entries, floor, running, slots):
             slot = None
         placed.append((tier, rule, slot, entry))
     placed.sort(key=lambda p: p[0])
-    out = []
-    for tier, rule, slot, entry in placed:
-        task, item = entry["task"], entry["item"]
-        out.append(
-            Candidate(
-                task=None if task is None else task["id"],
-                item=None if item is None else item["number"],
-                key=("task", task["id"]) if task else ("item", item["number"]),
-                effort=entry["effort"],
-                rule=rule,
-                tier=tier,
-                why=(
-                    f"{_label(task, item)}: effort {entry['effort']}, {rule} -- "
-                    f"{_detail(entry, rule, slot, slots)}"
-                ),
-                unblocks=entry["unblocks"],
-                role=entry["role"],
-                repos=entry["repos"],
-                adds=entry["adds"],
-                exempt=entry["exempt"],
-            )
-        )
-    return out
+    return [
+        _candidate(entry, tier, rule, slot, slots) for tier, rule, slot, entry in placed
+    ]
+
+
+def _candidate(entry, tier, rule, slot, slots):
+    task, item = entry["task"], entry["item"]
+    return Candidate(
+        task=None if task is None else task["id"],
+        item=None if item is None else item["number"],
+        key=_key(entry),
+        effort=entry["effort"],
+        rule=rule,
+        tier=tier,
+        why=(
+            f"{_label(task, item)}: effort {entry['effort']}, {rule} -- "
+            f"{_detail(entry, rule, slot, slots)}"
+        ),
+        unblocks=entry["unblocks"],
+        role=entry["role"],
+        repos=entry["repos"],
+        adds=entry["adds"],
+        exempt=entry["exempt"],
+    )
+
+
+def _key(entry):
+    task, item = entry["task"], entry["item"]
+    return ("task", task["id"]) if task else ("item", item["number"])
+
+
+def _landing(entries, slots):
+    """The landing tier: every entry, sorted as the effort order sorts."""
+    entries.sort(key=_sort_key)
+    return [_candidate(e, 4, "landing", None, slots) for e in entries]
 
 
 def _counts(reading):
@@ -514,18 +532,71 @@ def _notes(reading):
     return notes
 
 
-def _build(record, now, settings):
+def _never(given):
+    """`never` as a map of candidate key to the refusal's text; Refused for
+    anything else."""
+    if given is None:
+        return {}
+    ok = isinstance(given, dict) and all(
+        isinstance(k, tuple)
+        and len(k) == 2
+        and k[0] in ("task", "item")
+        and _whole(k[1])
+        and isinstance(v, str)
+        for k, v in given.items()
+    )
+    if not ok:
+        raise contract.Refused(
+            "never is {candidate key: the refusal's text}, a key being "
+            '("task", id) or ("item", number)'
+        )
+    return given
+
+
+def _without(entries, left, never):
+    """`entries` less those the walk saw refused `never`, which are `left`
+    with the allocator's text."""
+    kept = []
+    for entry in entries:
+        text = never.get(_key(entry))
+        if text is None:
+            kept.append(entry)
+        else:
+            left.append(_left(entry["task"], entry["item"], f"never fits: {text}"))
+    return kept
+
+
+def _opens_landing(candidates, counts, settings, now, seq):
+    """Whether tiers 1 to 3 hold no candidate that rules 1 to 3 of the walk's
+    `check` would let start, with no starts yet."""
+    walk = Walk(
+        Sequence(tuple(candidates), (), (), counts, now, seq), settings=settings
+    )
+    return all(walk.check(c) for c in candidates)
+
+
+def _build(record, now, settings, never=None):
     if not schema.is_int(now):
         raise contract.Refused(f"now is a time in milliseconds, not {now!r}")
     settings.check()
+    never = _never(never)
     with record.reading() as seq:
         reading = _Reading(record, now, settings)
         ready = record.ready(now=now)
         pairs, left = _gather(reading, ready)
         entries, cut = _entries(reading, pairs)
+        cut = list(cut)
+        entries = _without(entries, cut, never)
         counts = _counts(reading)
         floor = max(0, settings.review_slots - counts["reviews"])
         candidates = _tiers(entries, floor, counts["reviews"], settings.review_slots)
+        if _opens_landing(candidates, counts, settings, now, seq):
+            found, more = _gather(reading, record.landable(now=now))
+            landed, held = _entries(reading, found, "parked")
+            held = list(held)
+            landed = _without(landed, held, never)
+            candidates += _landing(landed, settings.review_slots)
+            left, cut = left + more, cut + held
         return Sequence(
             candidates=tuple(candidates),
             left=tuple(left + cut),
@@ -536,10 +607,14 @@ def _build(record, now, settings):
         )
 
 
-def order(record, *, now, settings):
+def order(record, *, now, settings, never=None):
     """The sequence at `now`: the ready read narrowed by schedules and flags,
-    sorted by the tiers and each effort's rule. Writes nothing."""
-    return _build(record, now, settings)
+    sorted by the tiers and each effort's rule. Writes nothing. `never` is
+    `{candidate key: the allocator's refusal text}`, the candidates a walk saw
+    refused for good: each is left out, "never fits: " and that text. The
+    landing tier, the reviews of a parked effort's open changes, is added
+    when none of the other tiers would be let start by the walk's cuts."""
+    return _build(record, now, settings, never)
 
 
 def place(record, *, now, settings, task=None, item=None):
@@ -556,6 +631,10 @@ def place(record, *, now, settings, task=None, item=None):
         return _unplaced(record, now, task, item)
 
 
+def _closed():
+    return "a landing review waits while admitted work can start"
+
+
 def _unplaced(record, now, task, item):
     """Why a task or item the sequence did not name is not ready."""
     if task is not None:
@@ -563,6 +642,8 @@ def _unplaced(record, now, task, item):
         if found is None:
             return Left(task, None, f"task {task}: there is no such task")
         why = contract._unready(record, found, now) or "it is not in the ready set"
+        if not contract._unready(record, found, now, landing=True):
+            why = _closed()
         return Left(
             task, found["number"], f"task {task}: {_plain(why, f'task {task}')}"
         )
@@ -573,4 +654,10 @@ def _unplaced(record, now, task, item):
     if found["state"] != "ready":
         why = f"item {item} is {found['state']}, not ready"
     why = _plain(why or "it is not in the ready set", f"item {item}")
+    if found["state"] == "ready" and not (
+        contract._ineligible(record, found, landing=True)
+        or found["kind"] != "review"
+        or contract._unreviewed(record, item)
+    ):
+        why = _closed()
     return Left(None, item, f"item {item}: {why}")

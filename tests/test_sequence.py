@@ -128,6 +128,9 @@ class Reads:
     def ready(self, *, now):
         return self._rec.ready(now=now)
 
+    def landable(self, *, now):
+        return self._rec.landable(now=now)
+
     def effective_labels(self, task_id):
         return self._rec.effective_labels(task_id)
 

@@ -98,12 +98,6 @@ def kinds(record, since):
     return [e["kind"] for e in record.dump()["journal"] if e["seq"] > since]
 
 
-@pytest.fixture
-def effort(record):
-    admitted(record)
-    return record
-
-
 # -- declare ----------------------------------------------------------------------
 
 

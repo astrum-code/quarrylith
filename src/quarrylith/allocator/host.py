@@ -15,6 +15,7 @@ from ..record.contract import Refused
 from .classes import classify, needs_of
 from .document import document_from_data, to_data, unit_of
 from .seam import Fit, Placement, Refusal, Short, _size, refuse
+from .budget import allowance, budget_shorts, providers_of
 from .table import peak, room_short, table_free, table_shorts
 
 #: Where the declared document is kept: a reading of the record.
@@ -125,6 +126,7 @@ class HostPlacement(Placement):
             free = {}
             if live:
                 shorts += table_shorts(record, node, needs, now=now)
+                shorts += budget_shorts(record, document, node, needs, now=now)
                 free = table_free(record, node, needs, now=now)
         if shorts:
             return refuse(task, run_class.name, needs, shorts, node=node)
@@ -141,6 +143,8 @@ class HostPlacement(Placement):
         record = self.record
         out = {}
         with record.reading():
+            stored = self._stored()
+            document = stored[0] if stored else None
             nodes = sorted(record.read("nodes", live=True), key=lambda n: n["name"])
             for node in nodes:
                 name = node["name"]
@@ -154,6 +158,12 @@ class HostPlacement(Placement):
                     )
                     for row in rows
                 }
+                if document is not None and name == document.node:
+                    for provider in providers_of(out[name]):
+                        room, _ = allowance(record, document, name, provider, now=now)
+                        if room is not None:
+                            resource = f"budget.{provider}"
+                            out[name][resource] = min(out[name][resource], room)
         return out
 
     # -- hold, release ------------------------------------------------------------
@@ -199,6 +209,10 @@ class HostPlacement(Placement):
         )
 
     def release(self, holder, *, node=None, why):
+        """Release the holder's reservations that no live run holds, on
+        `node`; with none given, on the node the current document names (after
+        a rename, the old node is named explicitly), and on every node while
+        no document is declared."""
         record = self.record
         with record.reading():
             if node is None:

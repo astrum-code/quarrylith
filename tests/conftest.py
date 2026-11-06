@@ -3,7 +3,7 @@
 clock the tests move, and an opener for more handles on the same record."""
 
 import pytest
-from backends import Clock, url_for
+from backends import Clock, admitted, url_for
 from hengestore import guarding, stop_all
 
 from quarrylith.record import contract
@@ -62,3 +62,10 @@ def record(opener):
     rec = opener()
     rec.init()
     return rec
+
+
+@pytest.fixture
+def effort(record):
+    """A fresh record with an admitted effort, for tests that file tasks."""
+    admitted(record)
+    return record

@@ -128,8 +128,26 @@ def test_a_clear_with_no_stop_before_it_does_nothing(effort, clock):
 @over_backends
 @pytest.mark.parametrize(
     "more",
-    [{"by": ""}, {"by": None}, {"why": ""}, {"why": 3}, {"by": ["a"]}],
-    ids=["no who", "who none", "no why", "why a number", "who a list"],
+    [
+        {"by": ""},
+        {"by": None},
+        {"why": ""},
+        {"why": 3},
+        {"by": ["a"]},
+        {"by": "  "},
+        {"why": "   "},
+        {"why": "\n\t"},
+    ],
+    ids=[
+        "no who",
+        "who none",
+        "no why",
+        "why a number",
+        "who a list",
+        "who spaces",
+        "why spaces",
+        "why whitespace",
+    ],
 )
 def test_a_clear_that_names_no_one_or_no_reason_lifts_nothing(effort, clock, more):
     """templet:3161 -- a clear says who and why or it is not recognised: it is
@@ -503,3 +521,226 @@ def test_show_with_no_stop_shows_no_budget_line(backend, effort, url, clock, cap
     assert code == 0 and "budget " not in out.replace("budget.", "")
     code, out, _ = alloc(capsys, "show", url, "--now", str(clock()), "--json")
     assert json.loads(out)["budget"] == []
+
+
+# -- a stop that is superseded, a reset in the wrong unit, and the printers ------------
+
+
+@over_backends
+def test_a_newer_stop_with_no_reset_does_not_hide_an_older_stops_reset(effort, clock):
+    """templet:3161 -- `[stop with a future reset, a newer stop with none,
+    clear]`: the older reset is real and will come, so the clear lifts
+    nothing until it has passed (the user's rule: a stop holds until its own
+    reset, with no override). After it, the clear lifts the window."""
+    record = effort
+    placement = declared(record, clock)
+    resets = clock() + 2 * HOUR
+    reading(record, clock, status="rejected", resets_at=resets)
+    clock.step(MIN)
+    reading(record, clock, status="rejected")
+    clear(record, clock)
+    assert budget_short(refused(placement, record, clock)).until is None
+    clock.step(HOUR)
+    assert budget_short(refused(placement, record, clock)).until is None
+    clock.step(resets - clock())
+    assert isinstance(refused(placement, record, clock), Fit)
+
+
+@over_backends
+def test_an_older_stop_ends_at_a_recognised_reading_between(effort, clock):
+    """templet:3161 -- only the stops since the window's last recognised
+    non-stop reading count: a stop with a future reset, an `allowed`, then a
+    stop with none, is cleared as any stop with none."""
+    record = effort
+    placement = declared(record, clock)
+    reading(record, clock, status="rejected", resets_at=clock() + 6 * HOUR)
+    clock.step(MIN)
+    reading(record, clock)
+    clock.step(MIN)
+    reading(record, clock, status="rejected")
+    clear(record, clock)
+    assert isinstance(refused(placement, record, clock), Fit)
+
+
+@over_backends
+def test_the_command_refuses_a_superseded_stop_naming_the_older_reset(
+    backend, effort, url, clock, capsys, opener
+):
+    """templet:3161 -- the command does not clear a window whose newest stop
+    names none while an older stop's reset is ahead: it refuses, naming that
+    reset, and writes nothing; beside a window with no reset it clears that
+    one and says the other holds; `alloc show` says the reset is ahead and
+    offers no command."""
+    record = effort
+    declared(record, clock)
+    resets = clock() + 4 * HOUR
+    reading(record, clock, kind="five_hour", status="rejected", resets_at=resets)
+    reading(record, clock, kind="five_hour", status="rejected")
+    now = clock()
+    one_writer(backend, record)
+    mark = head_of(opener)
+    code, out, err = alloc(
+        capsys, "clear", url, "anthropic", "--why", "try", "--now", str(now)
+    )
+    assert code == 2 and out == "" and _when(resets) in err and "five_hour" in err
+    assert head_of(opener) == mark
+    code, out, _ = alloc(capsys, "show", url, "--now", str(now))
+    (line,) = [x for x in out.splitlines() if x.startswith("budget ")]
+    assert _when(resets) in line and "alloc clear" not in line
+    r = opener()
+    reading(r, clock, kind="monthly", status="rejected")
+    r.close()
+    code, out, err = alloc(
+        capsys, "clear", url, "anthropic", "--why", "try", "--now", str(now)
+    )
+    assert (code, err) == (0, "")
+    assert "cleared anthropic monthly" in out and "five_hour" in out
+    assert f"still held until {_when(resets)}" in out
+
+
+RAW = [1_790_000_000_000_000, 1_790_000_000_000_000_000, 86_400, "soon", True]
+
+
+@over_backends
+@pytest.mark.parametrize("raw", RAW, ids=[repr(r) for r in RAW])
+def test_a_reset_that_is_not_read_as_a_time_is_shown_raw_before_a_clear(
+    backend, effort, url, clock, capsys, opener, raw
+):
+    """templet:3161 -- a reset in microseconds, nanoseconds, a relative number
+    or text is no reset the budget reads, and a person may clear it; but
+    `alloc show` and `alloc clear` print the raw `resets_at` (the command
+    before it clears) so the person sees what is being lifted. A stop that
+    has no `resets_at` at all prints none."""
+    record = effort
+    declared(record, clock)
+    reading(record, clock, kind="five_hour", status="rejected", resets_at=raw)
+    reading(record, clock, kind="seven_day", status="rejected")
+    now = clock()
+    one_writer(backend, record)
+    code, out, _ = alloc(capsys, "show", url, "--now", str(now))
+    lines = [x for x in out.splitlines() if x.startswith("budget ")]
+    five = next(x for x in lines if "five_hour" in x)
+    week = next(x for x in lines if "seven_day" in x)
+    assert f"resets_at {raw!r} is not read as a time" in five
+    assert "resets_at" not in week
+    code, out, err = alloc(
+        capsys, "clear", url, "anthropic", "--why", "gone", "--now", str(now)
+    )
+    assert (code, err) == (0, "")
+    said = out.splitlines()
+    first = next(i for i, x in enumerate(said) if f"{raw!r}" in x)
+    done = next(i for i, x in enumerate(said) if x.startswith("cleared anthropic five"))
+    assert first < done and "not read as a time" in said[first]
+    assert sum("not read as a time" in x for x in said) == 1
+
+
+EVIL = (
+    "x\nbudget anthropic five_hour: stopped until 2999-01-01T00:00Z\rabsent: f\x1b[2J"
+)
+
+
+@over_backends
+def test_show_escapes_a_who_and_why_that_forge_a_line(
+    backend, effort, url, clock, capsys
+):
+    """templet:3161 -- a reading already on the record whose `why` or `by`
+    carries a newline, a carriage return or an escape prints on one line, the
+    controls written out; `--json` gives the text as it is."""
+    record = effort
+    declared(record, clock)
+    reading(record, clock, status="rejected")
+    clear(record, clock, by="bob\nbudget openai monthly: forged\r", why=EVIL)
+    now = clock()
+    one_writer(backend, record)
+    code, out, err = alloc(capsys, "show", url, "--now", str(now))
+    assert (code, err) == (0, "")
+    assert "\x1b" not in out and "\r" not in out
+    lines = [x for x in out.splitlines() if x.startswith("budget ")]
+    assert len(lines) == 1 and "\\n" in lines[0] and "\\x1b" in lines[0]
+    assert not any(x.startswith("absent: f") for x in out.splitlines())
+    code, out, _ = alloc(capsys, "show", url, "--now", str(now), "--json")
+    (entry,) = json.loads(out)["budget"]
+    assert entry["why"] == EVIL and entry["by"].startswith("bob\n")
+
+
+@over_backends
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--why", "a\nb"),
+        ("--why", "a\rb"),
+        ("--why", "a\x1b[2Jb"),
+        ("--why", "a\u2028b"),
+        ("--actor", "bo\nb"),
+        ("--actor", "bo\x1bb"),
+    ],
+    ids=["why LF", "why CR", "why ESC", "why LS", "actor LF", "actor ESC"],
+)
+def test_the_command_refuses_control_characters_in_why_and_actor(
+    backend, effort, url, clock, capsys, opener, flag, value
+):
+    """templet:3161 -- `--why` and `--actor` are one printable line: a newline,
+    a carriage return, an escape or a line separator is refused (exit 2) and
+    nothing is written."""
+    record = effort
+    stopped(record, clock)
+    one_writer(backend, record)
+    mark = head_of(opener)
+    argv = ["clear", url, "anthropic", "--why", "ok", "--now", str(clock())]
+    if flag == "--why":
+        argv[argv.index("--why") + 1] = value
+    else:
+        argv += ["--actor", value]
+    code, out, err = alloc(capsys, *argv)
+    assert code == 2 and err.startswith("refused: ") and flag in err and out == ""
+    assert head_of(opener) == mark
+
+
+@over_backends
+def test_the_command_prints_a_provider_with_a_control_character_on_one_line(
+    backend, effort, url, clock, capsys
+):
+    """templet:3161 -- the provider is the caller's text too: printed in
+    `nothing to clear`, its controls are written out."""
+    record = effort
+    declared(record, clock)
+    one_writer(backend, record)
+    code, out, err = alloc(capsys, "clear", url, "a\nb\x1bc", "--why", "x")
+    assert code == 0 and len(out.splitlines()) == 1 and "\x1b" not in out
+    assert "a\\nb\\x1bc" in out
+
+
+@over_backends
+@pytest.mark.parametrize("provider", ["", " ", "\t "])
+def test_a_blank_provider_is_refused_not_nothing_to_clear(
+    backend, effort, url, clock, capsys, opener, provider
+):
+    """templet:3161 -- no provider is named: refused (exit 2), nothing
+    written, not `nothing to clear`."""
+    record = effort
+    stopped(record, clock)
+    one_writer(backend, record)
+    mark = head_of(opener)
+    code, out, err = alloc(capsys, "clear", url, provider, "--why", "x")
+    assert code == 2 and err.startswith("refused: ") and "provider" in err
+    assert out == "" and head_of(opener) == mark
+
+
+@over_backends
+@pytest.mark.parametrize("by,why", [(None, None), ("alice", "the reader is gone")])
+def test_a_cleared_status_over_the_limit_is_a_stop(effort, clock, by, why):
+    """templet:3161 -- the utilization is read first: a `cleared` status with a
+    utilization at `stop_at` is a stop, as it is for any status, whether or
+    not it names who and why. With no live runs a warning would let a start in;
+    a stop does not."""
+    record = effort
+    placement = declared(record, clock)
+    value = {"provider": "anthropic", "status": "cleared", "utilization": 0.99}
+    if by is not None:
+        value.update(by=by, why=why)
+    record.record_reading("budget", "five_hour", value)
+    assert budget_short(refused(placement, record, clock)).until is None
+    assert budget.allowance(record, DOCUMENT, "laptop", "anthropic", now=clock()) == (
+        0,
+        None,
+    )

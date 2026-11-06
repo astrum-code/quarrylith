@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: f41dd3e
+    at: 75c078d
 ---
 
 # The allocator
@@ -608,8 +608,8 @@ document names. On top of the seam it has:
     consumer already running is in the host's state already. `headroom` of the
     declared node is 0 for every resource while `place` would refuse for it.
     `alloc show` has a `pressure:` line that says the same, with the free share
-    of memory, and for a swap refusal says that swap in use falls only when its
-    pages are read back or the host restarts. A run already started, and
+    of memory, and for a swap refusal says that it clears once 40% or more of
+    memory is free again (a process that exits frees its memory and its swap). A run already started, and
     `measure`, are never stopped by it.
 - **`measure(*, now)`**. It runs the probes and writes **one** reading,
   `record_reading("host", "measure", value)`, with value `{"node",
@@ -1505,7 +1505,9 @@ later: nothing in the effort runs sessions through the queue.
   text is parsed strictly (a failed read when off the kernel's format), after
   the review found a comma-decimal locale reading `7168,00M` as 7168 bytes;
   `sysctl` is run by its path with a 3-second bound per read; `alloc show` says
-  what clears a swap refusal; and the swap counts only with memory short, by
+  what clears a swap refusal (the memory being free again, not the swap
+  falling); `probe_memory` and the process table run `sysctl`, `vm_stat` and
+  `ps` by their paths on macOS; and the swap counts only with memory short, by
   one more read (`kern.memorystatus_level`, or `MemAvailable` over `MemTotal`),
   the detail naming both figures (this PR)
 - 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`

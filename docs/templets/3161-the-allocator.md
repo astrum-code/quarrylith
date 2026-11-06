@@ -103,8 +103,8 @@ flowchart LR
 
 | module | holds |
 |---|---|
-| `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`; the shared policy: `classify`, `needs_of`, `table_shorts`, `budget_shorts` |
-| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare`, `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
+| `quarrylith.allocator` | the seam: `Placement` (an `abc.ABC`), `Fit`, `Refusal`, `Short`, `CAUSES`, `placement_for(name)`, `PLACEMENT_GROUP`; the document: `Document`, `load_document(text)`, `parse_amount(value, unit)`, the document as plain data and back, `to_data(document, figures=None)` and `document_from_data(raw)`; the shared policy: `classify`, `needs_of`, `table_shorts(reader, node, needs, *, now)`, `budget_shorts` |
+| `quarrylith.allocator.host` | `HostPlacement`, the laptop plugin: the seam's methods, plus `declare` (which returns a `Declaration`: `wrote`, `refusals` by consumer, `failed`), `resolve`, `measure`, `drift` and `sample_consumer`; the probes `probe_memory()`, `probe_disk(path)`, `probe_size(path)` (allocated bytes, so a sparse file counts what it holds), `probe_tree(pid)` and `probe_process(match)`; `ProbeError` |
 | `quarrylith.cli` | gains `quarrylith alloc declare|show|place|measure|consumer` (below) |
 
 The allocator imports the standard library and `quarrylith.record` only, and
@@ -1141,3 +1141,9 @@ later: nothing in the effort runs sessions through the queue.
   `refuse`; a missing `class:` label weighs standard and an unknown one is
   `unclassified`; units by resource name; the required keys of the document;
   a measured consumer memory needs a probe (this PR)
+- 2026-11-05 proposed: the document as plain data (`to_data`,
+  `document_from_data`), which the document reading stores and `place` reads
+  back; the table check's signature `table_shorts(reader, node, needs, *,
+  now)`; `declare` returns a `Declaration` (`wrote`, `refusals` by consumer,
+  `failed`) and `hold` raises the record's `Refused` for a second live hold of
+  one holder and resource (this PR)

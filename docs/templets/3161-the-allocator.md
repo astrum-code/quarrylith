@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: bb889240
+    at: 1754b6d
 ---
 
 # The allocator
@@ -570,7 +570,16 @@ document names. On top of the seam it has:
     else 1, and the swap is `SwapTotal` less `SwapFree` in `/proc/meminfo`. A
     figure the host does not have (no PSI file, a platform with no reader) is
     None, and is not refused for that alone. A read the host has and cannot
-    make raises `ProbeError`.
+    make raises `ProbeError`. **The reads run in the `C` locale** (`_run` sets
+    `LC_ALL=C`): under a comma-decimal locale `sysctl` writes `7168,00M`, which
+    would read as 7168 bytes and leave the swap rule silently off. The
+    `vm.swapusage` text is parsed whole and strictly (`total = N.NNU  used =
+    N.NNU  free = N.NNU`, a capital K, M, G or T, an optional trailing
+    parenthesis such as `(encrypted)`): a figure with no unit, a lowercase unit,
+    a comma, a space or anything else off the format is a `ProbeError`, never
+    bytes. `sysctl` is run by its path, `/usr/sbin/sysctl`, and each of the two
+    reads has a bound of 3 seconds (`PRESSURE_TIMEOUT_S`), so one stuck `sysctl`
+    cannot cost a placement long.
   - **The rule** (`measure.pressure_shorts`): refuse at a level of warn (2) or
     worse; and refuse when swap used is at least `SWAP_FLOOR` (8 GiB) **and**
     at least `SWAP_SHARE_PERCENT` (85) of the swap total. macOS grows its swap
@@ -588,7 +597,9 @@ document names. On top of the seam it has:
     `place` is; `hold` with `measured=False`, and so `declare`, is not, since a
     consumer already running is in the host's state already. `headroom` of the
     declared node is 0 for every resource while `place` would refuse for it.
-    `alloc show` has a `pressure:` line that says the same. A run already
+    `alloc show` has a `pressure:` line that says the same, and for a swap
+    refusal says that swap in use falls only when its pages are read back or
+    the host restarts. A run already
     started, and `measure`, are never stopped by it.
 - **`measure(*, now)`**. It runs the probes and writes **one** reading,
   `record_reading("host", "measure", value)`, with value `{"node",
@@ -1073,7 +1084,10 @@ which pass.
   reading is not refused; `hold` with `measured=False` is not; `headroom` is 0
   under pressure; `alloc place` exits 2 and `alloc show` says it; a run already
   started is untouched. The probe is tested on the kernel's `sysctl` text and,
-  for Linux, on a hand-written file, and once for real on the test host
+  for Linux, on a hand-written file, and once for real on the test host,
+  compared with `sysctl`'s own text read apart, under a comma-decimal locale
+  too; a swap text off the kernel's format (a comma, no unit, a lowercase
+  unit) is a failed read, and the reads run in the `C` locale
 - [ ] a consumer measured past its declaration by more than the tolerance,
   and measured available memory short of the table's free beyond it, are
   each in the reading's `drift`. Each writes one observation when it begins
@@ -1473,6 +1487,11 @@ later: nothing in the effort runs sessions through the queue.
   refused, `headroom` is 0 under pressure and `alloc show` has a `pressure:`
   line. The user decided it on 2026-11-06 after the night of 2026-11-05, when
   the check passed at 14.4 GiB available with 14 GB of swap in use (this PR)
+- 2026-11-06 proposed: the pressure reads run in the `C` locale and the swap
+  text is parsed strictly (a failed read when off the kernel's format), after
+  the review found a comma-decimal locale reading `7168,00M` as 7168 bytes;
+  `sysctl` is run by its path with a 3-second bound per read; `alloc show` says
+  what clears a swap refusal (this PR)
 - 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`
   at its first sample, not after the window; a command's phase that passes the
   slow bound says `<phase>: still running, N s` while it runs, as well as its

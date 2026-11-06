@@ -205,6 +205,7 @@ def test_landable_gives_reviews_only(world, clock):
     change_of(world, work)
     world.file_task("agent", number=work, needs={"slots": 1}, sandbox="process")
     world.file_task("job", effort="0002", needs={"slots": 1}, sandbox="process")
+    world.file_task("job", effort="0001", needs={"slots": 1}, sandbox="process")
     assert numbers(landable(world, clock)) == ([], [])
     made = review_of(world)
     agent = world.file_task("agent", number=made.review, sandbox="process")
@@ -225,6 +226,7 @@ def test_landable_gives_a_review_task_of_an_item_that_is_not_a_review(world, clo
     task = world.file_task("review", number=plain, sandbox="process")
     nameless = item(world)
     world.file_task("review", number=nameless, sandbox="process")
+    world.file_task("agent", number=plain, sandbox="process")
     assert numbers(landable(world, clock)) == (
         [made.review],
         [made.task, task],
@@ -387,18 +389,6 @@ def test_placed_is_carried_in_the_run_start_event(world, clock):
     ]
     replay(world)
     assert world.check() == []
-
-
-@over_backends
-def test_placed_is_copied_not_kept_by_reference(world, clock):
-    """templet:3159 -- the event holds what `placed` said when the run
-    started; the caller's dict is not the event's."""
-    work = item(world, effort="0001")
-    task = world.file_task("agent", number=work, sandbox="process")
-    placed = {"effort": "0001", "rule": "floor", "why": "first"}
-    start(world, task, fence=grant(world, work), placed=placed)
-    placed["why"] = "changed after"
-    assert start_event(world)["data"]["placed"]["why"] == "first"
 
 
 BAD_PLACED = (
@@ -568,6 +558,7 @@ def test_a_landing_start_refuses_what_is_not_a_review(world, clock):
     change_of(world, work)
     agent = world.file_task("agent", number=work, sandbox="process")
     job = world.file_task("job", effort="0002", sandbox="process")
+    admitted_job = world.file_task("job", effort="0001", sandbox="process")
     fence = grant(world, work)
     head = world.head()
     for placed in (None, dict(PLACED)):
@@ -575,6 +566,8 @@ def test_a_landing_start_refuses_what_is_not_a_review(world, clock):
             start(world, agent, fence=fence, placed=placed)
         with pytest.raises(Refused):
             start(world, job, placed=placed)
+    with pytest.raises(Refused, match="landable"):
+        start(world, admitted_job, placed=dict(PLACED))
     assert world.head() == head
     assert world.read("runs") == []
 

@@ -129,6 +129,11 @@ def free(record, *, now, window_ms):
     )
 
 
+#: The window of readings from which the search for a node's latest reading
+#: stops doubling and reads them all once.
+FULL_READ_AT = 1024
+
+
 def measured(record, *, now, window_ms):
     """Per node, resource and holder, the latest `host/measure` reading of
     the node: the host's available memory and free disk (holder `""`), and
@@ -140,7 +145,9 @@ def measured(record, *, now, window_ms):
     limit = 2 * len(live)
     while len(found) < len(live):
         # the newest readings first, a window that doubles until every live
-        # node is found or the window holds all the readings there are
+        # node is found or the window holds all the readings there are; a
+        # node never measured is ordinary, so from FULL_READ_AT one read
+        # without a limit ends the search
         rows = record.read(
             "readings", source="host", kind="measure", desc=True, limit=limit
         )
@@ -150,9 +157,9 @@ def measured(record, *, now, window_ms):
             node = value.get("node")
             if isinstance(node, str) and node in live and node not in found:
                 found[node] = value
-        if len(rows) < limit:
+        if limit is None or len(rows) < limit:
             break
-        limit *= 2
+        limit = None if limit >= FULL_READ_AT else limit * 2
     out = {}
     for node, value in found.items():
         for resource, key in (("memory", "memory_available"), ("disk", "disk_free")):

@@ -860,3 +860,25 @@ def test_hold_on_another_node_does_not_check_the_measured_room(effort, clock):
     assert placement.hold("a", {"memory": GIB}, node="other", now=clock())
     refusal = placement.hold("b", {"memory": 8 * GIB}, node="other", now=clock())
     assert [s.cause for s in refusal.shorts] == ["room"]
+
+
+@over_backends
+def test_sample_consumer_of_a_consumer_that_is_down_stops_at_the_first_sample(
+    record, clock, tmp_path
+):
+    """templet:3161 -- a consumer with nothing resident is a `ProbeError` at
+    the first sample, naming why, without sleeping through the window; one that
+    is up at the first sample is sampled to the end."""
+    document = mini(tmp_path, DRIFT, tolerance=0.1)
+    placement = HostPlacement(record, probes=stub(90 * GIB, None))
+    slept = []
+    with pytest.raises(ProbeError, match="machine.*no process 10"):
+        placement.sample_consumer(
+            "machine", seconds=600, every=10, document=document, sleep=slept.append
+        )
+    assert slept == []
+    placement.probes = stub(90 * GIB, GIB)
+    placement.sample_consumer(
+        "machine", seconds=30, every=10, document=document, sleep=slept.append
+    )
+    assert slept == [10, 10, 10]

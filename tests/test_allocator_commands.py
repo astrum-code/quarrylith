@@ -961,3 +961,117 @@ def test_the_commands_that_only_read_open_the_record_read_only(
         opened.clear()
         alloc(capsys, *argv)
         assert opened == [readonly], argv
+
+
+# -- round 2 ------------------------------------------------------------------------
+
+
+@over_backends
+def test_a_consumer_that_is_down_fails_at_the_first_sample(
+    backend, record, url, host, alloc_cli, monkeypatch, capsys, tmp_path, opener
+):
+    """templet:3161 -- a consumer with nothing resident fails at the first
+    sample, naming it and why, and never waits out the window: `consumer
+    measure`, `declare` and `declare --dry-run` of a "measure" consumer that is
+    down wait for nothing."""
+    one_writer(backend, record)
+    doc = write_doc(tmp_path)
+    declare_sample(capsys, tmp_path, url)
+    waited = []
+    monkeypatch.setattr(alloc_cli, "SLEEP", waited.append)
+    host.rss = None
+    mark = head_of(opener)
+    code, out, err = alloc(capsys, "consumer", "measure", "yard", url)
+    assert (code, out) == (1, "")
+    assert err.startswith("error: ") and "yard" in err and "no process 10" in err
+    assert waited == []
+    # a fresh record: the sample document's yard is "measure" and down
+    fresh = f"sqlite:///{tmp_path / 'fresh.sqlite'}"
+    assert cli.main(["record", "init", fresh]) == 0
+    capsys.readouterr()
+    for more in ((), ("--dry-run",)):
+        code, out, err = alloc(capsys, "declare", doc, fresh, *more)
+        assert (code, out) == (1, "")
+        assert "yard" in err and "no process 10" in err
+        assert waited == []
+    assert head_of(opener) == mark
+
+
+def test_a_duration_is_seconds_minutes_or_hours():
+    """templet:3161 -- `--for` and `--every` take seconds, `s`, `m` and `h`: an
+    hour is 3600 seconds, and anything else is refused."""
+    from quarrylith.alloc_cli import _duration
+    from quarrylith.record.contract import Refused
+
+    assert [_duration(t, "--for") for t in ("90", "30s", "10m", "2h", "0")] == [
+        90,
+        30,
+        600,
+        7200,
+        0,
+    ]
+    for bad in ("", "1d", "-5", "1.5m", "ten"):
+        with pytest.raises(Refused, match="--for"):
+            _duration(bad, "--for")
+
+
+@over_backends
+def test_a_document_that_cannot_be_told_from_its_reading_is_refused(
+    backend, record, clock
+):
+    """templet:3161 -- `declared()` gives the document in force with its
+    "measure" kept and the figures, and refuses, saying to declare again, a
+    document reading whose data is not what its sha256 fingerprints: `resize`
+    and `check_resize` then refuse the same."""
+    from test_allocator_host import declare
+
+    from quarrylith.allocator.host import HostPlacement
+    from quarrylith.record.contract import Refused
+
+    assert declare(record, clock).ok
+    placement = HostPlacement(record)
+    document, figures = placement.declared()
+    assert document.capacity["memory"] == "measure"
+    assert figures["capacity"]["memory"] == 48 * GIB
+    (row,) = record.read("readings", source="allocator", kind="document")
+    value = dict(row["value"])
+    value["document"] = {**value["document"], "node": "elsewhere"}
+    clock.step()
+    record.record_reading("allocator", "document", value)
+    for call in (
+        placement.declared,
+        lambda: placement.check_resize("yard"),
+        lambda: placement.resize("yard", GIB, now=clock()),
+    ):
+        with pytest.raises(Refused, match="declare the document again"):
+            call()
+
+
+@over_backends
+def test_a_phase_that_runs_long_says_what_it_is_doing_while_it_does_it(
+    backend, record, url, host, alloc_cli, monkeypatch, capsys, tmp_path
+):
+    """templet:3161 -- a command's phase that passes the slow bound says it is
+    still running, on stderr, while it runs and before it ends: a probe that
+    hangs is not silent until it is cut. A phase under the bound says nothing."""
+    import time as clock_time
+
+    one_writer(backend, record)
+    declare_sample(capsys, tmp_path, url)
+    monkeypatch.setattr(cli, "SLOW_PHASE_S", 0.2)
+    slow = host.probe_memory
+
+    def probe_memory():
+        clock_time.sleep(0.7)
+        return slow()
+
+    monkeypatch.setattr(host, "probe_memory", probe_memory)
+    code, out, err = alloc(capsys, "measure", url)
+    assert code == 0, err
+    lines = err.splitlines()
+    live = [i for i, x in enumerate(lines) if x.startswith("measuring: still running")]
+    done = [i for i, x in enumerate(lines) if x.startswith("measuring: 0.")]
+    assert live and done and live[0] < done[0], err
+    monkeypatch.setattr(cli, "SLOW_PHASE_S", 30.0)
+    code, out, err = alloc(capsys, "measure", url)
+    assert code == 0 and err == ""

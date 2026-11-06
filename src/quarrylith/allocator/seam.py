@@ -56,6 +56,7 @@ class Short:
     waits: bool  # can waiting alone ever make it fit?
     until: int | None  # a time after which it may fit, else None
     holders: list  # the largest live holders of the resource: [(holder, amount)]
+    note: str | None = None  # plain words the numbers do not say, for the line
 
     def __post_init__(self):
         if self.cause not in CAUSES:
@@ -135,7 +136,9 @@ def _part(short):
         if short.holders:
             held = ", ".join(f"{h} {_size(what, n, False)}" for h, n in short.holders)
             part += f" ({held})"
-        return part if short.cause == "room" else f"{part} [{short.cause}]"
+        if short.cause == "room":
+            return part
+        return f"{part} [{short.cause}]" + (f" -- {short.note}" if short.note else "")
     if short.cause == "unmeasured":
         return "unmeasured: the host's reading is missing or stale"
     if short.cause == "undeclared":

@@ -265,9 +265,11 @@ class HostPlacement(Placement):
     def _capacity(self, node, resource, amount, wrote, write):
         what = f"capacity {resource}"
         unit = unit_of(resource)
-        if write(what, lambda: self.record.set_capacity(node, resource, amount, unit))[
-            1
-        ]:
+
+        def call():
+            return self.record.set_capacity(node, resource, amount, unit)
+
+        if write(what, call)[1]:
             wrote.append(f"{what} = {amount}")
 
     def _consumer(self, node, step, now, wrote, failed, write):
@@ -277,24 +279,25 @@ class HostPlacement(Placement):
         for old, resource, amount in step["replace"]:
             what = f"replace {name} {resource}"
             why = f"{name} {resource} changed in the allocation document"
-            record = self.record
-            if write(what, lambda: record.replace_reservation(old["id"], amount, why))[
-                0
-            ]:
+
+            def swap(old=old, amount=amount, why=why):
+                return self.record.replace_reservation(old["id"], amount, why)
+
+            if write(what, swap)[0]:
                 wrote.append(f"{what}: {old['amount']} -> {amount}")
-        if step["hold"]:
-            what = f"hold {name}"
-            done, made = write(
-                what,
-                lambda: self.hold(
-                    name, step["hold"], node=node, measured=False, now=now
-                ),
-            )
-            if done and isinstance(made, Refusal):
-                failed.append((what, made.text))
-            elif done:
-                for resource, amount in sorted(step["hold"].items()):
-                    wrote.append(f"hold {name} {resource} {amount}")
+        if not step["hold"]:
+            return
+
+        def take():
+            return self.hold(name, step["hold"], node=node, measured=False, now=now)
+
+        what = f"hold {name}"
+        done, made = write(what, take)
+        if done and isinstance(made, Refusal):
+            failed.append((what, made.text))
+        elif done:
+            for resource, amount in sorted(step["hold"].items()):
+                wrote.append(f"hold {name} {resource} {amount}")
 
     def _plan(self, document, now):
         """What `declare` would do, read from the record: the reservations to

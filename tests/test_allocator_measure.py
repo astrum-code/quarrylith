@@ -11,6 +11,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -184,7 +185,11 @@ def test_no_probe_keeps_a_command_line(tmp_path):
         [sys.executable, "-c", "import time; time.sleep(30)", marker]
     )
     try:
-        table = probes.process_table()
+        for _ in range(100):  # until the child is running python
+            table = probes.process_table()
+            if probes.probe_tree(child.pid, table) > MIB:
+                break
+            time.sleep(0.05)
         row = next(p for p in table if p.pid == child.pid)
         assert marker not in row.comm
         assert all(marker not in p.comm for p in table)

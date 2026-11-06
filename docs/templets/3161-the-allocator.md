@@ -730,9 +730,10 @@ the node and an amount per run.
   (an unrecognised or garbled reading is paced like a warning and lifts
   nothing). That can over-hold and never over-spend. A stop that names no
   readable reset (none, or not a time) can't name its end: it holds until a
-  newer reading, with waits true and `until` unset, and the `Refusal` says
-  plainly that the provider is stopped by a reading with no reset time. Each
-  window is judged alone:
+  newer reading or a person's clear, with waits true and `until` unset, and the
+  `Refusal` says plainly that the provider is stopped by a reading with no
+  reset time and names the command that clears it (below). Each window is
+  judged alone:
   - `rejected`, or `utilization >= stop_at`: short until its `resets_at`
     (the guard lifts at that instant);
   - `allowed_warning`, **and a status that is not recognised** (missing,
@@ -829,6 +830,7 @@ them is either a resource here or dropped:
 | `alloc declare DOC URL [--dry-run] [--remeasure]` | `resolve` (the recorded figures kept, unless `--remeasure`), then `declare`. Prints a line per write (`wrote node laptop`), or with `--dry-run` per write it would make (`would write ...`) and every refusal, and writes nothing. A second declare of the same document says `nothing to write` |
 | `alloc show URL [--json] [--now MS]` | the host's memory pressure now (a `pressure:` line); per node and resource: capacity, the standing consumers, the tasks' own holds and the runs' reservations, free, the measured figure, the drift; the document's sha256 and age, the host reading's age, the consumers that are absent and the allocator's latest observations |
 | `alloc place URL TASK [--json] [--now MS]` | `place`, now: the Fit (`fit:`, `needs:`, `why:` lines) or the Refusal's `text`, which exits 2 |
+| `alloc clear URL PROVIDER --why TEXT [--now MS]` | clears the provider's stop that names no reset time: one `cleared` reading, with who (the actor) and why, in each such window (`cleared anthropic five_hour (by lester): <why>`), and says which windows still hold until their reset (`anthropic seven_day: still held until 2026-11-06T19:27Z, its own reset`). A stop with only readable future resets is refused (exit 2), naming them; a provider with no stop is `nothing to clear: <provider> has no stop`, exit 0, and writes nothing |
 | `alloc measure URL` | `measure`, once: the host's memory and disk, each consumer's resident size, the consumers that are absent and the drift |
 | `alloc consumer measure NAME URL [--for 10m] [--every 10s] [--declare]` | `sample_consumer`, printing the peak and the size to declare (`consumer yard: peak 1.2 GiB over 61 samples, size 1.5 GiB (1536 MiB)`) and, past five seconds, a phase line every 30 s (`sampling yard: 18/61, peak 1.21 GiB, 3:00`). With `--declare` it writes the size into the record by `resize` and prints the document line to copy (`document line: memory = "1536MiB"`). It checks first that the consumer's memory is `"measure"` in the declared document (`check_resize`), since a fixed amount is the document's to change |
 
@@ -863,10 +865,41 @@ to stderr, `refused: ...` or `error: ...`.
 
 Adding a command is a function, `_name(args)`, and a parser line in
 `add_commands`: it opens its record with `_session`, which traces the record
-and the probes for `--timing` and `--debug`. **Not built, and not decided**: a
-person clearing a provider's stop that has no reset time (the budget's stop
-that names no end holds until a newer reading; no command ends it by hand).
-It is added here when the user decides how.
+and the probes for `--timing` and `--debug`. A stop that names
+no reset time holds until a newer reading, and those readings come from agent
+runs, which the stop itself blocks: so a person ends it with
+**`alloc clear`**, which the user decided on 2026-11-06 over a longest hold
+(nothing lifts such a stop by itself, and there is no time limit). It writes a
+`cleared` reading, in the shape the budget reads, with `by` (the actor, the
+caller's by the record's rule) and `why` (required, 1 to 300 characters), in
+**each window whose stop names no reset**. A `cleared` reading is a recognised
+status told apart from a provider's in the record by what it names, and it
+lifts a stop that names no end **and nothing else**: not a stop with a
+readable future reset, which holds until its own reset (the command refuses
+it, naming the reset, and a clear written by other means does not lift it
+either), **nor a newer stop that names no reset while an older stop's reset in
+the window is still ahead** (that reset will come: the command refuses it,
+naming that reset, with no override, and once it has passed the clear lifts the
+window), and not a warning. What "names no reset" covers is the budget's
+reading of `resets_at`: a reset in the wrong unit (microseconds, nanoseconds, a
+relative number, before 2000) is none, and a person may clear it, so `alloc
+show` and `alloc clear` print its raw `resets_at` (`resets_at 1790000000000000
+is not read as a time`), `alloc clear` before it clears. A stop reading after a
+clear holds again: a clear is not a pass. A clear that names no one or no reason
+(or only space) is not recognised, and the utilization is read first, so a
+`cleared` status over the limit is a stop. `--why` and `--actor` are one
+printable line, refused with a control character, and the printers write out
+any control character a reading already holds (`--json` gives the text as it
+is); an empty provider is refused. Where a provider has no stop it says
+"nothing to clear" and writes nothing; where one window has a reset and another
+has none, it clears the one and says the other holds until its reset. It is a
+person's command: **an agent must not be granted any budget reading through
+the services' socket** (not `alloc clear`, not a `cleared` reading, not an
+`allowed`: a recognised non-stop reading newer than a stop lifts it, so the
+exposure is the writing of any `budget` reading), since it would let an agent
+spend past a stop. `by` is the writer's own claim, and `alloc show` is not
+authentication: the event that wrote the reading holds the actor the record
+checked.
 
 ### Needs from the record
 
@@ -1058,6 +1091,19 @@ which pass.
   is not a stop lifts it, one of another window or provider does not; a stop
   with no readable `resets_at` holds until a newer reading, waits true,
   `until` unset, and the `Refusal` names the provider and says so
+- [ ] `alloc clear URL PROVIDER --why TEXT` writes one `cleared` reading, with
+  who and why, in each window whose stop names no reset, and the provider is
+  lifted; a stop with a readable future reset is refused, naming the reset, and
+  a `cleared` reading never lifts one, nor does it lift a newer stop with no
+  reset over an older stop's reset still ahead (refused, naming that reset);
+  a reset not read as a time is printed raw by `alloc show` and by the command
+  before it clears; `--why` and `--actor` with a control character are
+  refused, a reading's text is written on one line by the printers, a blank
+  provider is refused and a `cleared` status over the limit is a stop; a stop
+  reading after a clear holds again; a clear with no stop before it, or that names no one or no reason,
+  lifts nothing; a provider with no stop is `nothing to clear` and nothing is
+  written; the refusal of a stop with no reset and `alloc show` name the
+  command, and `alloc show` lists a clear in force with who and why
 - [ ] a status that is missing, unknown or of another type, and a
   `utilization` that can't be read, are paced like a warning (and go stale
   like one); the status is matched without case or surrounding space; a
@@ -1515,3 +1561,19 @@ later: nothing in the effort runs sessions through the queue.
   slow bound says `<phase>: still running, N s` while it runs, as well as its
   time when it ends; and the page pins `src/quarrylith/cli.py`, which holds the
   exit-code mapping (this PR)
+- 2026-11-06 proposed: `alloc clear URL PROVIDER --why TEXT`, a person's
+  command that clears a stop that names no reset time, by a `cleared` reading
+  with `by` and `why` that lifts such a stop and nothing else (never a stop with
+  a readable reset, nor a warning), and the budget section, the commands table,
+  the refusal's and `alloc show`'s words and an acceptance item for it; it
+  answers the open question of "The commands", no longer open; an agent must
+  not be granted any budget reading through the socket (the user's decision,
+  2026-11-06: a person's command with no time limit, over a longest hold).
+  Amended by the review of this PR: a newer stop with no reset does not hide an
+  older stop's reset that is still ahead (the clear lifts nothing until it has
+  passed, no override: the user's rule); a reset in the wrong unit is none,
+  which a person may clear, with its raw `resets_at` shown first (that of
+  the stop being cleared, not of older stops under it); control
+  characters are refused in `--why` and `--actor` and written out by the
+  printers (the window name too); a blank provider is refused; the utilization is read before a
+  `cleared` status (this PR)

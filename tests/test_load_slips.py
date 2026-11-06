@@ -385,6 +385,23 @@ def test_a_redo_of_a_writers_entry_held_across_its_next_operation(
     assert held >= 5
 
 
+def test_a_writers_entry_is_not_taken_for_a_loads(dump_two, monkeypatch):
+    """templet:3159 -- Henge, Recovery: with a load in progress, an open leaves only
+    a load's own entries past what `loading` names. A writer's at a+1 stays a
+    commit, and a load's behind it, which no store's order gives, is two entries:
+    another writer, refused, and neither is touched."""
+    base, puts = load_log(dump_two, BATCH, monkeypatch)
+    state = henge.spaces("rec")["state"]
+    journal = henge.spaces("rec")["journal"]
+    entries = [p for p in puts if p[0] == journal]
+    start = next(p for p in puts if p[0] == state and p[1] == ["loading"])
+    writers = {k: v for k, v in entries[0][2].items() if k != "load"}
+    fake = holding(base + [start, (journal, [1], writers), entries[1]])
+    with pytest.raises(Unavailable, match="two entries"):
+        handle(fake.client("R"), "r")
+    assert fake.value(state, ["applied"]) == 0
+
+
 class Real:
     """A running store, as the cases ask for a fake."""
 

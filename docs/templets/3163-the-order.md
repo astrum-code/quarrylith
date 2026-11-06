@@ -1147,16 +1147,20 @@ merge happens.
   `cron`; and the no-window wording of the five-year error (this PR)
 - 2026-11-04 proposed: a day field that starts with `*` (`*`, `*/10`) is
   unrestricted, as in classic cron (user decision, 2026-11-04) (this PR)
-- 2026-11-04 proposed: "The ready set" reads an item's task as open or
+- 2026-11-04 changed: "The ready set" reads an item's task as open or
   running, so an item moved back to `ready` while its task runs is left out
-  (this PR)
-- 2026-11-04 proposed: `started` adds an exempt candidate to no repo's count,
-  as the count of live runs leaves an exempt run out (this PR)
-- 2026-11-04 proposed: a candidate cut by the landing limit names every repo
-  at its limit, joined with "; " (this PR)
-- 2026-11-04 proposed: `classify` reads an item with no open change, a round
+  (approved: the conformance review of quarrylith#17)
+- 2026-11-04 changed: `started` adds an exempt candidate to no repo's count,
+  as the count of live runs leaves an exempt run out (approved: the
+  conformance review of quarrylith#18)
+- 2026-11-04 changed: a candidate cut by the landing limit names every repo
+  at its limit, joined with "; " (approved: the conformance review of
+  quarrylith#18)
+- 2026-11-04 changed: `classify` reads an item with no open change, a round
   with no review filed, and a review whose `heads` omit a change as the
-  user's, and refuses a number the record does not hold (this PR)
-- 2026-11-04 proposed: a review of a round after the item's, with verdict
+  user's, and refuses a number the record does not hold (approved: the
+  conformance review of quarrylith#19)
+- 2026-11-04 changed: a review of a round after the item's, with verdict
   `changes` or none, bars the merge; a tier above 5 needs the second role's
-  review, and a risk below 1 is the user's (this PR)
+  review, and a risk below 1 is the user's (approved: the conformance review
+  of quarrylith#19)

@@ -293,10 +293,16 @@ def resumes(fake, dump):
 
 @pytest.fixture
 def small_chunks(monkeypatch):
-    """Chunks of 8 keys, split into pieces of 4: a split in a few events."""
-    monkeypatch.setattr(henge, "CHUNK_KEYS", 8)
-    monkeypatch.setattr(henge, "PIECE_KEYS", 4)
-    monkeypatch.setattr(henge, "JOURNAL_CHUNK", 8)
+    """Chunks of 4 keys, split into pieces of 2: a split in a few events."""
+    monkeypatch.setattr(henge, "CHUNK_KEYS", 4)
+    monkeypatch.setattr(henge, "PIECE_KEYS", 2)
+    monkeypatch.setattr(henge, "JOURNAL_CHUNK", 4)
+
+
+def a_directory_put(puts):
+    """The first put of a split's directory, as its index."""
+    idx = henge.spaces("rec")["idx"]
+    return next(i for i, p in enumerate(puts) if p[0] == idx and p[1][-1] == "dir")
 
 
 @pytest.mark.parametrize("batch", [1, 3, BATCH, 1000])
@@ -305,6 +311,7 @@ def test_a_load_cut_at_every_put_resumes(dump, batch, monkeypatch, small_chunks)
     opens, is called in progress by `check()` (or is empty, or whole), and the
     same dump ends it with the same dump."""
     base, puts = load_log(dump, batch, monkeypatch)
+    assert a_directory_put(puts) is not None
     for n in range(len(puts) + 1):
         resumes(holding(base + puts[:n]), dump)
 
@@ -325,6 +332,32 @@ def test_a_resume_cut_at_every_put_resumes_again(dump, monkeypatch, small_chunks
         again = [c[1:] for c in spy_client.calls if c[0] == "put"]
         for n in range(len(again) + 1):
             resumes(holding(left + again[:n]), dump)
+
+
+def test_a_redo_of_a_batch_settles_a_directory_and_shrinks_its_split(
+    dump, monkeypatch, small_chunks
+):
+    """templet:3159 -- Henge: a batch cut once its split's directory was put
+    leaves the old chunk holding keys past its range, and a directory read, not
+    answered. The open's redo puts that directory again and leaves every chunk
+    within its range ("Only past an answer"; a redo as row 6 has it)."""
+    base, puts = load_log(dump, BATCH, monkeypatch)
+    idx = henge.spaces("rec")["idx"]
+    at = a_directory_put(puts)
+    key = puts[at][1]
+    fake = holding(base + puts[: at + 1])
+    client = Spy(fake.client("w2"))
+    rec = henge.HengeRecord(client, "rec", actor="l", via="load", timeout_s=1.0)
+    rec.clock = Clock()
+    assert ("put", idx, key) in [c[:3] for c in client.calls]
+    numbers = henge.ranges(fake.value(idx, key))
+    assert len(numbers) >= 2
+    for n, rng in numbers.items():
+        chunk = fake.value(idx, key[:-1] + [n])
+        assert chunk == henge.filtered(chunk, rng), (n, chunk)
+    rec.load(dump)
+    assert rec.dump() == dump
+    assert rec.check() == []
 
 
 def test_an_open_redoes_a_cut_batch_and_settles_each_entry(dump, monkeypatch):

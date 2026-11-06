@@ -560,6 +560,7 @@ def test_an_unreadable_document_reading_is_no_document(effort, clock):
         assert [s.cause for s in refusal.shorts] == ["node"], bad
         assert placement.release("x", why="none") == []
     assert declare(record, clock).ok
+    host_reading(record, clock)
     assert isinstance(placement.place(task, now=clock()), Fit)
 
 
@@ -1025,7 +1026,8 @@ def test_headroom_gives_each_resources_free_on_each_live_node(effort, clock):
     assert after["slots.claude-code"] == 3 and after["lane.widgets"] == 3
     for holder, _ in list(standing(record)):
         placement.release(holder, why="done")
-    assert placement.headroom(now=clock())["laptop"]["memory"] == 48 * GIB - 2 * GIB
+    # the table has 46 GiB free; the measurement leaves 47 less the 4 GiB floor
+    assert placement.headroom(now=clock())["laptop"]["memory"] == 43 * GIB
 
 
 @over_backends

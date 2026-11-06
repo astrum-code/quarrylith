@@ -598,12 +598,16 @@ the node and an amount per run.
   window (five-hour, seven-day), as `budget_pace` keys them. `value` holds
   `status` (allowed, allowed_warning, rejected), `utilization` (0 to 1) and
   `resets_at`, **in milliseconds**, as the record's clock (a number below
-  March 1973 in milliseconds is read as seconds). A provider with no reading
+  March 1973 in milliseconds is read as seconds; a time before 2000 or past
+  year 9999 is no reset of ours: a count, a relative number, microseconds or
+  nanoseconds name no end). A provider with no reading
   guards nothing, as today, and a **warning** whose latest reading is older
   than `budget.max_age_s` guards nothing, as today. **A stop does not go
   stale** (the user, 2026-11-06): it holds until its own `resets_at`, however
-  old the reading, unless a newer reading of that provider and window says
-  otherwise. That can over-hold and never over-spend. A stop that names no
+  old the reading, unless a newer **recognised** reading of that provider and
+  window lifts it: only `allowed`, or `allowed_warning` below `stop_at`, does
+  (an unrecognised or garbled reading is paced like a warning and lifts
+  nothing). That can over-hold and never over-spend. A stop that names no
   readable reset (none, or not a time) can't name its end: it holds until a
   newer reading, with waits true and `until` unset, and the `Refusal` says
   plainly that the provider is stopped by a reading with no reset time. Each
@@ -619,13 +623,17 @@ the node and an amount per run.
   - `allowed`: the table's check alone.
 
   The status is matched without case or surrounding space (`REJECTED` and
-  `rejected ` are stops), and a `utilization` given as numeric text is read
-  as the number. The history is read a bounded number of rows deep: the
-  newest `READ_LIMIT` readings of the source find the windows, those named
-  `five_hour` and `seven_day` are always read, and each window is read its
-  newest `READ_LIMIT` readings deep. A provider whose latest reading of a
-  window lies under more than `READ_LIMIT` newer readings of the same window
-  (other providers') is not seen.
+  `rejected ` are stops), as is the provider, and a `utilization` given as
+  numeric text is read as the number (`"inf"` is a stop). **The history is
+  read in two steps**: the newest `READ_LIMIT` readings of the source; and,
+  when those fill it, the whole history, since a provider's newest reading of
+  a window may lie under any number of newer readings of others and a window
+  may have any name. A history shorter than `READ_LIMIT`, the common case, is
+  one read of at most that many rows. The bound is on the rows one read
+  returns, not on the store's work (Henge reads the source whatever the
+  limit), and a long history costs a whole read per provider on each `place`:
+  a retention rule on readings, or a reading kept per provider and window, is
+  the record's design and would remove that cost.
 
   **The provider is short when any window is** (the tighter one counts, as
   today), with one `budget` Short, whose `resource` is the harness's
@@ -906,9 +914,14 @@ which pass.
   like one); the status is matched without case or surrounding space; a
   `utilization` given as numeric text is read; a `resets_at` in seconds is
   read as seconds and does not lift a stop as a past time would
-- [ ] no read of the readings returns more than `READ_LIMIT` rows however
-  long the history, and a stop in `seven_day` under many newer readings of
-  another provider is found; a warning's live weight counts the provider's
+- [ ] a history shorter than `READ_LIMIT` is one read of at most that many
+  rows; a stop under `READ_LIMIT` - 1, `READ_LIMIT` and twice as many newer
+  readings of its window by another provider, with or without a reset, or in
+  a window of another name, is found; a resets_at before 2000, past year 9999
+  or in microseconds or nanoseconds is no reset (the stop holds until a newer
+  reading, and no line raises); a newer unrecognised or garbled reading does
+  not lift a stop and a recognised non-stop does; the provider is matched
+  without case or space; a warning's live weight counts the provider's
   runs on the asked node only, not a standing hold, a task's own reservation
   or a run on another node
 - [ ] `measure` writes one reading with total and available memory, the
@@ -1235,15 +1248,23 @@ later: nothing in the effort runs sessions through the queue.
   nothing. This replaces "a stale reading guards nothing" for a stop
   (approved: the user, 2026-11-06, in the effort's log)
 - 2026-11-06 proposed: `resets_at` is milliseconds, and a number below March
-  1973 in milliseconds is read as seconds; the status is matched without case
-  or surrounding space; a `utilization` as numeric text is read, and one that
-  can't be read is paced like a warning; a stop with no readable reset counts
-  a non-positive, non-finite or non-numeric `resets_at` as none (this PR)
+  1973 in milliseconds is read as seconds; a time before 2000 or past year
+  9999, and a non-positive, non-finite or non-numeric `resets_at`, is no reset
+  and the stop holds until a newer reading; the status and the provider are
+  matched without case or surrounding space; a `utilization` as numeric text
+  is read (`"inf"` stops), and one that can't be read is paced like a warning
+  (this PR)
+- 2026-11-06 proposed: only a recognised reading lifts a stop (`allowed`, or
+  `allowed_warning` below `stop_at`); an unrecognised or garbled reading is
+  paced like a warning and lifts nothing (the coordinator's ruling on the
+  review of this PR, in the effort's log) (this PR)
 - 2026-11-06 proposed: `Short` gains `note: str | None = None`, plain words
   the numbers do not say, which the line prints after a `budget` short as
   " -- <note>"; a stop that names no end has one naming the provider (this
   PR)
-- 2026-11-06 proposed: the budget's history read is bounded: `READ_LIMIT`
-  newest readings of the source to find the windows, `five_hour` and
-  `seven_day` always read, each window `READ_LIMIT` deep; and the limit that
-  leaves (this PR)
+- 2026-11-06 proposed: the budget's history is read in two steps, the newest
+  `READ_LIMIT` readings and, when those fill it, the whole history, so a stop
+  is never lost under others' newer readings or in a window of any name; the
+  bound is on the rows one read returns and not on the store's work (the
+  coordinator's ruling on the review of this PR, in the effort's log) (this
+  PR)

@@ -2573,5 +2573,5 @@ client alone is the dependency (above).
   item (this PR)
 - 2026-11-06 proposed: the `measured` gauge's search for a live node's latest
   reading stops doubling at 1,024 readings and reads them all once, so a
-  declared node never measured costs one full read, not several (the gauges
-  row; this PR)
+  declared node never measured costs one full read, not several: the gauges
+  row (this PR)

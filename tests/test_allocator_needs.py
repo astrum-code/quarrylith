@@ -68,6 +68,10 @@ def test_declare_with_the_same_drivers_again_writes_nothing_and_none_reverts(
     clock.step()
     again = placement.declare(document, figures=FIGURES, drivers=drivers, now=clock())
     assert again.ok and again.wrote == () and record.head() == mark
+    dry = placement.declare(
+        document, figures=FIGURES, drivers=drivers, dry_run=True, now=clock()
+    )
+    assert dry.wrote == (), "a node with those drivers has nothing to write"
     clock.step()
     back = placement.declare(document, figures=FIGURES, now=clock())
     assert back.ok and "node laptop" in back.wrote

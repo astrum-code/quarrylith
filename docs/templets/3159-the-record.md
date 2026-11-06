@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: bafd571
+    at: 1c1dff1
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -640,7 +640,12 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
      with `durable` false (below).
   3. runs recovery, and gives the `HengeRecord`.
 
-  `close()` closes the client, then releases the lock.
+  `close()` closes the client, then releases the lock. **`closed`**, a property
+  of every `Record`, is None while the record is open and a line saying why once
+  it has closed: `"closed"` after `close()`, or the reason a failure that stopped
+  the writer gave (a check that found another writer, an operation past its
+  commit point, a load in progress). Asking never raises, so a service asks the
+  record and does not read its private field.
 
   **One engine per folder is the store's**: its `henge.lock` binds every
   opener of the folder (`henge single`, `henge local`, `Store.single`,
@@ -1577,6 +1582,9 @@ What looked reusable but was not:
 Each item is a test marked `templet:3159`, run over every backend in
 `BACKENDS` unless it names one. Steps below name which make which pass.
 
+- [ ] `Record.closed` is None while a record is open and `"closed"` after
+  `close()`, on both backends, and a Henge record that closed itself gives the
+  reason it closed
 - [ ] `RECORDS` declares every kind of the table above with its key,
   fields, match and live field, and a record with an undeclared field or a
   wrong type is refused
@@ -2831,3 +2839,7 @@ client alone is the dependency (above).
   live writers stand as written, and henge's reviews of rounds 1 and 2 are why.
   `check()` reports a load in progress. The event format,
   `ack`, `beat` and every other write do not change (this PR)
+- 2026-11-06 proposed: `Record.closed`, a public property (None while open, the
+  reason once closed, `"closed"` after `close()`), on the contract and both
+  backends, where a service read the private `_closed` of a Henge record (this
+  PR)

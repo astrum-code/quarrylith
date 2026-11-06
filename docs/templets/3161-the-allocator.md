@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: 815cf8a
+    at: 1c1dff1
 ---
 
 # The allocator
@@ -468,10 +468,15 @@ in `place`, not the declared figure, follows the host as it changes.
 `HostPlacement(record)` fills the seam for one host: the node the declared
 document names. On top of the seam it has:
 
-- **`declare(document, *, figures, now, dry_run=False)`**. It brings the record to the
+- **`declare(document, *, figures, drivers=None, now, dry_run=False)`**. It brings the record to the
   document, with each `"measure"` taken from `figures` and nothing probed (a
   `"measure"` with no figure is refused, naming the key). The argument is
   `figures`, not `measured`, because `hold` already has a `measured` flag.
+  `drivers`, when given, are what the node declares in place of the
+  document's: the drivers the host has, of the ones the document names. The
+  document stays whole in the reading, so `alloc show` says what is declared
+  but not available (`node laptop: drivers harness, podman, process; declared
+  but not available: vm`), and a `resize` keeps the drivers the node has.
   - `declare_node(node, drivers, labels=[])`;
   - `set_capacity` for each resource, and `lane.<name>` = `max` for each
     lane;
@@ -541,14 +546,35 @@ document names. On top of the seam it has:
      with no capacity row);
   3. **the budget**: `budget_shorts`, below (`budget`);
   4. **the measurement**: the latest `host/measure` reading, within
-     `floor.max_age_s`, or `unmeasured`. Then memory: `available - need >=
-     floor.memory`. Disk: `disk_free - need >= floor.disk` (`measured`);
+     `floor.max_age_s`, or `unmeasured`. Then memory: `available - reserved -
+     need >= floor.memory`. Disk: `disk_free - reserved - need >= floor.disk`
+     (`measured`), where `reserved` is **what was reserved since the reading**
+     (below);
   5. **the pressure**, read from the host at this call and never from a
      stored reading (below, "Memory pressure"): `pressure`, or `unmeasured`
      when the read fails.
 
   It fits only when nothing is short. The table check is exactly the one
   `start_run` makes, so a Fit fails at `start_run` only through a race.
+- **The measured room is net of what was reserved since the reading**
+  (`measure.reserved_since`; the services' need, 2026-11-06). A reading says
+  what was available when it was taken, so a round that places several
+  candidates on one reading must take off what its own starts reserved, or it
+  starts every candidate the reading holds alone: with 4.5 GiB available, a
+  1 GiB floor and four candidates of 2 GiB, one starts, not two. `place`,
+  `hold` and `headroom` all do. A reservation counts when it is live, its
+  `from_at` is after the reading's instant, it has not ended, and it is not a
+  standing consumer the document names (that was running when declared, so the
+  reading has it). At equality it fits (5.0 GiB available starts 2, 4.99
+  starts 1, 3.0 starts 1, 2.99 starts 0, for a 1 GiB floor and 2 GiB each). A
+  released reservation is not counted; a run the newer reading already sees
+  (started before it) is not counted twice. **Named limits:** a reservation
+  made at the reading's own instant is taken as seen, since the record keeps
+  no finer order than the millisecond; and a run started before the latest
+  reading and still growing is not counted, only the reading sees it. The
+  `measured` short says the net figure as `free` and in its `detail` the floor
+  and what was reserved (`floor 1.0 GiB, 2.0 GiB reserved since the reading`),
+  which `alloc place` and `--debug` print.
 - **Memory pressure** (user, 2026-11-06). The measured check counts memory
   macOS could reclaim and cannot see swap: on the night of 2026-11-05 a 28 GB
   local model had the host at 30% free with 14 GB of swap in use, and the
@@ -1146,6 +1172,16 @@ which pass.
   too; a swap text off the kernel's format (a comma, no unit, a lowercase
   unit) is a failed read, and the reads run in the `C` locale; the free share
   is a strict whole percent, and a failed read of it is `unmeasured`
+- [ ] `declare` with `drivers` declares the node with them and keeps the
+  document whole in its reading (`alloc show` says what is declared but not
+  available), a second `declare` writes nothing, none brings the document's
+  back, and a `resize` keeps them; the measured room is net of what was
+  reserved since the reading, for memory and disk, in `place`, `hold` and
+  `headroom` (4.5 GiB with a 1 GiB floor and four 2 GiB candidates starts 1;
+  5.0 starts 2, 4.99 starts 1, 3.0 starts 1, 2.99 starts 0; a released
+  reservation, an ended one, a run the newer reading sees and a consumer the
+  document names are not counted; one at the reading's instant is taken as
+  seen), and the refusal names the floor and what was reserved
 - [ ] a consumer measured past its declaration by more than the tolerance,
   and measured available memory short of the table's free beyond it, are
   each in the reading's `drift`. Each writes one observation when it begins
@@ -1556,6 +1592,13 @@ later: nothing in the effort runs sessions through the queue.
   `ps` by their paths on macOS; and the swap counts only with memory short, by
   one more read (`kern.memorystatus_level`, or `MemAvailable` over `MemTotal`),
   the detail naming both figures (this PR)
+- 2026-11-06 proposed: what the services found they need: `declare` takes
+  `drivers` (what the node declares in place of the document's, the document
+  whole in its reading, `alloc show` saying what is declared but not available,
+  a `resize` keeping them); and the measured room of `place`, `hold` and
+  `headroom` is net of what was reserved since the host reading, with the
+  boundaries and the two named limits under the measurement, the `measured`
+  short saying the floor and the amount reserved (this PR)
 - 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`
   at its first sample, not after the window; a command's phase that passes the
   slow bound says `<phase>: still running, N s` while it runs, as well as its

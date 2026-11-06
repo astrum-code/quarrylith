@@ -689,7 +689,8 @@ def test_a_consumer_that_is_down_reads_as_absent_and_the_host_is_still_measured(
     ).ok
     head = record.head()
     value = placement.measure(now=clock())
-    assert record.head() == head + 1
+    # the reading, and one observation for each consumer that is down
+    assert record.head() == head + 1 + 5
     assert value["memory_available"] > 0 and value["disk_free"] > 0
     assert set(value["consumers"]) == {"alive"}
     assert set(value["absent"]) == {"missing", "junk", "dead", "nopid", "noname"}
@@ -701,6 +702,57 @@ def test_a_consumer_that_is_down_reads_as_absent_and_the_host_is_still_measured(
     (made,) = files(record, "measure")
     assert made["value"]["absent"] == value["absent"]
     assert value["drift"] == []
+
+
+@over_backends
+def test_a_consumer_going_absent_and_returning_is_observed_once_each(
+    record, clock, tmp_path
+):
+    """templet:3161 -- a consumer that becomes absent is said once, with why,
+    as an observation, and one that returns is said once; nothing is written
+    while it stays absent or stays present, so a probe gone blind is seen as
+    well as a service that is down."""
+    placement = drifting(record, clock, tmp_path)
+    mark = record.head()
+    for resident in (10, 10, None, None, None, 10, 10):
+        clock.step()
+        placement.probes = stub(90 * GIB, None if resident is None else GIB)
+        placement.measure(now=clock())
+    assert observations(record) == [
+        "allocator: machine is absent: no process 10",
+        "allocator: machine is back",
+    ]
+    journal = [e["kind"] for e in record.dump()["journal"] if e["seq"] > mark]
+    assert journal.count("reading") == 7 and journal.count("statement") == 2
+    assert record.check() == []
+
+
+@over_backends
+def test_a_consumer_absent_at_the_first_measure_and_one_taken_out_are_observed(
+    record, clock, tmp_path
+):
+    """templet:3161 -- a consumer absent at the very first measurement is said
+    at once; one that is absent and then leaves the document is said to be no
+    longer probed, once."""
+    placement = drifting(record, clock, tmp_path)
+    placement.probes = stub(90 * GIB, None)
+    clock.step()
+    placement.measure(now=clock())
+    assert observations(record) == ["allocator: machine is absent: no process 10"]
+    clock.step()
+    placement.measure(now=clock())
+    assert len(observations(record)) == 1
+    document = mini(tmp_path, tolerance=0.1)
+    figures = {"capacity": {"memory": 100 * GIB, "disk": 400 * GIB}, "consumers": {}}
+    assert placement.declare(document, figures=figures, now=clock()).ok
+    clock.step()
+    placement.measure(now=clock())
+    clock.step()
+    placement.measure(now=clock())
+    assert observations(record) == [
+        "allocator: machine is absent: no process 10",
+        "allocator: machine is no longer probed",
+    ]
 
 
 @over_backends
@@ -808,3 +860,25 @@ def test_hold_on_another_node_does_not_check_the_measured_room(effort, clock):
     assert placement.hold("a", {"memory": GIB}, node="other", now=clock())
     refusal = placement.hold("b", {"memory": 8 * GIB}, node="other", now=clock())
     assert [s.cause for s in refusal.shorts] == ["room"]
+
+
+@over_backends
+def test_sample_consumer_of_a_consumer_that_is_down_stops_at_the_first_sample(
+    record, clock, tmp_path
+):
+    """templet:3161 -- a consumer with nothing resident is a `ProbeError` at
+    the first sample, naming why, without sleeping through the window; one that
+    is up at the first sample is sampled to the end."""
+    document = mini(tmp_path, DRIFT, tolerance=0.1)
+    placement = HostPlacement(record, probes=stub(90 * GIB, None))
+    slept = []
+    with pytest.raises(ProbeError, match="machine.*no process 10"):
+        placement.sample_consumer(
+            "machine", seconds=600, every=10, document=document, sleep=slept.append
+        )
+    assert slept == []
+    placement.probes = stub(90 * GIB, GIB)
+    placement.sample_consumer(
+        "machine", seconds=30, every=10, document=document, sleep=slept.append
+    )
+    assert slept == [10, 10, 10]

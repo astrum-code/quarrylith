@@ -8,6 +8,7 @@ the budget's readings and the host's latest measurement (`place`, `hold`,
 `release`, `headroom`). `declare` probes nothing: the figures a "measure"
 stands for are given to it, by `resolve`."""
 
+import copy
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -15,12 +16,14 @@ from dataclasses import dataclass, field
 from ..record import schema
 from ..record.contract import Refused
 from .classes import classify, needs_of
-from .document import document_from_data, to_data, unit_of
+from .document import MEASURE, document_from_data, to_data, unit_of
 from . import probes as default_probes
 from .budget import allowance, budget_shorts, providers_of
 from .measure import (
     KIND as MEASURE_KIND,
     SOURCE as MEASURE_SOURCE,
+    absent_began,
+    absent_ended,
     began,
     drift_entries,
     ended,
@@ -290,7 +293,8 @@ class HostPlacement(Placement):
         raises `ProbeError` naming it; with no document declared there is
         nothing that names the node, the work disk or the consumers, and it
         refuses. It writes the reading, and a statement when a drift begins or
-        ends, and never a capacity or a reservation."""
+        ends and when a consumer goes absent or comes back, and never a
+        capacity or a reservation."""
         record = self.record
         with record.reading():
             stored = self._stored()
@@ -302,11 +306,13 @@ class HostPlacement(Placement):
             document = stored[0]
             free, capacity = self._memory_table(document, now)
             row = latest(record)
-        before = []
+        before, before_absent = [], {}
         if row is not None and isinstance(row["value"], dict):
             same = row["value"].get("node") == document.node
             drift = row["value"].get("drift")
             before = drift if same and isinstance(drift, list) else []
+            absent = row["value"].get("absent")
+            before_absent = absent if same and isinstance(absent, dict) else {}
         probes = self.probes
         memory = probes.probe_memory()
         value = {
@@ -337,6 +343,15 @@ class HostPlacement(Placement):
         for entry in before:
             if entry.get("what") not in now_whats:
                 record.state("observation", ended(entry), where="allocator")
+        # a consumer that goes absent, or comes back, is said once, so a probe
+        # that has gone blind is seen as well as a service that is down
+        for name, why in value["absent"].items():
+            if name not in before_absent:
+                record.state("observation", absent_began(name, why), where="allocator")
+        for name in before_absent:
+            if name not in value["absent"]:
+                line = absent_ended(name, name in value["consumers"])
+                record.state("observation", line, where="allocator")
         record.record_reading(MEASURE_SOURCE, MEASURE_KIND, value)
         return value
 
@@ -352,11 +367,13 @@ class HostPlacement(Placement):
             free, capacity = self._memory_table(stored[0], now)
             return drift_entries(stored[0], row["value"], free, capacity)
 
-    def resolve(self, document, *, fresh=False, now):
+    def resolve(self, document, *, fresh=False, now, progress=None, sleep=time.sleep):
         """The figures for each "measure" in `document`: the one the latest
         document reading recorded for the same key, or, with none or with
         `fresh`, the probe. `{"capacity": {resource: n}, "consumers": {name:
-        {resource: n}}}`. Writes nothing."""
+        {resource: n}}}`. Writes nothing. `progress(name, number, total,
+        peak)` is called after each sample of a consumer, and `sleep` waits
+        between them."""
         recorded = {}
         with self.record.reading():
             stored = self._stored()
@@ -388,7 +405,18 @@ class HostPlacement(Placement):
                 continue
             old = (old_consumers.get(consumer.name) or {}).get("memory")
             if old is None:
-                old = self.sample_consumer(consumer.name, document=document)
+                old = self.sample_consumer(
+                    consumer.name,
+                    document=document,
+                    sleep=sleep,
+                    progress=(
+                        None
+                        if progress is None
+                        else lambda n, total, top, name=consumer.name: progress(
+                            name, n, total, top
+                        )
+                    ),
+                )
             figures["consumers"][consumer.name] = {"memory": old}
         return figures
 
@@ -419,6 +447,12 @@ class HostPlacement(Placement):
         top, why = 0, ""
         for number in range(1, total + 1):
             found, why = self.probes.resident(probe, self.probes.process_table())
+            if number == 1 and found is None:
+                # down at the first sample: nothing to wait the window out for
+                raise ProbeError(
+                    f"sample_consumer: nothing is resident under {name}'s probe"
+                    + (f" ({why})" if why else "")
+                )
             top = max(top, found or 0)
             if progress is not None:
                 progress(number, total, top)
@@ -433,7 +467,7 @@ class HostPlacement(Placement):
 
     # -- declare ------------------------------------------------------------------
 
-    def declare(self, document, *, figures, now):
+    def declare(self, document, *, figures, now, dry_run=False):
         """Bring the record to `document`, each "measure" taken from
         `figures` and nothing probed (`DocumentError` naming the key of one
         with no figure). The whole document is checked against the record
@@ -441,7 +475,8 @@ class HostPlacement(Placement):
         written. Each write is then one operation, refused whole; a refused
         one is in `failed`, the rest go on, and a second `declare` finishes
         it. The document reading is written last, and only when nothing
-        failed."""
+        failed. With `dry_run` it writes nothing and returns the lines it
+        would write, the ones a real `declare` then writes."""
         figures = {} if figures is None else figures
         data = to_data(document, figures)
         resolved = document_from_data(data)
@@ -452,6 +487,13 @@ class HostPlacement(Placement):
             before = self._stored()
         if plan["refusals"]:
             return Declaration(refusals=plan["refusals"])
+        same = (
+            before is not None
+            and before[1]["sha256"] == digest
+            and schema.canonical(before[1]["figures"]) == schema.canonical(figures)
+        )
+        if dry_run:
+            return Declaration(wrote=tuple(self._lines(plan, node, digest, same)))
         record = self.record
         wrote, failed = [], []
 
@@ -464,8 +506,11 @@ class HostPlacement(Placement):
                 failed.append((what, str(refused)))
                 return False, None
 
-        if write("node", lambda: record.declare_node(node, resolved.drivers, []))[1]:
-            wrote.append(f"node {node}")
+        if plan["node"]:
+            if write("node", lambda: record.declare_node(node, resolved.drivers, []))[
+                1
+            ]:
+                wrote.append(f"node {node}")
         for r, why in plan["release"]:
             what = f"release {r['holder']} {r['resource']}"
             if write(what, lambda: record.release_reservation(r["id"], why))[0]:
@@ -477,16 +522,79 @@ class HostPlacement(Placement):
         for resource, amount in plan["shrink"]:
             self._capacity(node, resource, amount, wrote, write)
         if not failed:
-            same = (
-                before is not None
-                and before[1]["sha256"] == digest
-                and schema.canonical(before[1]["figures"]) == schema.canonical(figures)
-            )
             if not same:
                 value = {"sha256": digest, "figures": figures, "document": data}
                 record.record_reading(SOURCE, KIND, value)
                 wrote.append(f"document {digest[:12]}")
         return Declaration(wrote=tuple(wrote), failed=tuple(failed))
+
+    @staticmethod
+    def _lines(plan, node, digest, same):
+        """The lines `declare` writes for `plan`, in the order it writes
+        them."""
+        lines = [f"node {node}"] if plan["node"] else []
+        for r, why in plan["release"]:
+            lines.append(f"release {r['holder']} {r['resource']}: {why}")
+        lines += [f"capacity {r} = {a}" for r, a in plan["grow"]]
+        for kind, name, resource, amount, old in plan["actions"]:
+            if kind == "replace":
+                lines.append(f"replace {name} {resource}: {old['amount']} -> {amount}")
+            else:
+                lines.append(f"hold {name} {resource} {amount}")
+        lines += [f"capacity {r} = {a}" for r, a in plan["shrink"]]
+        if not same:
+            lines.append(f"document {digest[:12]}")
+        return lines
+
+    def declared(self):
+        """`(document, figures)` in force, or None before one: the document as
+        it was declared, its "measure" kept, and the figures recorded with it.
+        Rebuilt from the reading, and refused when what it rebuilds is not
+        what the reading's sha256 fingerprints."""
+        with self.record.reading():
+            stored = self._stored()
+        if stored is None:
+            return None
+        value = stored[1]
+        figures = value.get("figures") or {}
+        data = copy.deepcopy(value["document"])
+        for resource in figures.get("capacity") or {}:
+            data["capacity"][resource] = MEASURE
+        for consumer in data.get("consumer", []):
+            for resource in (figures.get("consumers") or {}).get(consumer["name"], {}):
+                consumer[resource] = MEASURE
+        if _digest(data) != value["sha256"]:
+            raise Refused(
+                "the declared document cannot be told from its record: declare "
+                "the document again"
+            )
+        return document_from_data(data), figures
+
+    def check_resize(self, name):
+        """The size of consumer `name` is the record's to set, or `Refused`
+        saying why not: no document, no probed consumer of that name, or its
+        memory a fixed amount in the declared document."""
+        current = self.declared()
+        document = current[0] if current else None
+        found = [c for c in (document.consumers if document else ()) if c.name == name]
+        if not found or found[0].probe is None:
+            raise Refused(f"no probed consumer {name!r} in the allocation document")
+        if "memory" not in (current[1].get("consumers") or {}).get(name, {}):
+            raise Refused(
+                f"{name}'s memory is a fixed amount in the declared document, "
+                f'not "{MEASURE}": put the size in the document and declare it'
+            )
+
+    def resize(self, name, size, *, now):
+        """Declare consumer `name`'s measured memory as `size`: the document in
+        force declared again with that figure, which replaces its reservation
+        in one event and records the figure. The Declaration, a Refusal in it
+        when the size does not fit."""
+        self.check_resize(name)
+        document, figures = self.declared()
+        figures = copy.deepcopy(figures)
+        figures["consumers"][name]["memory"] = size
+        return self.declare(document, figures=figures, now=now)
 
     def _capacity(self, node, resource, amount, wrote, write):
         what = f"capacity {resource}"
@@ -605,6 +713,9 @@ class HostPlacement(Placement):
             for name, found in shorts.items()
         }
         return {
+            "node": row is None
+            or row["drivers"] != sorted(document.drivers)
+            or row["labels"] != [],
             "release": release,
             "grow": grow,
             "shrink": shrink,

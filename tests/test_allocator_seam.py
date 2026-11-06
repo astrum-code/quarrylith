@@ -149,7 +149,8 @@ def test_placement_is_an_abstract_class_with_four_methods():
 
 def test_the_answers_are_frozen_with_the_pages_fields():
     """templet:3161 -- `Fit`, `Short` and `Refusal` are frozen dataclasses with
-    the page's fields in its order, and `CAUSES` is the page's tuple."""
+    the page's fields in its order (`Short`'s last, `note`, is optional), and
+    `CAUSES` is the page's tuple."""
     assert CAUSES == (
         "room",
         "measured",
@@ -175,7 +176,10 @@ def test_the_answers_are_frozen_with_the_pages_fields():
         "waits",
         "until",
         "holders",
+        "note",
     ]
+    plain = Short("node", None, None, None, None, None, False, None, [])
+    assert plain.note is None
     assert names(Refusal) == [
         "task",
         "run_class",

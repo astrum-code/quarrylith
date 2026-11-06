@@ -423,8 +423,8 @@ def test_alloc_place_and_show_tell_the_pressure(
     code, out, _ = alloc(capsys, "show", url)
     assert (
         "pressure: swap 14.0 GiB of 15.0 GiB, memory 30% free; new work is "
-        "refused; swap in use falls only when its pages are read back or the "
-        "host restarts"
+        "refused; it clears once 40% or more of memory is free again (a process "
+        "that exits frees its memory and its swap)"
     ) in out.splitlines()
     fake.swap_used = 0
     fake.pressure_fail = "probe_pressure: sysctl exited 1"
@@ -731,7 +731,6 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
     else:
         assert got["level"] in (1, 2, None)
     assert 0 <= got["swap_used"] <= got["swap_total"]
-    assert got["swap_total"] % MIB == 0
     assert 0 <= got["memory_free_percent"] <= 100
     if sys.platform == "darwin":
         env = {**os.environ, "LC_ALL": "C"}
@@ -743,6 +742,9 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
             for name, number in re.findall(r"(total|used|free) = ([0-9.]+)M", text)
         }
         assert set(apart) == {"total", "used", "free"}, text
+        # macOS adds swap files of whole mebibytes; a Linux swap partition's
+        # `SwapTotal` is usually a header page short of one
+        assert got["swap_total"] % MIB == 0
         assert abs(got["swap_total"] - apart["total"]) <= GIB, (got, text)
         assert abs(got["swap_used"] - apart["used"]) <= GIB, (got, text)
         level = subprocess.run(
@@ -752,6 +754,43 @@ def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
             env=env,
         ).stdout
         assert abs(got["memory_free_percent"] - int(level)) <= 15, (got, level)
+
+
+def test_the_memory_probes_run_by_their_full_paths_on_macos(monkeypatch):
+    """templet:3161 -- `probe_memory` and the process table run `sysctl`,
+    `vm_stat` and `ps` by their paths on macOS, so a PATH without `/usr/sbin`
+    does not make `measure` fail and every start `unmeasured`."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    seen = []
+
+    def run(probe, argv, *args, **kw):
+        seen.append(argv[0])
+        return {
+            "/usr/sbin/sysctl": "51539607552\n",
+            "/usr/bin/vm_stat": (
+                "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                "Pages free: 10.\nPages inactive: 10.\nPages purgeable: 10.\n"
+                "Pages speculative: 10.\n"
+            ),
+            "/bin/ps": "1 0 5 init\n",
+        }[argv[0]]
+
+    monkeypatch.setattr(real_probes, "_run", run)
+    assert real_probes.probe_memory()["memory_total"] == 51539607552
+    assert real_probes.process_table()
+    assert seen == ["/usr/sbin/sysctl", "/usr/bin/vm_stat", "/bin/ps"]
+
+
+def test_the_real_memory_probes_work_with_a_path_without_usr_sbin(monkeypatch):
+    """templet:3161 -- for real, here, read-only, with `PATH=/usr/bin:/bin`
+    (where `sysctl` is not): the memory read, the process table and the
+    pressure read all work."""
+    if sys.platform != "darwin":
+        pytest.skip("the fixed paths are macOS's")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert real_probes.probe_memory()["memory_total"] > 0
+    assert real_probes.process_table()
+    assert REAL_PROBE_PRESSURE()["level"] in (1, 2, 4)
 
 
 def test_a_file_that_is_not_there_is_absent_and_one_not_readable_is_an_error(

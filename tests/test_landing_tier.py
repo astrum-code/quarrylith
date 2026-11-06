@@ -390,6 +390,22 @@ def test_only_never_is_false_when_nothing_passed_the_cuts(backend, record, clock
 
 
 @over_backends
+def test_only_never_is_false_once_anything_started(backend, record, clock):
+    """templet:3163 -- "nothing started": a start the caller made without
+    asking the walk first still counts, whatever else was refused `never`."""
+    a, b = two_refusable(record, clock)
+    settings = Settings()
+    sequence = settle(record, settings)
+    first, second = sequence.candidates
+    walk = Walk(sequence, settings=settings)
+    assert walk.check(first) is None
+    walk.refused(first, refusal("memory", waits=False, text="never fits"))
+    assert walk.only_never is True
+    walk.started(second)
+    assert walk.only_never is False
+
+
+@over_backends
 def test_a_candidate_held_ahead_still_passed_rules_one_to_three(backend, record, clock):
     """templet:3163 -- "passed rules 1 to 3" is before the hold: a candidate
     held behind a refused one has passed, and was not refused `never`."""

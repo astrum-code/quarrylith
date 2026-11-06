@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The walk: the per-role cut, the landing limit and the holds behind a
-refused candidate, applied to a sequence in its own order.
+"""The walk: the per-role cut, the landing limit, the landing tier's cap and
+the holds behind a refused candidate, applied to a sequence in its own order.
 
 The caller walks the sequence, asks the allocator about each candidate and
 tells the walk what came of it:
@@ -16,6 +16,11 @@ tells the walk what came of it:
         else:
             walk.refused(c, answer)
     kept = walk.waiting
+
+A candidate refused `never` (it can never fit) is in `walk.never`; when a walk
+started nothing and every candidate that passed the first three checks was
+refused `never`, `walk.only_never` is true, and the caller orders again with
+`never=walk.never` so that the landing tier can open.
 
 A cut candidate is cut only for its own role's or repo's count, never for
 where it stands in its role's list: the sequence has already put the effort's
@@ -90,20 +95,34 @@ class Walk:
         self.waiting = {k: v for k, v in (waiting or {}).items() if k in known}
         self._roles = dict(sequence.counts["roles"])
         self._repos = dict(sequence.counts["repos"])
+        self._landing = sequence.counts.get("landing", 0)
+        #: {candidate key: the refusal's text}: refused `never` in this walk
+        self.never = {}
+        self._passed = []  # the keys that passed checks 1 to 3, in order
+        self._begun = 0  # the starts of this walk
         self._holds = []  # the held candidates of this walk, in order
 
     # -- the questions ------------------------------------------------------
 
+    @property
+    def only_never(self):
+        """Nothing started in this walk, and every candidate that passed the
+        first three checks (one at least) was refused `never`."""
+        if self._begun or not self._passed:
+            return False
+        return all(key in self.never for key in self._passed)
+
     def check(self, candidate, needs=None):
         """Why `candidate` may not start now, or None: its role is at its
-        instances, a repo it adds a change to is at the landing limit, or a
-        candidate ahead of it is held on a resource it needs. Tested in that
-        order; a reason is also put in `left`."""
-        why = (
-            self._role(candidate)
-            or self._limit(candidate)
-            or self._held(candidate, needs)
-        )
+        instances, a repo it adds a change to is at the landing limit, it is
+        a landing review and the landing tier is at its cap, or a candidate
+        ahead of it is held on a resource it needs. Tested in that order; a
+        reason is also put in `left`."""
+        why = self._role(candidate) or self._limit(candidate) or self._cap(candidate)
+        if not why:
+            if candidate.key not in self._passed:
+                self._passed.append(candidate.key)
+            why = self._held(candidate, needs)
         if why:
             self.left.append((candidate, why))
         return why
@@ -129,6 +148,14 @@ class Walk:
         ]
         return "; ".join(full) or None
 
+    def _cap(self, candidate):
+        if candidate.rule != "landing":
+            return None
+        slots = self.settings.review_slots
+        if self._landing >= slots:
+            return f"landing reviews: {self._landing} of {slots} busy"
+        return None
+
     def _held(self, candidate, needs):
         for hold in self._holds:
             short = hold.holds(needs)
@@ -150,7 +177,11 @@ class Walk:
     def started(self, candidate):
         """The candidate started: it is counted against its role and, unless
         it is exempt from the landing limit (as a live run of it would be),
-        against each repo it adds a change to; its wait and its hold end."""
+        against each repo it adds a change to, and a landing review against
+        the landing tier's cap; its wait and its hold end."""
+        self._begun += 1
+        if candidate.rule == "landing":
+            self._landing += 1
         if candidate.role is not None:
             self._roles[candidate.role] = self._roles.get(candidate.role, 0) + 1
         if not candidate.exempt:
@@ -167,6 +198,7 @@ class Walk:
         start."""
         self.left.append((candidate, refusal.text))
         if not refusal.waits:
+            self.never[candidate.key] = refusal.text
             return
         since = self.waiting.setdefault(candidate.key, self.sequence.at)
         self._holds = [h for h in self._holds if h.key != candidate.key]

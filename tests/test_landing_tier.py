@@ -42,6 +42,19 @@ def landing_review(rec, effort="0002", role="r1", labels=(), **kw):
     return SimpleNamespace(target=target, review=review, task=task)
 
 
+def land_run(rec, made):
+    """A live landing run of `made`: started under the rule `landing`."""
+    return rec.start_run(
+        made.task,
+        "alpha",
+        node="n1",
+        sandbox="process",
+        fence=grant(rec, made.review),
+        expect_s=60,
+        placed={"effort": "0002", "rule": "landing", "why": "a live landing"},
+    )
+
+
 def world(rec, clock):
     """An admitted effort 0001, a parked 0002 and a node."""
     admitted(rec)
@@ -230,11 +243,7 @@ def test_landing_runs_leave_the_floor_whole(backend, record, clock):
     reviews are both floor; an admitted review running takes one."""
     world(record, clock)
     live = landing_review(record, role="r9")
-    run_of(
-        record,
-        live.task,
-        fence=grant(record, live.review),
-    )
+    land_run(record, live)
     for name in ("a", "b", "c"):
         record.file_item(
             "review", name, "b", role=name, effort="0001", filed_by="alpha"
@@ -254,7 +263,7 @@ def test_at_most_review_slots_landing_runs_at_once(backend, record, clock):
     after the role cut and the landing limit and before a hold."""
     world(record, clock)
     live = landing_review(record, role="r0")
-    run_of(record, live.task, fence=grant(record, live.review))
+    land_run(record, live)
     made = [landing_review(record, role=f"r{n}") for n in (1, 2, 3)]
     settings = Settings(review_slots=2)
     sequence = settle(record, settings)
@@ -278,7 +287,7 @@ def test_the_cap_counts_only_landing_candidates(backend, record, clock):
     world(record, clock)
     for n in (0, 1):
         live = landing_review(record, role=f"r{n}")
-        run_of(record, live.task, fence=grant(record, live.review))
+        land_run(record, live)
     made = landing_review(record, role="r5")
     work = item(record, "work", role="a")
     settings = Settings(review_slots=2)

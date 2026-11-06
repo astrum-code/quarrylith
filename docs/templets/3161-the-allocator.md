@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: 77fd64c4
+    at: cdbee3ee
 ---
 
 # The allocator

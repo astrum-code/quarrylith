@@ -598,6 +598,7 @@ def test_the_sysctl_reads_run_in_the_c_locale_by_their_full_path(monkeypatch):
     for argv, kw in ran.calls:
         assert argv[0] == SYSCTL
         assert kw["env"]["LC_ALL"] == "C" and kw["env"]["PATH"]
+        assert kw["timeout"] == real_probes.PRESSURE_TIMEOUT_S
 
 
 def test_a_hung_sysctl_is_a_short_bounded_failed_read(monkeypatch):

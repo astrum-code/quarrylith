@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: fd5b459
+    at: 815cf8a
 ---
 
 # The allocator
@@ -177,7 +177,7 @@ its own name in the same group.
 ### The answers
 
 ```python
-CAUSES = ("room", "measured", "unmeasured", "budget",
+CAUSES = ("room", "measured", "unmeasured", "pressure", "budget",
           "undeclared", "unclassified", "driver", "node")
 
 @dataclass(frozen=True)
@@ -229,7 +229,8 @@ allocator: task 12 (agent) refused on laptop: memory 2.0 GiB asked, 1.3 GiB free
   run holds (standing consumers and tasks' own), over the span from now.
   When it is true, the finish of runs alone can make room. When it is false,
   nothing fits until a declaration changes.
-- `measured` and `unmeasured`: always true. Memory frees and a reading comes.
+- `measured`, `unmeasured` and `pressure`: always true. Memory frees, a
+  reading comes and pressure eases.
 - `budget`: true, on `resource` `budget.<provider>`. `until` is the reading's `resets_at` at a stop or a
   rejection, and None while pacing at a warning, and at a stop that names no
   end, whose `detail` says so.
@@ -238,9 +239,10 @@ allocator: task 12 (agent) refused on laptop: memory 2.0 GiB asked, 1.3 GiB free
 
 **A short with `resource` None** names no one resource. With `waits` false
 (`driver`, `node`) the task cannot run on this node at all. With `waits` true
-(`unmeasured`) it means **every resource**: the host's reading is missing or
-stale, so every start on the node would be refused the same way until a
-reading comes, and the order holds everything behind it.
+(`unmeasured`, `pressure`) it means **every resource**: the host's reading is
+missing or stale, or the host is under memory pressure, so every start on the
+node would be refused the same way until a reading comes or the pressure
+eases, and the order holds everything behind it.
 
 **What the order may rely on.** The order (step 4, `3163-the-order.md`)
 reads these names and fields, and they stay as they are:
@@ -540,10 +542,75 @@ document names. On top of the seam it has:
   3. **the budget**: `budget_shorts`, below (`budget`);
   4. **the measurement**: the latest `host/measure` reading, within
      `floor.max_age_s`, or `unmeasured`. Then memory: `available - need >=
-     floor.memory`. Disk: `disk_free - need >= floor.disk` (`measured`).
+     floor.memory`. Disk: `disk_free - need >= floor.disk` (`measured`);
+  5. **the pressure**, read from the host at this call and never from a
+     stored reading (below, "Memory pressure"): `pressure`, or `unmeasured`
+     when the read fails.
 
   It fits only when nothing is short. The table check is exactly the one
   `start_run` makes, so a Fit fails at `start_run` only through a race.
+- **Memory pressure** (user, 2026-11-06). The measured check counts memory
+  macOS could reclaim and cannot see swap: on the night of 2026-11-05 a 28 GB
+  local model had the host at 30% free with 14 GB of swap in use, and the
+  check would still have said yes, 14.4 GiB available against the 4 GiB floor.
+  So `place` and `hold` also refuse new work when the host reports memory
+  pressure, or its swap is nearly full while memory is short. It can hold
+  work back too long, and that is accepted: it must not start work on a host
+  that is already struggling.
+  - **The reading is live.** `HostPlacement` calls `probes.probe_pressure()`
+    at each `place`, `hold` and `headroom`, before it opens its reading of the
+    record, never from a stored reading: a check of a reading up to
+    `max_age_s` old cannot stop what starts in that window. Two `sysctl` reads
+    cost milliseconds. So `place` is a function of the record, `now` **and the
+    host's pressure at that moment**.
+  - **The probe.** `probe_pressure()` gives `{"level", "swap_used",
+    "swap_total", "memory_free_percent", "method"}`. On macOS it is three
+    `sysctl -n` calls: `kern.memorystatus_vm_pressure_level` (the kernel's 1
+    normal, 2 warn, 4 critical), `vm.swapusage` and `kern.memorystatus_level`
+    (the share of memory that is free, a whole percent from 0 to 100, parsed
+    strictly). On Linux the level is 2 when
+    `/proc/pressure/memory`'s `full avg10` is 5.0 or more (`PSI_FULL_WARN`),
+    else 1, the swap is `SwapTotal` less `SwapFree` in `/proc/meminfo`, and the
+    free share is `MemAvailable` over `MemTotal` there, rounded down. A
+    figure the host does not have (no PSI file, a platform with no reader) is
+    None, and is not refused for that alone. A read the host has and cannot
+    make raises `ProbeError`. **The reads run in the `C` locale** (`_run` sets
+    `LC_ALL=C`): under a comma-decimal locale `sysctl` writes `7168,00M`, which
+    would read as 7168 bytes and leave the swap rule silently off. The
+    `vm.swapusage` text is parsed whole and strictly (`total = N.NNU  used =
+    N.NNU  free = N.NNU`, a capital K, M, G or T, an optional trailing
+    parenthesis such as `(encrypted)`): a figure with no unit, a lowercase unit,
+    a comma, a space or anything else off the format is a `ProbeError`, never
+    bytes. `sysctl` is run by its path, `/usr/sbin/sysctl`, and each of the two
+    reads has a bound of 3 seconds (`PRESSURE_TIMEOUT_S`), so one stuck `sysctl`
+    cannot cost a placement long.
+  - **The rule** (`measure.pressure_shorts`; the swap's half is one function,
+    `swap_refused`) (user, 2026-11-06, which also settled the swap): refuse at a
+    level of warn (2) or worse, on its own; and refuse when swap is nearly full
+    **and** memory is short: swap used at least `SWAP_FLOOR` (8 GiB) **and** at
+    least `SWAP_SHARE_PERCENT` (85) of the swap total, **and** the free share of
+    memory under `MEMORY_FREE_UNDER_PERCENT` (40). macOS grows its swap on
+    demand, so a share alone reads "nearly full" on a small swap (90% of 1 GiB
+    is no crisis), and the floor alone would refuse a large swap that has
+    room. 8 GiB is twice the memory floor and a sixth of the host's 48 GiB; the
+    night above had 14 of 15 GiB with 30% of memory free. And macOS leaves old
+    pages in swap for days, so swap alone would refuse a calm host: 9.2 of
+    10 GiB with 84% of memory free is not struggling, and is not refused. A host
+    with no free figure (None) is not shown short, so its swap alone never
+    refuses. They are named constants, not document settings.
+  - **The refusal.** One `pressure` short per cause, `resource` None, waits
+    true, `until` None, whose `detail` says what was read: `memory pressure is
+    warn` (or `critical`), `swap 14.0 GiB of 15.0 GiB, memory 30% free` (with
+    `free` and `capacity` the unused swap and the total). A read that fails is an
+    `unmeasured` short whose `detail` names the read, never a yes.
+  - **What it touches.** `hold` of new work (`measured` true) is refused as
+    `place` is; `hold` with `measured=False`, and so `declare`, is not, since a
+    consumer already running is in the host's state already. `headroom` of the
+    declared node is 0 for every resource while `place` would refuse for it.
+    `alloc show` has a `pressure:` line that says the same, with the free share
+    of memory, and for a swap refusal says that it clears once 40% or more of
+    memory is free again (a process that exits frees its memory and its swap). A run already started, and
+    `measure`, are never stopped by it.
 - **`measure(*, now)`**. It runs the probes and writes **one** reading,
   `record_reading("host", "measure", value)`, with value `{"node",
   "memory_total", "memory_available", "method", "disk_free", "consumers":
@@ -761,7 +828,7 @@ them is either a resource here or dropped:
 | command | does |
 |---|---|
 | `alloc declare DOC URL [--dry-run] [--remeasure]` | `resolve` (the recorded figures kept, unless `--remeasure`), then `declare`. Prints a line per write (`wrote node laptop`), or with `--dry-run` per write it would make (`would write ...`) and every refusal, and writes nothing. A second declare of the same document says `nothing to write` |
-| `alloc show URL [--json] [--now MS]` | per node and resource: capacity, the standing consumers, the tasks' own holds and the runs' reservations, free, the measured figure, the drift; the document's sha256 and age, the host reading's age, the consumers that are absent and the allocator's latest observations |
+| `alloc show URL [--json] [--now MS]` | the host's memory pressure now (a `pressure:` line); per node and resource: capacity, the standing consumers, the tasks' own holds and the runs' reservations, free, the measured figure, the drift; the document's sha256 and age, the host reading's age, the consumers that are absent and the allocator's latest observations |
 | `alloc place URL TASK [--json] [--now MS]` | `place`, now: the Fit (`fit:`, `needs:`, `why:` lines) or the Refusal's `text`, which exits 2 |
 | `alloc clear URL PROVIDER --why TEXT [--now MS]` | clears the provider's stop that names no reset time: one `cleared` reading, with who (the actor) and why, in each such window (`cleared anthropic five_hour (by lester): <why>`), and says which windows still hold until their reset (`anthropic seven_day: still held until 2026-11-06T19:27Z, its own reset`). A stop with only readable future resets is refused (exit 2), naming them; a provider with no stop is `nothing to clear: <provider> has no stop`, exit 0, and writes nothing |
 | `alloc measure URL` | `measure`, once: the host's memory and disk, each consumer's resident size, the consumers that are absent and the drift |
@@ -906,8 +973,9 @@ What looked reusable but was not:
    reservations go through `reserve` or a replace, each refused whole. No
    allocator write can put reservations past capacity.
 2. **`place` and `headroom` write nothing.** They are functions of the
-   record at one seq and `now`, so the same operations at the same `now`s
-   give the same answer on SQLite and on Henge.
+   record at one seq and `now`, and of the host's memory pressure read at the
+   call, so the same operations at the same `now`s on a host at the same
+   pressure give the same answer on SQLite and on Henge.
 3. **One candidate in, one answer out.** `place` reads no other candidate,
    never orders, and never refuses one task because of another task's
    standing in a queue. Only reservations that exist count.
@@ -919,7 +987,9 @@ What looked reusable but was not:
    `reserve.release` or replace ever follows from a measurement.
 6. **A start must fit three ways**: the table (`free`), the budget allowance
    and the measured room. A host reading missing or stale refuses as
-   `unmeasured`, and never passes on an assumption.
+   `unmeasured`, and never passes on an assumption. A host under memory
+   pressure, or with its swap nearly full and memory under 40% free,
+   refuses new work whatever the room, and a pressure read that fails is `unmeasured`.
 7. **Effective needs never lower a task's own.** Per resource, they are at
    least what the task stored.
 8. **One live standing reservation per (node, holder, resource).** `hold`
@@ -1061,6 +1131,21 @@ which pass.
   `measured`, with waits true, although the table has room
 - [ ] with no host reading within `floor.max_age_s`, `place` refuses
   `unmeasured`: one short with `resource` None and waits true
+- [ ] a host under memory pressure refuses new work (user, 2026-11-06):
+  `place` and `hold` refuse `pressure` at a level of warn or critical, and at
+  swap used of 8 GiB or more and 85% or more of its total **with memory under
+  40% free** (14.0 of 15.0 GiB at 30% free refused; the same at 40% or more,
+  9.2 of 10 GiB at 84% free, 900 of 1000 MiB, 7 of 7.5 GiB and 20 of 40 GiB
+  not; 39% refused and 40% not), although the measured room says yes; the reading is made afresh at each call; a read that
+  fails is refused `unmeasured`, naming the read, and a host with no such
+  reading is not refused; `hold` with `measured=False` is not; `headroom` is 0
+  under pressure; `alloc place` exits 2 and `alloc show` says it; a run already
+  started is untouched. The probe is tested on the kernel's `sysctl` text and,
+  for Linux, on a hand-written file, and once for real on the test host,
+  compared with `sysctl`'s own text read apart, under a comma-decimal locale
+  too; a swap text off the kernel's format (a comma, no unit, a lowercase
+  unit) is a failed read, and the reads run in the `C` locale; the free share
+  is a strict whole percent, and a failed read of it is `unmeasured`
 - [ ] a consumer measured past its declaration by more than the tolerance,
   and measured available memory short of the table's free beyond it, are
   each in the reading's `drift`. Each writes one observation when it begins
@@ -1450,6 +1535,27 @@ later: nothing in the effort runs sessions through the queue.
   uses; and a pid file left behind while another process holds the number is
   read as that process, a limit named under the measurement and left as it is
   (this PR)
+- 2026-11-06 proposed: the allocator also refuses new work when the host is
+  under memory pressure or its swap is nearly full: a `pressure` cause after
+  `unmeasured` in `CAUSES`, read live from `probes.probe_pressure()` at each
+  `place`, `hold` and `headroom` (so `place` also depends on the host's
+  pressure at that moment, invariant 2), refused at a level of warn or worse
+  and at swap used past 8 GiB and 85% of its total while memory is under 40%
+  free (the user's decision of the same day, after 9.2 of 10 GiB of old pages
+  at 84% free showed that swap alone refuses a calm host), a failed read
+  being `unmeasured`; `hold` of a consumer already running (`measured=False`) is not
+  refused, `headroom` is 0 under pressure and `alloc show` has a `pressure:`
+  line. The user decided it on 2026-11-06 after the night of 2026-11-05, when
+  the check passed at 14.4 GiB available with 14 GB of swap in use (this PR)
+- 2026-11-06 proposed: the pressure reads run in the `C` locale and the swap
+  text is parsed strictly (a failed read when off the kernel's format), after
+  the review found a comma-decimal locale reading `7168,00M` as 7168 bytes;
+  `sysctl` is run by its path with a 3-second bound per read; `alloc show` says
+  what clears a swap refusal (the memory being free again, not the swap
+  falling); `probe_memory` and the process table run `sysctl`, `vm_stat` and
+  `ps` by their paths on macOS; and the swap counts only with memory short, by
+  one more read (`kern.memorystatus_level`, or `MemAvailable` over `MemTotal`),
+  the detail naming both figures (this PR)
 - 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`
   at its first sample, not after the window; a command's phase that passes the
   slow bound says `<phase>: still running, N s` while it runs, as well as its

@@ -155,6 +155,7 @@ def test_the_answers_are_frozen_with_the_pages_fields():
         "room",
         "measured",
         "unmeasured",
+        "pressure",
         "budget",
         "undeclared",
         "unclassified",

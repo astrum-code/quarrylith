@@ -1,0 +1,812 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The allocator refuses new work on a host under memory pressure
+(templet:3161, the memory-pressure addition): `place` and `hold` read the
+host's pressure level and its swap live, and refuse at warn or worse, or
+with the swap nearly full. The reads are injected, so a test sets each level;
+the real read runs once on the test host, read-only. Every test that touches
+a record runs over every backend in BACKENDS."""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+import pytest
+from backends import one_writer, over_backends
+from conftest import REAL_PROBE_PRESSURE
+from test_allocator_commands import FakeHost, alloc
+from test_allocator_host import GIB, declared, host_reading, make_task
+
+from quarrylith.allocator import Fit, Refusal
+from quarrylith.allocator import probes as real_probes
+from quarrylith.allocator.host import HostPlacement, ProbeError
+from quarrylith.allocator import measure
+from quarrylith.allocator.seam import CAUSES
+
+MIB = 2**20
+
+
+class Host:
+    """The probes of a host whose memory pressure a test sets: every other probe
+    is the real one. `reads` counts the reads."""
+
+    def __init__(self, level=1, used=0, total=2 * GIB, free=80, fail=None):
+        self.level, self.used, self.total, self.fail = level, used, total, fail
+        self.free = free  # the share of memory that is free, in percent
+        self.reads = 0
+
+    def probe_pressure(self):
+        self.reads += 1
+        if self.fail:
+            raise ProbeError(self.fail)
+        return {
+            "level": self.level,
+            "swap_used": self.used,
+            "swap_total": self.total,
+            "memory_free_percent": self.free,
+            "method": "given",
+        }
+
+    def __getattr__(self, name):
+        return getattr(real_probes, name)
+
+
+def setup(record, clock, host):
+    """A declared node with a fresh generous host reading, a placement that
+    reads `host`, and a task that fits it."""
+    declared(record, clock)
+    return HostPlacement(record, probes=host), make_task(record)
+
+
+def pressure_of(answer):
+    """The one `pressure` short of a refusal."""
+    assert isinstance(answer, Refusal), answer
+    (short,) = [s for s in answer.shorts if s.cause == "pressure"]
+    return short
+
+
+# -- the cause ----------------------------------------------------------------------
+
+
+def test_pressure_is_a_cause_beside_the_others_in_the_pages_order():
+    """templet:3161 -- `CAUSES` has `pressure` after `unmeasured` and before
+    `budget`."""
+    at = CAUSES.index("pressure")
+    assert CAUSES[at - 1] == "unmeasured" and CAUSES[at + 1] == "budget"
+
+
+# -- the level ----------------------------------------------------------------------
+
+
+@over_backends
+def test_place_refuses_at_warn_and_critical_and_names_the_level(effort, clock):
+    """templet:3161 -- `place` on a host whose memory pressure is warn (2) or
+    critical (4) is refused with one `pressure` short that waits, whose detail
+    names the level; at normal (1) the task fits."""
+    record = effort
+    host = Host()
+    placement, task = setup(record, clock, host)
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    for level, word in ((2, "warn"), (4, "critical")):
+        host.level = level
+        answer = placement.place(task, now=clock())
+        short = pressure_of(answer)
+        assert short.detail == f"memory pressure is {word}"
+        assert (short.node, short.resource, short.waits) == ("laptop", None, True)
+        assert answer.waits is True and short.until is None
+        assert f"memory pressure is {word}" in answer.text
+        assert "\n" not in answer.text
+    host.level = 1
+    assert isinstance(placement.place(task, now=clock()), Fit)
+
+
+@over_backends
+def test_pressure_refuses_where_the_measured_room_says_yes(effort, clock):
+    """templet:3161 -- the night that began it: 14.4 GiB available against a
+    4 GiB floor, and the Mac at warn with 14 GiB of 15 GiB swap in use. The
+    measured check passes; `place` refuses on the pressure alone, and on the
+    swap alone."""
+    record = effort
+    host = Host(level=2, used=14 * GIB, total=15 * GIB, free=30)
+    placement, task = setup(record, clock, host)
+    clock.step()
+    host_reading(record, clock, available=14 * GIB + 400 * MIB)
+    answer = placement.place(task, now=clock())
+    assert [s.cause for s in answer.shorts] == ["pressure", "pressure"]
+    host.level = 1
+    answer = placement.place(task, now=clock())
+    assert [s.detail for s in answer.shorts] == [
+        "swap 14.0 GiB of 15.0 GiB, memory 30% free"
+    ]
+    host.used, host.level = 0, 4
+    answer = placement.place(task, now=clock())
+    assert [s.detail for s in answer.shorts] == ["memory pressure is critical"]
+
+
+# -- the swap -----------------------------------------------------------------------
+
+#: (used, total, free %, refused): swap refuses when it is nearly full (a floor
+#: and a share of the total, both) AND free memory is under 40%. 14 of 15 GiB at
+#: 30% free is the night's; 9.2 of 10 GiB at 84% free is the real state of the
+#: morning after (macOS leaves cold pages in swap for days); the small swaps are
+#: macOS's.
+SWAPS = [
+    (14 * GIB, 15 * GIB, 30, True),
+    (14 * GIB, 15 * GIB, 84, False),  # the same swap, memory not short
+    (9 * GIB + 204 * MIB, 10 * GIB, 84, False),  # 9.2 of 10 GiB: this morning
+    (9 * GIB + 204 * MIB, 10 * GIB, 39, True),  # the same swap, memory short
+    (14 * GIB, 15 * GIB, 39, True),  # just under 40%
+    (14 * GIB, 15 * GIB, 40, False),  # 40% free: not under it
+    (14 * GIB, 15 * GIB, 41, False),
+    (14 * GIB, 15 * GIB, 0, True),
+    (14 * GIB, 15 * GIB, None, False),  # no free figure: memory not shown short
+    (8 * GIB, 9 * GIB, 30, True),  # at the floor and past the share
+    (8 * GIB - MIB, 9 * GIB, 30, False),  # a byte-ish short of the floor
+    (900 * MIB, 1000 * MIB, 30, False),  # 90% of a small swap: no crisis
+    (300 * MIB, 330 * MIB, 30, False),
+    (7 * GIB, 7 * GIB + 512 * MIB, 30, False),  # 93% below the floor
+    (20 * GIB, 40 * GIB, 30, False),  # past the floor, half full: room to grow
+    (8 * GIB, 10 * GIB, 30, False),  # at the floor, 80%: under the share
+    (17 * GIB // 2, 10 * GIB, 30, True),  # exactly the 85% share
+    (0, 0, 30, False),  # no swap at all
+]
+
+
+@pytest.mark.parametrize("used,total,free,refused", SWAPS)
+def test_the_swap_rule_is_a_floor_a_share_and_short_memory_together(
+    used, total, free, refused
+):
+    """templet:3161 -- the host is refused for its swap when swap used is at
+    least 8 GiB and at least 85% of the swap total AND memory is under 40%
+    free, and only then: a small swap at 90% is no crisis, a large one half
+    full has room, and a nearly full swap with memory to spare is old pages."""
+    shorts = measure.pressure_shorts(
+        {
+            "level": 1,
+            "swap_used": used,
+            "swap_total": total,
+            "memory_free_percent": free,
+        },
+        "",
+        "laptop",
+    )
+    assert bool(shorts) is refused
+    if not refused:
+        return
+    (short,) = shorts
+    shown = lambda n: f"{n / GIB:.1f} GiB"  # noqa: E731
+    assert short.cause == "pressure"
+    assert short.detail == f"swap {shown(used)} of {shown(total)}, memory {free}% free"
+    assert (short.capacity, short.free, short.waits) == (total, total - used, True)
+
+
+def test_the_warn_level_refuses_alone_whatever_the_free_memory():
+    """templet:3161 -- warn or worse refuses on its own: with plenty of memory
+    free, with no free figure, and with no swap."""
+    for free in (95, 40, None):
+        value = {"level": 2, "swap_used": 0, "swap_total": 0}
+        value["memory_free_percent"] = free
+        (short,) = measure.pressure_shorts(value, "", "laptop")
+        assert short.detail == "memory pressure is warn"
+
+
+@over_backends
+def test_place_refuses_a_nearly_full_swap_and_not_a_small_one(effort, clock):
+    """templet:3161 -- through `place`: 14.0 of 15.0 GiB of swap at 30% free
+    memory is refused, with both figures in the refusal's line; the same swap at
+    84% free (and 9.2 of 10 GiB at 84%, the morning after) is not; 900 of
+    1000 MiB is not."""
+    record = effort
+    host = Host(used=14 * GIB, total=15 * GIB, free=30)
+    placement, task = setup(record, clock, host)
+    answer = placement.place(task, now=clock())
+    want = "swap 14.0 GiB of 15.0 GiB, memory 30% free"
+    assert pressure_of(answer).detail == want
+    assert want in answer.text
+    host.free = 84
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    host.used, host.total = 9 * GIB + 204 * MIB, 10 * GIB
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    host.free = 30
+    assert pressure_of(placement.place(task, now=clock()))
+    host.used, host.total = 900 * MIB, 1000 * MIB
+    assert isinstance(placement.place(task, now=clock()), Fit)
+
+
+# -- hold ---------------------------------------------------------------------------
+
+
+@over_backends
+def test_hold_refuses_under_pressure_but_a_declared_consumer_does_not(effort, clock):
+    """templet:3161 -- `hold` of new work (a task's own VM, a standing
+    reservation) is refused as `place` is; `hold` with `measured=False`, which
+    `declare` uses for a consumer already running, is not, and `declare`
+    itself writes under pressure."""
+    record = effort
+    host = Host(level=2)
+    placement, task = setup(record, clock, host)
+    held = placement.hold("vm:one", {"memory": GIB}, task=task, now=clock())
+    assert isinstance(held, Refusal)
+    assert pressure_of(held).detail == "memory pressure is warn"
+    assert held.task == task
+    assert [
+        r for r in record.read("reservations", live=True) if r["holder"] == "vm:one"
+    ] == []
+    ids = placement.hold("seen", {"memory": GIB}, measured=False, now=clock())
+    assert isinstance(ids, list) and ids
+    again = HostPlacement(record, probes=host).declare(
+        placement._stored()[0],
+        figures={"capacity": {"memory": 48 * GIB, "disk": 200 * GIB}, "consumers": {}},
+        now=clock(),
+    )
+    assert again.ok, again
+    host.level = 1
+    assert isinstance(
+        placement.hold("vm:one", {"memory": GIB}, task=task, now=clock()), list
+    )
+
+
+# -- a read that fails, and a host with none ----------------------------------------
+
+
+@over_backends
+def test_a_failed_read_is_refused_unmeasured_naming_the_read(effort, clock):
+    """templet:3161 -- a read that fails is never a yes: `place` and `hold`
+    refuse `unmeasured` (every resource, waits), saying which read failed, and
+    the next good read lets the task fit."""
+    record = effort
+    host = Host(fail="probe_pressure: sysctl exited 1")
+    placement, task = setup(record, clock, host)
+    for answer in (
+        placement.place(task, now=clock()),
+        placement.hold("x", {"memory": 1}, now=clock()),
+    ):
+        assert isinstance(answer, Refusal)
+        (short,) = answer.shorts
+        assert (short.cause, short.resource, short.waits) == ("unmeasured", None, True)
+        assert "probe_pressure: sysctl exited 1" in short.detail
+        assert "probe_pressure: sysctl exited 1" in answer.text
+    host.fail = None
+    assert isinstance(placement.place(task, now=clock()), Fit)
+
+
+@over_backends
+def test_a_host_with_no_pressure_reading_is_not_refused_for_that(effort, clock):
+    """templet:3161 -- a platform with no memory pressure level, or no swap
+    figures, gives None for them, and `place` and `hold` do not refuse for the
+    missing reading alone."""
+    record = effort
+    host = Host()
+    host.level, host.used, host.total = None, None, None
+    placement, task = setup(record, clock, host)
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    assert isinstance(placement.hold("x", {"memory": 1}, now=clock()), list)
+    host.level, host.used, host.total = 2, None, None
+    assert pressure_of(placement.place(task, now=clock())).detail.endswith("warn")
+    host.level, host.used, host.total = None, 14 * GIB, 15 * GIB
+    host.free = 30
+    assert pressure_of(placement.place(task, now=clock())).detail.startswith("swap")
+    host.free = None  # no free figure: memory is not shown short
+    assert isinstance(placement.place(task, now=clock()), Fit)
+
+
+# -- fresh where it decides ---------------------------------------------------------
+
+
+@over_backends
+def test_each_place_and_hold_reads_the_host_afresh(effort, clock):
+    """templet:3161 -- the reading is made at each `place` and `hold`, never
+    taken from the record: a host reading written a second ago says nothing
+    of the pressure, and a change between two calls changes the second's
+    answer. `place` makes one read, and writes nothing."""
+    record = effort
+    host = Host()
+    placement, task = setup(record, clock, host)
+    host_reading(record, clock)  # a fresh host measurement, calm by itself
+    mark = record.head()
+    before = host.reads
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    host.level = 2
+    assert isinstance(placement.place(task, now=clock()), Refusal)
+    host.level = 1
+    assert isinstance(placement.place(task, now=clock()), Fit)
+    assert host.reads == before + 3 and record.head() == mark
+    assert isinstance(placement.hold("a", {"memory": 1}, now=clock()), list)
+    assert host.reads == before + 4
+    host.level = 2
+    assert isinstance(placement.hold("b", {"memory": 1}, now=clock()), Refusal)
+    assert host.reads == before + 5
+
+
+# -- headroom -----------------------------------------------------------------------
+
+
+@over_backends
+def test_headroom_is_nothing_on_a_node_under_pressure(effort, clock):
+    """templet:3161 -- while `place` refuses for pressure (or a failed read),
+    `headroom` of the declared node is 0 for every resource; otherwise it is
+    what it was."""
+    record = effort
+    host = Host()
+    placement, task = setup(record, clock, host)
+    calm = placement.headroom(now=clock())["laptop"]
+    assert calm["memory"] > 0 and calm["slots.claude-code"] > 0
+    for host_ in (Host(level=2), Host(used=14 * GIB, total=15 * GIB, free=30)):
+        placement.probes = host_
+        room = placement.headroom(now=clock())["laptop"]
+        assert set(room) == set(calm) and set(room.values()) == {0}
+    placement.probes = Host(fail="probe_pressure: broke")
+    assert set(placement.headroom(now=clock())["laptop"].values()) == {0}
+    placement.probes = host
+    assert placement.headroom(now=clock())["laptop"] == calm
+
+
+# -- a run already started, and a consumer measured ---------------------------------
+
+
+@over_backends
+def test_pressure_stops_nothing_that_already_runs(effort, clock):
+    """templet:3161 -- a run started before the pressure keeps its
+    reservation and finishes; `measure` of the host, and the reservation it
+    holds, are the same under pressure: it only refuses new work."""
+    record = effort
+    host = Host()
+    placement, task = setup(record, clock, host)
+    fit = placement.place(task, now=clock())
+    record.edit_task(task, needs=fit.needs)
+    run = record.start_run(
+        task, "w", node=fit.node, sandbox=fit.sandbox, fence=None, expect_s=60
+    )
+    held = record.read("reservations", live=True, task=task)
+    host.level = 4
+    other = make_task(record)
+    assert isinstance(placement.place(other, now=clock()), Refusal)
+    assert record.read("reservations", live=True, task=task) == held
+    assert placement.measure(now=clock())["node"] == "laptop"
+    record.finish_run(run, "done", "ok", footprint={}, cost={})
+    assert record.read("reservations", live=True, task=task) == []
+
+
+# -- the commands -------------------------------------------------------------------
+
+
+@over_backends
+def test_alloc_place_and_show_tell_the_pressure(
+    backend, effort, url, clock, capsys, monkeypatch
+):
+    """templet:3161 -- `alloc place` exits 2 with the refusal's text, whose
+    reason is the pressure, and `--json` carries the short; `alloc show` has a
+    `pressure:` line that says new work is refused, or that the host is calm;
+    no output has more than a figure or a name."""
+    import quarrylith.alloc_cli as alloc_cli
+
+    fake = FakeHost()
+    monkeypatch.setattr(alloc_cli, "PROBES", fake)
+    record = effort
+    declared(record, clock)
+    task = make_task(record)
+    now = clock()
+    one_writer(backend, record)
+    args = ("place", url, str(task), "--now", str(now))
+    code, out, err = alloc(capsys, *args)
+    assert code == 0, (out, err)
+    code, out, err = alloc(capsys, "show", url)
+    assert code == 0 and (
+        "pressure: normal, swap 0.0 GiB of 2.0 GiB, memory 80% free" in out.splitlines()
+    )
+    fake.level = 2
+    code, out, err = alloc(capsys, *args)
+    assert code == 2 and err == ""
+    assert "memory pressure is warn" in out and out.count("\n") == 1
+    code, out, _ = alloc(capsys, *args, "--json")
+    shorts = json.loads(out)["refusal"]["shorts"]
+    assert [(s["cause"], s["detail"]) for s in shorts] == [
+        ("pressure", "memory pressure is warn")
+    ]
+    code, out, _ = alloc(capsys, "show", url)
+    assert "pressure: memory pressure is warn; new work is refused" in out.splitlines()
+    code, out, _ = alloc(capsys, "show", url, "--json")
+    assert json.loads(out)["pressure"]["refused"] == ["memory pressure is warn"]
+    fake.level, fake.swap_used, fake.swap_total = 1, 14 * GIB, 15 * GIB
+    fake.free = 84  # the swap is nearly full and memory is not short: no refusal
+    code, out, _ = alloc(capsys, *args)
+    assert code == 0, out
+    code, out, _ = alloc(capsys, "show", url)
+    assert (
+        "pressure: normal, swap 14.0 GiB of 15.0 GiB, memory 84% free"
+        in out.splitlines()
+    )
+    fake.free = 30
+    code, out, _ = alloc(capsys, *args)
+    assert code == 2 and "swap 14.0 GiB of 15.0 GiB, memory 30% free" in out
+    code, out, _ = alloc(capsys, "show", url)
+    assert (
+        "pressure: swap 14.0 GiB of 15.0 GiB, memory 30% free; new work is "
+        "refused; it clears once 40% or more of memory is free again (a process "
+        "that exits frees its memory and its swap)"
+    ) in out.splitlines()
+    fake.swap_used = 0
+    fake.pressure_fail = "probe_pressure: sysctl exited 1"
+    code, out, _ = alloc(capsys, *args)
+    assert code == 2 and "unmeasured: " in out and "sysctl exited 1" in out
+    code, out, _ = alloc(capsys, "show", url)
+    assert any(
+        line.startswith("pressure: not read (probe_pressure: sysctl exited 1)")
+        for line in out.splitlines()
+    ), out
+
+
+# -- the probe ----------------------------------------------------------------------
+
+SYSCTL = "/usr/sbin/sysctl"
+SWAPUSAGE = "total = 7168.00M  used = 5913.25M  free = 1254.75M  (encrypted)\n"
+PSI = (
+    "some avg10=0.00 avg60=0.12 avg300=0.40 total=123456\n"
+    "full avg10={full} avg60=0.00 avg300=0.00 total=789\n"
+)
+MEMINFO = (
+    "MemTotal:       {memtotal} kB\n"
+    "MemAvailable:   {available} kB\n"
+    "SwapTotal:      {total} kB\n"
+    "SwapFree:       {free} kB\n"
+)
+
+
+def test_swapusage_is_read_in_bytes():
+    """templet:3161 -- `vm.swapusage`'s text gives the total and used swap in
+    bytes, in whatever unit macOS wrote (K, M, G or T)."""
+    parse = real_probes.parse_swapusage
+    assert parse(SWAPUSAGE) == (7168 * MIB, round(5913.25 * MIB))
+    assert parse("total = 2.00G  used = 1.50G  free = 0.50G") == (2 * GIB, 3 * GIB // 2)
+    assert parse("total = 0.00M  used = 0.00M  free = 0.00M") == (0, 0)
+    for bad in ("", "total = x", "total = 5M  free = 1M"):
+        with pytest.raises(ProbeError, match="swapusage"):
+            parse(bad)
+
+
+#: What a figure off the kernel's format looks like. Each reads as bytes, or as
+#: a wrong size, if it is let through: so each is a failed read.
+OFF_FORMAT = {
+    "a comma decimal (a locale)": (
+        "total = 7168,00M  used = 5745,25M  free = 1422,75M  (encrypted)"
+    ),
+    "a figure with no unit": "total = 7168.00  used = 5745.25  free = 1422.75",
+    "a lowercase unit": "total = 7168.00m  used = 5745.25m  free = 1422.75m",
+    "a space before the unit": "total = 7168.00 M  used = 5745.25 M  free = 1422.75 M",
+    "a unit the kernel does not write": "total = 7168.00P  used = 1.00P  free = 1.00P",
+    "a thousands separator": "total = 7,168.00M  used = 5,745.25M  free = 1.00M",
+    "a negative figure": "total = 7168.00M  used = -5.00M  free = 1.00M",
+    "text after the figures": "total = 1.00M  used = 1.00M  free = 0.00M  (x) more",
+    "text before the figures": "swap: total = 1.00M  used = 1.00M  free = 0.00M",
+    "a number in another script": "total = \u0667168.00M  used = 1.00M  free = 1.00M",
+    "no free figure": "total = 7168.00M  used = 5745.25M",
+}
+
+
+@pytest.mark.parametrize("why", sorted(OFF_FORMAT))
+def test_a_swapusage_off_the_kernels_format_is_a_failed_read_not_bytes(why):
+    """templet:3161 -- the swap text is read strictly, whole: a figure with no
+    unit, a lowercase unit, a comma, a space or anything else off the kernel's
+    `total = N.NNU  used = N.NNU  free = N.NNU` is a ProbeError and never read
+    as bytes, which would make the swap rule never fire without a word."""
+    with pytest.raises(ProbeError, match="swapusage"):
+        real_probes.parse_swapusage(OFF_FORMAT[why])
+
+
+def test_swapusage_takes_the_real_text_with_or_without_the_trailing_word():
+    """templet:3161 -- the kernel's text as this Mac writes it, with its
+    `(encrypted)` and a newline, and without the word."""
+    parse = real_probes.parse_swapusage
+    real = "total = 7168.00M  used = 5745.25M  free = 1422.75M  (encrypted)\n"
+    assert parse(real) == (7168 * MIB, round(5745.25 * MIB))
+    assert parse(real.replace("  (encrypted)", "")) == parse(real)
+    assert parse("total = 1T  used = 0K  free = 1T") == (2**40, 0)
+
+
+def test_the_pressure_level_is_a_number_of_the_kernels():
+    """templet:3161 -- the level is the kernel's own number: 1 normal, 2 warn,
+    4 critical; text that is no number is a failed read."""
+    assert real_probes.parse_pressure_level("1\n") == 1
+    assert real_probes.parse_pressure_level("4") == 4
+    assert real_probes.parse_pressure_level(" 2 \n") == 2
+    for bad in ("", "warn", "-1", "0", "2.0", "1 2", "\u0663", "1,0"):
+        with pytest.raises(ProbeError, match="pressure level"):
+            real_probes.parse_pressure_level(bad)
+
+
+def fake_run(answers, calls=None, kws=None):
+    def run(probe, argv, *args, **kw):
+        if calls is not None:
+            calls.append(argv)
+        if kws is not None:
+            kws.append(kw)
+        value = answers[tuple(argv)]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    return run
+
+
+def test_the_free_share_of_memory_is_a_whole_percent_of_the_kernels():
+    """templet:3161 -- `kern.memorystatus_level` is a whole number from 0 to
+    100; anything else (a percent sign, a decimal or comma, a number out of
+    range, no number, a digit of another script) is a failed read."""
+    parse = real_probes.parse_memory_level
+    assert (parse("84\n"), parse(" 0 "), parse("100")) == (84, 0, 100)
+    for bad in ("", "84%", "84.5", "84,5", "101", "-1", "\u0668\u0664", "1 2", "x"):
+        with pytest.raises(ProbeError, match="memory level"):
+            parse(bad)
+
+
+def test_a_failed_free_share_read_is_a_failed_pressure_read(monkeypatch):
+    """templet:3161 -- the third read of macOS fails as the others do: a
+    ProbeError naming the probe, so `place` says `unmeasured`, never a yes."""
+    answers = {
+        (SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"): "1\n",
+        (SYSCTL, "-n", "vm.swapusage"): SWAPUSAGE,
+        (SYSCTL, "-n", "kern.memorystatus_level"): "84%\n",
+    }
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(real_probes, "_run", fake_run(answers))
+    with pytest.raises(ProbeError, match="memory level"):
+        REAL_PROBE_PRESSURE()
+    answers[(SYSCTL, "-n", "kern.memorystatus_level")] = ProbeError(
+        "probe_pressure: sysctl exited 1"
+    )
+    with pytest.raises(ProbeError, match="exited 1"):
+        REAL_PROBE_PRESSURE()
+
+
+class Ran:
+    """A stand-in for `subprocess.run` that is a `sysctl` whose figures follow
+    its locale: a comma decimal unless the caller's environment says `C`."""
+
+    def __init__(self, hang=False):
+        self.calls, self.hang = [], hang
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw))
+        if self.hang:
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+        text = {
+            "kern.memorystatus_vm_pressure_level": "1\n",
+            "vm.swapusage": SWAPUSAGE,
+            "kern.memorystatus_level": "84\n",
+        }[argv[-1]]
+        if (kw.get("env") or {}).get("LC_ALL") != "C":
+            text = text.replace(".", ",")
+        return subprocess.CompletedProcess(argv, 0, text, "")
+
+
+def test_the_sysctl_reads_run_in_the_c_locale_by_their_full_path(monkeypatch):
+    """templet:3161 -- under a comma-decimal locale `sysctl` writes `7168,00M`:
+    the reads are made with `LC_ALL=C` in their environment (the rest of the
+    environment kept), so the figures are the kernel's, and `sysctl` is run by
+    its path, so a PATH without `/usr/sbin` is not a failed read."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    ran = Ran()
+    monkeypatch.setattr(real_probes.subprocess, "run", ran)
+    got = REAL_PROBE_PRESSURE()
+    assert got["swap_total"] == 7168 * MIB
+    assert got["swap_used"] == round(5913.25 * MIB)
+    assert len(ran.calls) == 3
+    assert got["memory_free_percent"] == 84
+    for argv, kw in ran.calls:
+        assert argv[0] == SYSCTL
+        assert kw["env"]["LC_ALL"] == "C" and kw["env"]["PATH"]
+        assert kw["timeout"] == real_probes.PRESSURE_TIMEOUT_S
+
+
+def test_a_hung_sysctl_is_a_short_bounded_failed_read(monkeypatch):
+    """templet:3161 -- each pressure read has its own short bound, a few
+    seconds (`PRESSURE_TIMEOUT_S`, not the ten of the other probes), so one
+    stuck `sysctl` cannot cost a placement long; the timeout is a ProbeError
+    naming the probe."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert 1 <= real_probes.PRESSURE_TIMEOUT_S <= 5
+    ran = Ran(hang=True)
+    monkeypatch.setattr(real_probes.subprocess, "run", ran)
+    with pytest.raises(ProbeError, match="probe_pressure"):
+        REAL_PROBE_PRESSURE()
+    assert len(ran.calls) == 1, "the first failed read ends it"
+    assert ran.calls[0][1]["timeout"] == real_probes.PRESSURE_TIMEOUT_S
+
+
+def test_probe_pressure_on_macos_asks_sysctl_three_times_only(monkeypatch):
+    """templet:3161 -- on macOS the read is three `sysctl -n` calls (the level,
+    the swap and the free share of memory), with nothing from `vm_stat` or `ps`,
+    and a failure of any is a ProbeError naming the probe."""
+    calls = []
+    answers = {
+        (SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"): "2\n",
+        (SYSCTL, "-n", "vm.swapusage"): SWAPUSAGE,
+        (SYSCTL, "-n", "kern.memorystatus_level"): "37\n",
+    }
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(real_probes, "_run", fake_run(answers, calls))
+    got = REAL_PROBE_PRESSURE()
+    assert got == {
+        "level": 2,
+        "swap_used": round(5913.25 * MIB),
+        "swap_total": 7168 * MIB,
+        "memory_free_percent": 37,
+        "method": "sysctl",
+    }
+    assert len(calls) == 3
+    for key in answers:
+        broken = dict(answers)
+        broken[key] = real_probes.ProbeError("probe_pressure: sysctl exited 1")
+        monkeypatch.setattr(real_probes, "_run", fake_run(broken))
+        with pytest.raises(ProbeError, match="probe_pressure"):
+            REAL_PROBE_PRESSURE()
+
+
+@pytest.mark.parametrize(
+    "full,level", [("0.00", 1), ("4.99", 1), ("5.00", 2), ("31.50", 2)]
+)
+def test_probe_pressure_on_linux_reads_psi_and_meminfo(monkeypatch, full, level):
+    """templet:3161 -- on Linux, from files of the shape the kernel writes (a
+    hand-written fixture, never a captured one): `/proc/pressure/memory`'s
+    `full avg10` at 5.0 or more is level 2 (warn), else 1; the swap is
+    `SwapTotal` less `SwapFree`; the free share of memory is `MemAvailable`
+    over `MemTotal`, in whole percent, rounded down."""
+    files = {
+        "/proc/pressure/memory": PSI.format(full=full),
+        "/proc/meminfo": MEMINFO.format(
+            memtotal=16_000_000,
+            available=5_999_999,
+            total=4 * 1024 * 1024,
+            free=1024 * 1024,
+        ),
+    }
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(real_probes, "_small", lambda probe, path: files[path])
+    assert REAL_PROBE_PRESSURE() == {
+        "level": level,
+        "swap_used": 3 * GIB,
+        "swap_total": 4 * GIB,
+        "memory_free_percent": 37,
+        "method": "psi",
+    }
+
+
+def test_probe_pressure_on_linux_without_psi_or_swap_reads_none(monkeypatch):
+    """templet:3161 -- a Linux with no `/proc/pressure/memory` (an old kernel,
+    or one without PSI) has no level, and a host with no swap has swap 0 of 0;
+    neither is a failed read. A file that is there and unreadable is."""
+    files = {
+        "/proc/meminfo": MEMINFO.format(memtotal=1000, available=400, total=0, free=0)
+    }
+
+    def small(probe, path):
+        if path not in files:
+            raise real_probes.Absent(f"{probe}: {path} is not there")
+        return files[path]
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(real_probes, "_small", small)
+    got = REAL_PROBE_PRESSURE()
+    assert (got["level"], got["swap_used"], got["swap_total"]) == (None, 0, 0)
+    assert got["memory_free_percent"] == 40
+
+    def unreadable(probe, path):
+        raise ProbeError(f"{probe}: {path} is not readable (Permission denied)")
+
+    monkeypatch.setattr(real_probes, "_small", unreadable)
+    with pytest.raises(ProbeError, match="not readable"):
+        REAL_PROBE_PRESSURE()
+
+
+def test_probe_pressure_on_another_platform_reads_nothing(monkeypatch):
+    """templet:3161 -- a platform with no reader gives no level and no swap, and
+    runs nothing: it is not a failed read."""
+    monkeypatch.setattr(sys, "platform", "plan9")
+    monkeypatch.setattr(real_probes, "_run", fake_run({}))
+    got = REAL_PROBE_PRESSURE()
+    assert (got["level"], got["swap_used"], got["swap_total"]) == (None, None, None)
+    assert got["memory_free_percent"] is None
+
+
+def test_the_real_read_on_this_host_gives_figures_and_changes_nothing(
+    monkeypatch, capsys
+):
+    """templet:3161 -- the read for real, here, read-only: on macOS the level is
+    1, 2 or 4 and the swap figures agree with `sysctl`'s own text, read apart
+    in the C locale (to a gibibyte, since swap moves between the two reads), also
+    when this process runs under a comma-decimal locale, so a figure misread as
+    bytes or in the wrong unit is caught; on Linux the level is 1 or 2, or None
+    where the kernel has no PSI. Nothing is allocated to provoke a reading."""
+    if not sys.platform.startswith(("darwin", "linux")):
+        pytest.skip(f"no real reader for {sys.platform}")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    got = REAL_PROBE_PRESSURE()
+    with capsys.disabled():
+        print(f"\nREAL READ {sys.platform}: {json.dumps(got)}")
+    if sys.platform == "darwin":
+        assert got["level"] in (1, 2, 4) and got["method"] == "sysctl"
+    else:
+        assert got["level"] in (1, 2, None)
+    assert 0 <= got["swap_used"] <= got["swap_total"]
+    assert 0 <= got["memory_free_percent"] <= 100
+    if sys.platform == "darwin":
+        env = {**os.environ, "LC_ALL": "C"}
+        text = subprocess.run(
+            [SYSCTL, "-n", "vm.swapusage"], capture_output=True, text=True, env=env
+        ).stdout
+        apart = {
+            name: float(number) * MIB
+            for name, number in re.findall(r"(total|used|free) = ([0-9.]+)M", text)
+        }
+        assert set(apart) == {"total", "used", "free"}, text
+        # macOS adds swap files of whole mebibytes; a Linux swap partition's
+        # `SwapTotal` is usually a header page short of one
+        assert got["swap_total"] % MIB == 0
+        assert abs(got["swap_total"] - apart["total"]) <= GIB, (got, text)
+        assert abs(got["swap_used"] - apart["used"]) <= GIB, (got, text)
+        level = subprocess.run(
+            [SYSCTL, "-n", "kern.memorystatus_level"],
+            capture_output=True,
+            text=True,
+            env=env,
+        ).stdout
+        assert abs(got["memory_free_percent"] - int(level)) <= 15, (got, level)
+
+
+def test_the_memory_probes_run_by_their_full_paths_on_macos(monkeypatch):
+    """templet:3161 -- `probe_memory` and the process table run `sysctl`,
+    `vm_stat` and `ps` by their paths on macOS, so a PATH without `/usr/sbin`
+    does not make `measure` fail and every start `unmeasured`."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    seen = []
+
+    def run(probe, argv, *args, **kw):
+        seen.append(argv[0])
+        return {
+            "/usr/sbin/sysctl": "51539607552\n",
+            "/usr/bin/vm_stat": (
+                "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                "Pages free: 10.\nPages inactive: 10.\nPages purgeable: 10.\n"
+                "Pages speculative: 10.\n"
+            ),
+            "/bin/ps": "1 0 5 init\n",
+        }[argv[0]]
+
+    monkeypatch.setattr(real_probes, "_run", run)
+    assert real_probes.probe_memory()["memory_total"] == 51539607552
+    assert real_probes.process_table()
+    assert seen == ["/usr/sbin/sysctl", "/usr/bin/vm_stat", "/bin/ps"]
+
+
+def test_the_real_memory_probes_work_with_a_path_without_usr_sbin(monkeypatch):
+    """templet:3161 -- for real, here, read-only, with `PATH=/usr/bin:/bin`
+    (where `sysctl` is not): the memory read, the process table and the
+    pressure read all work."""
+    if sys.platform != "darwin":
+        pytest.skip("the fixed paths are macOS's")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert real_probes.probe_memory()["memory_total"] > 0
+    assert real_probes.process_table()
+    assert REAL_PROBE_PRESSURE()["level"] in (1, 2, 4)
+
+
+def test_a_file_that_is_not_there_is_absent_and_one_not_readable_is_an_error(
+    tmp_path,
+):
+    """templet:3161 -- the small-file reader says `Absent` for a file the host
+    does not have (what a kernel without the pressure file gives), and a plain
+    `ProbeError`, not `Absent`, for a file that is there and cannot be read."""
+    with pytest.raises(real_probes.Absent, match="is not there"):
+        real_probes._small("probe_pressure", str(tmp_path / "nothing"))
+    locked = tmp_path / "locked"
+    locked.write_text("x")
+    locked.chmod(0)
+    try:
+        with pytest.raises(ProbeError, match="not readable") as caught:
+            real_probes._small("probe_pressure", str(locked))
+        assert not isinstance(caught.value, real_probes.Absent)
+    finally:
+        locked.chmod(0o600)

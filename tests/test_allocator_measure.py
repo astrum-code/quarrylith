@@ -410,6 +410,13 @@ def stub(memory, resident=None):
         },
         probe_disk=lambda path: 500 * GIB,
         probe_size=lambda path: 0,
+        probe_pressure=lambda: {
+            "level": 1,
+            "swap_used": 0,
+            "swap_total": GIB,
+            "memory_free_percent": 80,
+            "method": "given",
+        },
         process_table=lambda: table,
         resident=probes.resident,
     )

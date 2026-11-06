@@ -41,6 +41,20 @@ class FakeHost:
         self.total, self.available, self.disk, self.rss = total, available, disk, rss
         self.fail = None
         self.tables = 0
+        self.level, self.swap_used, self.swap_total = 1, 0, 2 * GIB
+        self.free = 80
+        self.pressure_fail = None
+
+    def probe_pressure(self):
+        if self.pressure_fail:
+            raise ProbeError(self.pressure_fail)
+        return {
+            "level": self.level,
+            "swap_used": self.swap_used,
+            "swap_total": self.swap_total,
+            "memory_free_percent": self.free,
+            "method": "given",
+        }
 
     def probe_memory(self):
         if self.fail:

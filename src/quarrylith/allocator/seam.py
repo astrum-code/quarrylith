@@ -19,6 +19,7 @@ CAUSES = (
     "room",
     "measured",
     "unmeasured",
+    "pressure",
     "budget",
     "undeclared",
     "unclassified",
@@ -146,6 +147,8 @@ def _part(short):
             return part
         part = f"{part} [{short.cause}]"
         return f"{part} -- {short.detail}" if short.detail else part
+    if short.cause == "pressure":
+        return f"pressure: {short.detail}"
     if short.cause == "unmeasured":
         return f"unmeasured: {short.detail or 'the host reading is missing or stale'}"
     if short.cause == "undeclared":

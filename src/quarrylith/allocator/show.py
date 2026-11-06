@@ -10,7 +10,7 @@ from .budget import plain, providers_of, report
 from .document import document_from_data
 from .measure import KIND as MEASURE_KIND
 from .measure import SOURCE as MEASURE_SOURCE
-from .measure import _number, began
+from .measure import MEMORY_FREE_UNDER_PERCENT, _number, began
 from .seam import _size, _when
 
 DOCUMENT = ("allocator", "document")
@@ -49,10 +49,11 @@ def _resource_of(entry):
     return str(entry.get("what", "")).rsplit(" ", 1)[-1]
 
 
-def snapshot(record, *, now):
+def snapshot(record, *, now, pressure=None):
     """Plain data: the document in force and its age, the host reading and its
-    age, per live node its resources, the consumers that are absent, the drift
-    and the allocator's latest observations."""
+    age, the host's memory pressure when the caller read it (`pressure`, from
+    `HostPlacement.pressure`), per live node its resources, the consumers that
+    are absent, the drift and the allocator's latest observations."""
     with record.reading():
         stored = _latest(record, *DOCUMENT)
         measure = _latest(record, MEASURE_SOURCE, MEASURE_KIND)
@@ -95,6 +96,7 @@ def snapshot(record, *, now):
                 "age_s": max(now - measure["at"], 0) // 1000,
             }
         ),
+        "pressure": pressure,
         "nodes": nodes,
         "absent": dict(absent),
         "drift": list(drift),
@@ -169,6 +171,34 @@ def _node(record, node, now, value, held_by):
     }
 
 
+def _pressure_lines(pressure):
+    """The line for the host's memory pressure: what refuses new work, or that
+    nothing does, or why it was not read."""
+    if pressure is None:
+        return []
+    if pressure["unread"]:
+        return [f"pressure: not read ({pressure['unread']})"]
+    if pressure["refused"]:
+        line = "pressure: " + "; ".join(pressure["refused"]) + "; new work is refused"
+        if any(r.startswith("swap") for r in pressure["refused"]):
+            # the swap refusal ends with the memory, not with the swap
+            line += (
+                f"; it clears once {MEMORY_FREE_UNDER_PERCENT}% or more of "
+                "memory is free again (a process that exits frees its memory "
+                "and its swap)"
+            )
+        return [line]
+    parts = []
+    if pressure["level"] is not None:
+        parts.append(pressure["level"])
+    if pressure["swap_total"] is not None:
+        used, total = pressure["swap_used"], pressure["swap_total"]
+        parts.append(f"swap {used / 2**30:.1f} GiB of {total / 2**30:.1f} GiB")
+    if pressure.get("memory_free_percent") is not None:
+        parts.append(f"memory {pressure['memory_free_percent']}% free")
+    return ["pressure: " + (", ".join(parts) or "no reading on this host")]
+
+
 def _budget_line(stop):
     """One stop of a provider's budget, or the clear in force that lifted one,
     as `alloc show` words it. Text a writer chose is written out on one line."""
@@ -207,6 +237,7 @@ def lines(snap):
         out.append(
             f"host reading: node {reading['node']}, {reading['method']}, age {age}"
         )
+    out.extend(_pressure_lines(snap.get("pressure")))
     for node in snap["nodes"]:
         out.append(f"node {node['name']}: drivers {', '.join(node['drivers'])}")
         for r in node["resources"]:

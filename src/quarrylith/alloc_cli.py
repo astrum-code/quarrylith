@@ -330,7 +330,7 @@ def _declare(args):
 def _show(args):
     with _session(args, readonly=True) as s:
         with s.phase("reading"):
-            snap = show.snapshot(s.record, now=s.now())
+            snap = show.snapshot(s.record, now=s.now(), pressure=s.placement.pressure())
         with s.phase("printing"):
             if args.json:
                 print(json.dumps(snap))

@@ -549,6 +549,26 @@ def test_sample_consumer_gives_the_peak_times_one_quarter_in_whole_blocks(
         child.wait()
 
 
+@over_backends
+def test_sample_consumer_takes_the_peak_not_the_last_sample(record, clock, tmp_path):
+    """templet:3161 -- the size is from the largest resident size of any
+    sample: 100, 300 then 200 MiB gives 300 x 1.25 rounded up to 512 MiB
+    (the last sample alone would give 256)."""
+    from quarrylith.allocator import probes
+
+    sizes = iter([100 * MIB, 300 * MIB, 200 * MIB])
+    given = types.SimpleNamespace(
+        process_table=lambda: [probes.Process(10, 1, next(sizes), "x")],
+        resident=probes.resident,
+    )
+    document = mini(tmp_path, DRIFT)
+    placement = HostPlacement(record, probes=given)
+    size = placement.sample_consumer(
+        "machine", seconds=2, every=1, document=document, sleep=lambda s: None
+    )
+    assert size == 512 * MIB
+
+
 # -- resolve ------------------------------------------------------------------------
 
 

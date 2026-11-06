@@ -1171,14 +1171,14 @@ merge happens.
   `changes` or none, bars the merge; a tier above 5 needs the second role's
   review, and a risk below 1 is the user's (approved: the conformance review
   of quarrylith#19)
-- 2026-11-06 proposed: `order` refuses a `never` that is not a map from
+- 2026-11-06 changed: `order` refuses a `never` that is not a map from
   `("task", id)` or `("item", number)` to the refusal's text; the walk's third
   check reads "landing reviews: N of M busy" (N live plus started, M
   `review_slots`); and `place` says "a landing review waits while admitted
   work can start" for a landing review the sequence does not hold because
-  tiers 1 to 3 can start work (this PR)
-- 2026-11-06 proposed: what a landing candidate is left out for (a schedule,
+  tiers 1 to 3 can start work (approved: the conformance review of quarrylith#24)
+- 2026-11-06 changed: what a landing candidate is left out for (a schedule,
   a flag, `never`) is in the sequence's `left`, as for any candidate; and the
   landing tier is decided by a `Walk` over tiers 1 to 3 inside `order`, with
   no starts, so the sequence and the walk's first three checks cannot disagree
-  (this PR)
+  (approved: the conformance review of quarrylith#24)

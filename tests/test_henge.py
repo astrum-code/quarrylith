@@ -2126,9 +2126,9 @@ def test_a_loading_changed_under_a_resumed_load_closes_the_record():
 def test_on_a_mirror_a_resumed_load_refuses_events_that_are_not_the_dumps(monkeypatch):
     """templet:3159 -- Henge, the mirror: an operation's commit put is on w0
     alone and its writer dead. An open and a load's start read `journal/[1]`
-    from w1 and find an empty record. The load's first commit meets that entry
-    and stops, with a load in progress. The load of the same dump, resumed,
-    compares the entry with the dump's and refuses, committing nothing."""
+    from w1 and find an empty record. The load's first commit meets that entry,
+    and recovery redoes it. The load of the same dump, resumed, compares the
+    record's events with the dump's and refuses, committing nothing."""
     misses = OneCopyMisses()
     with _settled_mirror(misses) as made:
         reads = _steered(monkeypatch, made)
@@ -2158,17 +2158,16 @@ def test_on_a_mirror_a_resumed_load_refuses_events_that_are_not_the_dumps(monkey
             return False
 
         rec.store = _ArmAt(rec.store, misses, from_the_commit_on)
-        with pytest.raises(Unavailable, match="a load is in progress"):
+        with pytest.raises(Unavailable, match="seq 1 was taken"):
             rec.load(dump)
         reads.clear()
         rec.close()
         rec = opened(url, actor="loader", via="load", timeout_s=2.0)
         try:
-            assert rec.head() == 0
+            assert rec.head() == 1
             with pytest.raises(Refused, match="are not the dump's"):
                 rec.load(dump)
-            assert rec.head() == 0
-            assert held_by(made, "w1", s["journal"], [2]) is None
+            assert rec.head() == 1
         finally:
             rec.close()
 

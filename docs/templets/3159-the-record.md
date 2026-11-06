@@ -723,6 +723,12 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
       there, but a limit this page's "A directory also needs a byte bound"
       does not state. Rows 6 and 7 of the put table assert no outcome in
       `two_live_writers`, where every other raced row does.
+    - **`ack` and `beat`, the lock bypassed.** A second `ack` reads the directory,
+      another `ack` splits, and the second then reads the shrunk chunk: its key lands
+      outside the chunk's new range, the `ack` is answered, and `read("cursors")`
+      misses it. `check()` stays clean, since it compares no index of an unjournaled
+      kind. Old code does the same (henge's review of this page's load, round 3,
+      `ack_probe.py`); it has no issue yet.
     - **For the services' step.** An open during a store's restart is
       refused at once (see "The record's timeout"); whether a service's
       start should ride out a restart is that step's to say. On Henge
@@ -1031,7 +1037,7 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   |---|---|---|---|---|---|
   | 1 | the commit, step 2 (re-sent after an error) | `journal/[seq]` | `absent`; this entry read back, the version read | itself: one entry per seq | its `Conflict` is read back: this entry is put again with the version read, and goes on once answered; another entry, recovery (row 6) and `Unavailable` |
   | 2 | the event's records, step 3 (`meta` counters included) | `.rec` | decide's read, or own put | the commit put | `Unknown` |
-  | 3 | the event's index edits and a split, step 3 | chunks; a directory only in a split (with no split, rows 6, 12 and 13 put it again); new chunks `absent`, or the chunk already there: a number that holds another means a stale plan, and the writer stops | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
+  | 3 | the event's index edits and a split, step 3 | chunks; a directory only in a split (with no split, rows 6, 12 and 13 put it again); new chunks `absent`, or the chunk already there. Another chunk at a number a fresh read of the directory lists means a stale plan, and the writer stops; at a number none lists it is a dead `ack`'s or `beat`'s leftover, and is put over, with the version read | decide's read (chunks filtered to their range), or own put | the commit put | `Unknown` |
   | 4 | `applied` and `head`, step 4, only upward | `.state` | decide's read, or own put | the commit put | `Unknown` |
   | 5 | a retry after an error or `Conflict` at rows 2-4; nothing left to put, the value read put again | as the row | fresh read | `journal/[seq+1]` | `Unknown` |
   | 6 | recovery's redo of one entry, or, at open with a load in progress, of the batch `loading` commits, whole, and of nothing with no such batch: the entry put again first, then rows 2-4, a split's redo included, and a directory with no split left put again as read before its chunks; nothing left to put, the value read put again. No entry: at open, `applied` and then `head` put again as read; after a step-2 `Conflict`, `head` only brought up, and `applied` put again as read by the writer's next commit, before its commit put | `journal/[a+1]`, then as rows 2-4; no entry, `.state` | the entry's version as read; fresh read | a redo: `journal/[a+2]` (the entry's put needs none). No entry: recovery's read of `journal/[a+1]` (the next commit's put, read again after an error, `journal/[high+1]`). A second entry already found stops it before any put | `Unavailable`: the open is refused, or the operation did not happen |
@@ -1095,10 +1101,13 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
     edit against a chunk that already holds it changes nothing, and last wins by
     key), and what the two-writer argument below needs: "(F2)" holds with a batch
     for an entry. A redo may still read across the loader's split, its directory
-    before and its chunk after, since they are read apart. A chunk is never read
-    older than its directory, so a plain edit's range is wide, and keeps every key;
-    and a split of its own stops at the first number that holds another chunk
-    (row 3), before its directory or its shrunk chunk.
+    before and its chunk after, since they are read apart. A plain edit is then safe:
+    a split puts its new chunks before its directory, so a range read at any point
+    loses no key, and a redo has the loader's events, so what its stale range puts
+    is what the loader put. A split of its own stops at the first number the
+    directory lists that holds another chunk (row 3), before its directory or its
+    shrunk chunk. That holds for a redo because of those same events; an `ack` or a
+    `beat` has none, below.
   - **Reported only once durable.** `head` is what a follower reads, and it
     moves past a batch's sync, which comes after the batch's every put. A load
     that returned has had its closing sync (row 11), after every put of it.
@@ -1829,7 +1838,10 @@ Each item is a test marked `templet:3159`, run over every backend in
   on the fake and on a real store, and across the next operation of the writer
   whose entry it redoes: the answered operation stands. A redo holds to the `to` it
   read, with the next batch's entries put meanwhile. A split's new chunk whose
-  number holds another stops the writer and leaves that chunk. Bounded, to a
+  number the directory lists holds another stops the writer and leaves that chunk.
+  An `ack` or a `beat` killed before each put of a split leaves no later split of
+  that index stopped, at chunks of 4 keys and on a real store at 8,192; its fresh
+  read of the directory is tried again like the put's. Bounded, to a
   ceiling: pairs of a loader's and a redo's calls around a split and a seeded sample
   of the rest, and a seeded scheduler of a loader, fresh opens and a writer, with
   deaths
@@ -2308,8 +2320,13 @@ shrunk chunk:
 - the split is a function of the chunk and the directory, so recovery of a
   writer stopped inside it, reading them as it left them, remakes the same split
   with the same numbers. Read apart, across a live writer's split, they can give
-  another: a new chunk goes `absent` or is the same chunk, and a number that holds
-  another stops the plan (row 3), so it never overwrites one.
+  another: a new chunk goes `absent` or is the same chunk, and a number the
+  directory lists that holds another stops the plan (row 3), so it never overwrites
+  a listed one. A split lists its numbers before it shrinks its chunk, so a plan
+  that read the shrunk chunk finds its number listed. An unlisted number can only
+  be a leftover: a commit's split is redone, but nothing redoes a dead `ack`'s or
+  `beat`'s, and stopping there would refuse every later split of that index, with
+  the lock held. It is put over, as it always was (henge's review, round 3).
 
 Chunk 0 has no lower bound, so a key below every key so far needs no
 directory write. Pieces are filled to half the bounds, so a chunk just
@@ -2798,7 +2815,8 @@ client alone is the dependency (above).
   which says it is one (`"load": true`, the journal's row); a writer's entry stays a
   commit, to the open and to the guard (Recovery, row 6, the guard, invariant 13's
   clause on what recovery redoes, and (F1) and (F2)). A split's new chunk goes
-  `absent` or is the same, as row 3 said, and stops otherwise. Invariant 13's two
+  `absent` or is the same, as row 3 said, stops at a number the directory lists, and
+  is put over a leftover none lists. Invariant 13's two
   live writers stand as written, and henge's reviews of rounds 1 and 2 are why.
   `check()` reports a load in progress. The event format,
   `ack`, `beat` and every other write do not change (this PR)

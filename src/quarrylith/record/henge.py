@@ -601,6 +601,13 @@ class HengeRecord(Record):
                 new = fn(row[0])
             except _Found as e:
                 self._fail(why, str(e), e)
+            except _StoreDown as e:
+                # a new chunk's fresh read of its directory
+                if tries.over(e):
+                    self._fail(why, f"the store did not answer: {e}", e)
+                tries.pause()
+                row = self._again(space, key, deadline, why)
+                continue
             if new is SKIP:
                 if row[3] or row[0] is ABSENT or not settle:
                     return row[0]
@@ -732,13 +739,33 @@ class HengeRecord(Record):
                 top += 1
                 key = ix_key(ix, top)
                 self._look(self.I, key)
-                news.append((self.I, key, _new_chunk_fn(piece)))
+                news.append((self.I, key, self._new_chunk_fn(dkey, top, piece)))
                 listed.append([top, piece[0]])
         after = ranges(directory + listed)
         for n, e, cut in splits:
             shrunk.append((self.I, ix_key(ix, n), _chunk_fn(after[n], e)))
         dfn = _dir_fn(listed)
         return news + [(self.I, dkey, dfn)] + shrunk + plain
+
+    def _new_chunk_fn(self, dkey, number, piece):
+        """A split's new chunk: `absent`, or the chunk already there. Another
+        chunk at a number a fresh read of the directory lists means the plan read
+        across someone else's split, since a split lists its numbers before it
+        shrinks its chunk: stop. At a number no directory lists, it is what a dead
+        `ack` or `beat` left, since nothing redoes those: put over it."""
+
+        def fn(cur):
+            if cur in (ABSENT, None):
+                return piece
+            if cur == piece:
+                return SKIP
+            got = self._call("get", self.I, dkey)
+            listed = [] if got is None or got.value is None else got.value
+            if number in [n for n, _ in listed]:
+                raise _Found("a split's new chunk holds another chunk: a stale plan")
+            return piece
+
+        return fn
 
     def _state_up(self, seq):
         """`applied` or `head`, only upward: a value at or past `seq` stays."""
@@ -1527,20 +1554,6 @@ def _chunk_fn(rng, edits):
     def fn(cur):
         keys = edited(filtered([] if cur in (ABSENT, None) else cur, rng), mine)
         return SKIP if cur == keys else keys
-
-    return fn
-
-
-def _new_chunk_fn(piece):
-    """A split's new chunk: `absent`, or the chunk already there. A number that
-    holds another means the plan read across someone else's split: stop."""
-
-    def fn(cur):
-        if cur in (ABSENT, None):
-            return piece
-        if cur == piece:
-            return SKIP
-        raise _Found("a split's new chunk holds another chunk: a stale plan")
 
     return fn
 

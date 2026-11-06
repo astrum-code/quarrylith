@@ -225,7 +225,8 @@ class HostPlacement(Placement):
         one is in `failed`, the rest go on, and a second `declare` finishes
         it. The document reading is written last, and only when nothing
         failed."""
-        data = to_data(document, {} if figures is None else figures)
+        figures = {} if figures is None else figures
+        data = to_data(document, figures)
         resolved = document_from_data(data)
         digest = _digest(to_data(document))
         node = resolved.node

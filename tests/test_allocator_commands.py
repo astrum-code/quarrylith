@@ -40,6 +40,7 @@ class FakeHost:
     def __init__(self, total=48 * GIB, available=40 * GIB, disk=200 * GIB, rss=GIB):
         self.total, self.available, self.disk, self.rss = total, available, disk, rss
         self.fail = None
+        self.tables = 0
 
     def probe_memory(self):
         if self.fail:
@@ -57,6 +58,7 @@ class FakeHost:
         return 0
 
     def process_table(self):
+        self.tables += 1
         if self.rss is None:
             return []
         return [real_probes.Process(10, 1, self.rss, "x")]
@@ -625,10 +627,12 @@ def test_consumer_measure_declare_replaces_the_hold_and_prints_the_line(
     assert code == 0 and "nothing to write" in out
     assert head_of(opener) == mark
     # the machine's amount is fixed in the document: refused before sampling
+    sampled = host.tables
     code, out, err = alloc(
         capsys, "consumer", "measure", "podman-machine", url, "--declare"
     )
     assert code == 2 and "fixed" in err and "podman-machine" in err
+    assert host.tables == sampled
     code, out, err = alloc(capsys, "consumer", "measure", "desktop", url)
     assert code == 2 and "no probed consumer" in err
     # 60 GiB x 1.25 does not fit beside the others
@@ -923,3 +927,37 @@ def test_a_real_measure_shows_no_command_line(tmp_path, capsys):
     finally:
         child.kill()
         child.wait()
+
+
+@over_backends
+def test_the_commands_that_only_read_open_the_record_read_only(
+    backend, effort, url, host, clock, alloc_cli, monkeypatch, capsys, tmp_path
+):
+    """templet:3161 -- `declare --dry-run`, `show`, `place` and a `consumer
+    measure` without `--declare` open the record read-only; `declare`,
+    `measure` and `consumer measure --declare` open it to write."""
+    record = effort
+    declared(record, clock)
+    task = str(make_task(record))
+    doc = write_doc(tmp_path)
+    one_writer(backend, record)
+    opened = []
+    real = alloc_cli.contract.open_record
+
+    def spy(url, **kw):
+        opened.append(kw.get("readonly"))
+        return real(url, **kw)
+
+    monkeypatch.setattr(alloc_cli.contract, "open_record", spy)
+    for argv, readonly in (
+        (["declare", doc, url, "--dry-run"], True),
+        (["show", url], True),
+        (["place", url, task], True),
+        (["consumer", "measure", "yard", url, "--for", "0s"], True),
+        (["measure", url], False),
+        (["declare", doc, url], False),
+        (["consumer", "measure", "yard", url, "--for", "0s", "--declare"], False),
+    ):
+        opened.clear()
+        alloc(capsys, *argv)
+        assert opened == [readonly], argv

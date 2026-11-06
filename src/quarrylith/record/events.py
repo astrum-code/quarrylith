@@ -50,6 +50,7 @@ EVENT_KINDS = (
     "reserve.replace",
     "run.start",
     "run.phase",
+    "run.pgid",
     "run.finish",
     "change.open",
     "change.edit",

@@ -386,10 +386,12 @@ def _consumer_measure(args):
                 sleep=SLEEP,
             )
         mine = s.seen.get(name) or {"number": 0, "peak": 0}
+        shown = _size("memory", size)
+        if size >= 2**30:
+            shown += f" ({size // MIB} MiB)"
         done = (
             f"consumer {name}: peak {_size('memory', mine['peak'])} over "
-            f"{mine['number']} samples, size {_size('memory', size)} "
-            f"({size // MIB} MiB)"
+            f"{mine['number']} samples, size {shown}"
         )
         print(done)
         if not args.declare:

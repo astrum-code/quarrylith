@@ -3,7 +3,8 @@
 host's memory, disk and processes, `measure` and the one reading it writes,
 the measured check of `place` and `hold`, `unmeasured`, drift and its
 observations, `sample_consumer` and `resolve`. The probes run for real on the
-test host (read-only); the Linux reader is tested on a captured file shape.
+test host (read-only); the Linux reader is tested on a hand-written file of
+the shape `/proc/meminfo` has, not on a captured one, and never run.
 Every test that touches a record runs over every backend in BACKENDS."""
 
 import json
@@ -95,9 +96,10 @@ def observations(record):
 
 
 def test_the_parsers_read_captured_samples():
-    """templet:3161 -- the parsers read `vm_stat`, `/proc/meminfo` and `ps`
-    samples: pages of free, inactive, purgeable and speculative memory at the
-    page size the output names; `MemAvailable` in kB; and one row per process
+    """templet:3161 -- the parsers read a `vm_stat` sample captured on the
+    test host and hand-written `/proc/meminfo` and `ps` samples: pages of
+    free, inactive, purgeable and speculative memory at the page size the
+    output names; `MemAvailable` in kB; and one row per process
     with its resident size in bytes."""
     from quarrylith.allocator import probes
 
@@ -310,15 +312,18 @@ def test_a_start_that_would_pass_the_floor_is_refused_measured(effort, clock):
     assert isinstance(answer, Refusal)
     (short,) = answer.shorts
     assert (short.cause, short.resource) == ("measured", "memory")
-    assert (short.asked, short.free, short.capacity) == (2 * GIB, GIB, 48 * GIB)
+    assert (short.asked, short.free, short.capacity) == (2 * GIB, 5 * GIB, 48 * GIB)
     assert short.waits is True and answer.waits is True and answer.until is None
     assert "[measured]" in answer.text
+    assert "5.0 GiB available" in answer.text and "floor 4.0 GiB" in answer.text
+    assert short.detail == "floor 4.0 GiB"
     clock.step()
     host_reading(record, clock, available=40 * GIB, disk_free=23 * GIB)
     answer = placement.place(task, now=clock())
     (short,) = answer.shorts
     assert (short.cause, short.resource) == ("measured", "disk")
-    assert (short.asked, short.free) == (4 * GIB, 3 * GIB)
+    assert (short.asked, short.free) == (4 * GIB, 23 * GIB)
+    assert short.detail == "floor 20.0 GiB"
     refusal = placement.hold("later", {"disk": 4 * GIB}, now=clock())
     assert [(s.cause, s.resource) for s in refusal.shorts] == [("measured", "disk")]
     assert placement.hold("later", {"disk": 4 * GIB}, measured=False, now=clock())
@@ -364,28 +369,28 @@ def test_with_no_fresh_host_reading_place_refuses_unmeasured(effort, clock):
     assert placement.declare(load_document(text), figures=FIGURES, now=clock()).ok
     task = make_task(record)
 
-    def causes():
+    def causes(said):
         answer = placement.place(task, now=clock())
         assert isinstance(answer, Refusal)
         (short,) = answer.shorts
         assert (short.cause, short.resource, short.waits) == ("unmeasured", None, True)
         assert short.node == "laptop" and answer.waits is True
-        assert "unmeasured" in answer.text
+        assert "unmeasured" in answer.text and said in answer.text, answer.text
         held = placement.hold("x", {"memory": 1}, now=clock())
         assert [s.cause for s in held.shorts] == ["unmeasured"]
 
-    causes()
+    causes("no host reading")
     host_reading(record, clock, node="elsewhere")
-    causes()
+    causes("is of elsewhere, not laptop")
     record.record_reading("host", "measure", {"node": "laptop"})
-    causes()
+    causes("has no figures for memory and disk")
     clock.step()
     host_reading(record, clock)
     assert isinstance(placement.place(task, now=clock()), Fit)
     clock.step(180_000)
     assert isinstance(placement.place(task, now=clock()), Fit)
     clock.step(1)
-    causes()
+    causes("181 s old, past the 180 s")
 
 
 # -- drift --------------------------------------------------------------------------
@@ -636,3 +641,170 @@ def test_resolve_probes_once_and_then_gives_the_recorded_figures(
     fresh = placement.resolve(document, fresh=True, now=clock())
     assert {"memory", "disk", "size", "sample yard"} <= set(calls)
     assert fresh["capacity"]["memory"] == figures["capacity"]["memory"]
+
+
+# -- a consumer that is down --------------------------------------------------------
+
+
+def stale_pid():
+    """A process number that was a process and is not now."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+@over_backends
+def test_a_consumer_that_is_down_reads_as_absent_and_the_host_is_still_measured(
+    record, clock, tmp_path
+):
+    """templet:3161 -- a consumer whose pid file is missing, holds no number, or
+    names a process that is gone, whose pid is not running, or whose name no
+    process has, is down, not a failed probe: `measure` still writes the host's
+    figures, the consumer has no resident figure, and the reading says in
+    `absent` why. A pid file that is read and finds a running process is
+    measured."""
+    gone = tmp_path / "gone.pid"
+    junk = tmp_path / "junk.pid"
+    junk.write_text("not a number")
+    dead = tmp_path / "dead.pid"
+    dead.write_text(f"{stale_pid()}\n")
+    live = tmp_path / "live.pid"
+    live.write_text(f"{os.getpid()}\n")
+    consumers = "".join(
+        f'[[consumer]]\nname = "{name}"\nmemory = "1GiB"\n'
+        f'probe = {{ {probe} }}\nwhy = "a consumer"\n'
+        for name, probe in (
+            ("missing", f'pidfile = "{gone}"'),
+            ("junk", f'pidfile = "{junk}"'),
+            ("dead", f'pidfile = "{dead}"'),
+            ("alive", f'pidfile = "{live}"'),
+            ("nopid", f"pid = {stale_pid()}"),
+            ("noname", f'process = "no-such-process-{os.getpid()}"'),
+        )
+    )
+    document = mini(tmp_path, consumers)
+    placement = HostPlacement(record)
+    assert placement.declare(
+        document, figures=real(placement, document, clock()), now=clock()
+    ).ok
+    head = record.head()
+    value = placement.measure(now=clock())
+    assert record.head() == head + 1
+    assert value["memory_available"] > 0 and value["disk_free"] > 0
+    assert set(value["consumers"]) == {"alive"}
+    assert set(value["absent"]) == {"missing", "junk", "dead", "nopid", "noname"}
+    assert "missing" in value["absent"]["missing"]
+    assert "pid file" in value["absent"]["junk"]
+    assert "no process" in value["absent"]["dead"]
+    assert "no process" in value["absent"]["nopid"]
+    assert "no-such-process" in value["absent"]["noname"]
+    (made,) = files(record, "measure")
+    assert made["value"]["absent"] == value["absent"]
+    assert value["drift"] == []
+
+
+@over_backends
+def test_sample_consumer_of_a_consumer_that_is_down_says_why(record, clock, tmp_path):
+    """templet:3161 -- a consumer that is down has nothing to size: the
+    `ProbeError` names it and says why (not a raw error)."""
+    consumers = (
+        f'[[consumer]]\nname = "svc"\nmemory = "1GiB"\n'
+        f'probe = {{ pidfile = "{tmp_path / "gone.pid"}" }}\nwhy = "a service"\n'
+    )
+    placement = HostPlacement(record)
+    document = mini(tmp_path, consumers)
+    with pytest.raises(ProbeError, match="svc.*missing"):
+        placement.sample_consumer(
+            "svc", seconds=0, every=1, document=document, sleep=lambda s: None
+        )
+
+
+def test_a_name_that_is_not_utf8_does_not_stop_the_probe(monkeypatch):
+    """templet:3161 -- a process name that is not UTF-8 (Linux names are any
+    bytes) is read with a replacement character: the table still comes."""
+    from quarrylith.allocator import probes
+
+    monkeypatch.setattr(probes, "PS", ["printf", "1 0 5 /bin/x\\377y\\n 2 1 7 ok\\n"])
+    table = probes.process_table()
+    assert [(p.pid, p.rss) for p in table] == [(1, 5 * 1024), (2, 7 * 1024)]
+    assert table[0].comm.startswith("/bin/x") and table[0].comm.endswith("y")
+
+
+# -- the line says why ----------------------------------------------------------------
+
+
+@over_backends
+def test_a_failing_statement_leaves_no_reading_and_the_drift_is_said_next_time(
+    record, clock, tmp_path
+):
+    """templet:3161 -- the observations are written before the reading, so a
+    `state` that fails leaves no reading that holds a drift nobody was told of:
+    `measure` raises, and the next `measure` says the drift once."""
+
+    class Failing:
+        """A record whose statements are refused."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def state(self, *args, **kw):
+            raise Refused("the record would not take a statement")
+
+    placement = drifting(record, clock, tmp_path)
+    clock.step()
+    placement.probes = stub(88 * GIB, 12 * GIB)
+    head = record.head()
+    with pytest.raises(Refused, match="statement"):
+        HostPlacement(Failing(record), probes=placement.probes).measure(now=clock())
+    assert record.head() == head and files(record, "measure") == []
+    assert observations(record) == []
+    placement.measure(now=clock())
+    assert len(observations(record)) == 1 and len(files(record, "measure")) == 1
+    clock.step()
+    placement.measure(now=clock())
+    assert len(observations(record)) == 1
+
+
+# -- the edges ------------------------------------------------------------------------
+
+
+@over_backends
+def test_a_drift_exactly_at_the_tolerance_is_not_a_drift(record, clock, tmp_path):
+    """templet:3161 -- the tolerance is how far past is allowed: a consumer
+    exactly 10% past its declaration, and available memory exactly 10% of the
+    capacity short of the table's free, are no drift; one byte more is."""
+    placement = drifting(record, clock, tmp_path)
+    for resident, available, drift in (
+        (11 * GIB, 90 * GIB, False),
+        (11 * GIB + 1, 90 * GIB, True),
+        (10 * GIB, 80 * GIB, False),
+        (10 * GIB, 80 * GIB - 1, True),
+    ):
+        clock.step()
+        placement.probes = stub(available, resident)
+        assert bool(placement.measure(now=clock())["drift"]) is drift, (
+            resident,
+            available,
+        )
+
+
+@over_backends
+def test_hold_on_another_node_does_not_check_the_measured_room(effort, clock):
+    """templet:3161 -- the plugin measures the node its document names: with the
+    host unmeasured, `hold` there is refused `unmeasured`, and `hold` on another
+    node checks the table alone."""
+    from test_allocator_host import declared
+
+    record = effort
+    placement = declared(record, clock, load_document(sample_text(180)))
+    record.declare_node("other", ["process"], [])
+    record.set_capacity("other", "memory", 4 * GIB, "bytes")
+    clock.step(10 * MIN)
+    refusal = placement.hold("a", {"memory": GIB}, now=clock())
+    assert [s.cause for s in refusal.shorts] == ["unmeasured"]
+    assert placement.hold("a", {"memory": GIB}, node="other", now=clock())
+    refusal = placement.hold("b", {"memory": 8 * GIB}, node="other", now=clock())
+    assert [s.cause for s in refusal.shorts] == ["room"]

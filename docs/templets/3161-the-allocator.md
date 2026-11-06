@@ -1466,7 +1466,8 @@ later: nothing in the effort runs sessions through the queue.
   Amended by the review of this PR: a newer stop with no reset does not hide an
   older stop's reset that is still ahead (the clear lifts nothing until it has
   passed, no override: the user's rule); a reset in the wrong unit is none,
-  which a person may clear, with its raw `resets_at` shown first; control
+  which a person may clear, with its raw `resets_at` shown first (that of
+  the stop being cleared, not of older stops under it); control
   characters are refused in `--why` and `--actor` and written out by the
-  printers; a blank provider is refused; the utilization is read before a
+  printers (the window name too); a blank provider is refused; the utilization is read before a
   `cleared` status (this PR)

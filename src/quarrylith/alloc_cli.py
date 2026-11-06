@@ -411,9 +411,9 @@ def _clear(args):
                 return 0
             for w in budget.clearable(stops):
                 if w["raw"]:
+                    window = budget.plain(w["window"])
                     print(
-                        f"{said} {w['window']}: resets_at {w['raw']} "
-                        "is not read as a time"
+                        f"{said} {window}: resets_at {w['raw']} is not read as a time"
                     )
             cleared, held = budget.clear(
                 s.record, document, provider, why, by=s.raw.actor, now=now
@@ -421,17 +421,20 @@ def _clear(args):
         with s.phase("printing"):
             if not cleared:
                 name = ", ".join(
-                    f"{w} until {_when(at)}" + ("" if own else " (an earlier stop's)")
+                    f"{budget.plain(w)} until {_when(at)}"
+                    + ("" if own else " (an earlier stop's)")
                     for w, at, own in held
                 )
                 raise Refused(
                     f"{said} {name}: a stop that names a reset holds until it"
                 )
             for window in cleared:
-                print(f"cleared {said} {window} (by {s.raw.actor}): {why}")
+                name = budget.plain(window)
+                print(f"cleared {said} {name} (by {s.raw.actor}): {why}")
             for window, at, own in held:
                 whose = "its own reset" if own else "an earlier stop's reset"
-                print(f"{said} {window}: still held until {_when(at)}, {whose}")
+                name = budget.plain(window)
+                print(f"{said} {name}: still held until {_when(at)}, {whose}")
     return 0
 
 

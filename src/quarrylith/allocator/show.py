@@ -173,7 +173,14 @@ def _pressure_lines(pressure):
     if pressure["unread"]:
         return [f"pressure: not read ({pressure['unread']})"]
     if pressure["refused"]:
-        return ["pressure: " + "; ".join(pressure["refused"]) + "; new work is refused"]
+        line = "pressure: " + "; ".join(pressure["refused"]) + "; new work is refused"
+        if any(r.startswith("swap") for r in pressure["refused"]):
+            # swap in use is a stock: it stays until the pages are touched
+            line += (
+                "; swap in use falls only when its pages are read back "
+                "or the host restarts"
+            )
+        return [line]
     parts = []
     if pressure["level"] is not None:
         parts.append(pressure["level"])

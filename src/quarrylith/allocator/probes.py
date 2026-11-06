@@ -32,14 +32,16 @@ class ProbeError(Exception):
     """A probe could not read what it measures; the message names the probe."""
 
 
-def _run(probe, argv):
+def _run(probe, argv, timeout=TIMEOUT):
     """The output of `argv`, bounded and timed, or a `ProbeError` naming
-    `probe`."""
+    `probe`. It runs in the `C` locale, so that a figure is the kernel's and not
+    a locale's (a comma decimal reads as a smaller number, not as an error)."""
     try:
         done = subprocess.run(
             argv,
             capture_output=True,
-            timeout=TIMEOUT,
+            env={**os.environ, "LC_ALL": "C"},
+            timeout=timeout,
             text=True,
             errors="replace",
             check=False,
@@ -147,27 +149,40 @@ LEVELS = {1: "normal", 2: "warn", 4: "critical"}
 #: seconds in which every task stalled on memory) at or above which the level is
 #: warn: 5%.
 PSI_FULL_WARN = 5.0
-UNITS = {"B": 1, "K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40}
-SWAPUSAGE = re.compile(r"\b(total|used|free)\s*=\s*([0-9]+(?:\.[0-9]+)?)([BKMGT]?)")
+#: `sysctl` by its path (`/usr/sbin` is not on every PATH), and how long each of
+#: the two pressure reads may take: a few seconds, so one stuck `sysctl` cannot
+#: cost a placement long.
+SYSCTL = "/usr/sbin/sysctl"
+PRESSURE_TIMEOUT_S = 3
+UNITS = {"K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40}
+#: The whole of `vm.swapusage`, as the kernel writes it (`total = 7168.00M  used
+#: = 5913.25M  free = 1254.75M  (encrypted)`): a figure, a point and a capital
+#: unit each, and nothing else. A figure off this is a failed read, never bytes.
+_FIGURE = r"([0-9]+(?:\.[0-9]+)?)([KMGT])"
+SWAPUSAGE = re.compile(
+    rf"\s*total = {_FIGURE}\s+used = {_FIGURE}\s+free = {_FIGURE}"
+    r"(?:\s+\([a-z ]+\))?\s*"
+)
 PSI_FULL = re.compile(r"^full\b.*?\bavg10=([0-9]+(?:\.[0-9]+)?)", re.MULTILINE)
 
 
 def parse_pressure_level(text):
     """The kernel's pressure level in `sysctl -n`'s output: 1, 2 or 4."""
     found = text.strip()
-    if not found.isdigit() or int(found) < 1:
+    if re.fullmatch(r"[0-9]+", found) is None or int(found) < 1:
         raise ProbeError("probe_pressure: the pressure level is not a number")
     return int(found)
 
 
 def parse_swapusage(text):
-    """`(total, used)` bytes in `vm.swapusage`'s text, whatever unit it wrote."""
-    found = {}
-    for name, number, unit in SWAPUSAGE.findall(text):
-        found[name] = round(float(number) * UNITS[unit or "B"])
-    if "total" not in found or "used" not in found:
-        raise ProbeError("probe_pressure: vm.swapusage has no total and used")
-    return found["total"], found["used"]
+    """`(total, used)` bytes in `vm.swapusage`'s text. The whole text must be
+    the kernel's format (a figure with no unit, a lowercase unit, a comma or
+    anything else is a `ProbeError`)."""
+    found = SWAPUSAGE.fullmatch(text)
+    if found is None:
+        raise ProbeError("probe_pressure: vm.swapusage is not in the kernel's format")
+    total, used, _ = (round(float(found[n]) * UNITS[found[n + 1]]) for n in (1, 3, 5))
+    return total, used
 
 
 def parse_psi(text):
@@ -203,11 +218,16 @@ def probe_pressure():
         level = parse_pressure_level(
             _run(
                 "probe_pressure",
-                ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                [SYSCTL, "-n", "kern.memorystatus_vm_pressure_level"],
+                PRESSURE_TIMEOUT_S,
             )
         )
         total, used = parse_swapusage(
-            _run("probe_pressure", ["sysctl", "-n", "vm.swapusage"])
+            _run(
+                "probe_pressure",
+                [SYSCTL, "-n", "vm.swapusage"],
+                PRESSURE_TIMEOUT_S,
+            )
         )
         return {
             "level": level,

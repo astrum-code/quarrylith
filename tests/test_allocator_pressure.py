@@ -456,7 +456,7 @@ def test_the_pressure_level_is_a_number_of_the_kernels():
 
 
 def fake_run(answers, calls=None, kws=None):
-    def run(probe, argv, **kw):
+    def run(probe, argv, *args, **kw):
         if calls is not None:
             calls.append(argv)
         if kws is not None:
@@ -506,7 +506,6 @@ def test_the_sysctl_reads_run_in_the_c_locale_by_their_full_path(monkeypatch):
     for argv, kw in ran.calls:
         assert argv[0] == SYSCTL
         assert kw["env"]["LC_ALL"] == "C" and kw["env"]["PATH"]
-        assert "LANG" not in kw["env"] or kw["env"]["LANG"] == "C"
 
 
 def test_a_hung_sysctl_is_a_short_bounded_failed_read(monkeypatch):

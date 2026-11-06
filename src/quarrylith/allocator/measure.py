@@ -114,6 +114,12 @@ def _gib(n):
     return f"{n / 2**30:.1f} GiB"
 
 
+def swap_refused(used, total):
+    """Whether swap of `used` of `total` bytes refuses new work: the one place
+    the swap rule is written."""
+    return used >= SWAP_FLOOR and used * 100 >= total * SWAP_SHARE_PERCENT
+
+
 def pressure_view(value, why=""):
     """What the host's pressure reading says, as plain data and the words that
     would refuse new work: `{"level", "swap_used", "swap_total", "refused",
@@ -133,12 +139,7 @@ def pressure_view(value, why=""):
     refused = []
     if _number(level) and level >= REFUSE_LEVEL:
         refused.append(f"memory pressure is {LEVEL_NAMES.get(level, f'level {level}')}")
-    if (
-        _number(used)
-        and _number(total)
-        and used >= SWAP_FLOOR
-        and used * 100 >= total * SWAP_SHARE_PERCENT
-    ):
+    if _number(used) and _number(total) and swap_refused(used, total):
         refused.append(f"swap {_gib(used)} of {_gib(total)}")
     return {
         "level": LEVEL_NAMES.get(level, f"level {level}") if _number(level) else None,

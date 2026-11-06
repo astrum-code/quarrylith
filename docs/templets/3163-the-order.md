@@ -3,7 +3,7 @@ title: The order
 owner: workbench
 mechanism: order
 templet: 3163
-status: agreed
+status: built
 base:
   quarrylith: bd0420d
   benchLith: 2a8a78e5
@@ -11,6 +11,8 @@ pins:
   - repo: quarrylith
     symbols:
       - src/quarrylith/record/contract.py::Record.ready
+      - src/quarrylith/record/contract.py::Record.landable
+      - src/quarrylith/record/contract.py::Record.start_run
       - src/quarrylith/record/contract.py::Record.effective_labels
       - src/quarrylith/record/contract.py::efforts_of
       - src/quarrylith/record/contract.py::_ineligible
@@ -19,7 +21,8 @@ pins:
       - src/quarrylith/record/schema.py::FLAG_RE
       - src/quarrylith/record/schema.py::MULTI_VALUED_LABELS
       - src/quarrylith/record/schema.py::check_labels
-    at: bd0420d
+    paths: [src/quarrylith/order/]
+    at: f7f4338
   - repo: benchLith
     symbols:
       - bin/lith::launch_order
@@ -1168,3 +1171,14 @@ merge happens.
   `changes` or none, bars the merge; a tier above 5 needs the second role's
   review, and a risk below 1 is the user's (approved: the conformance review
   of quarrylith#19)
+- 2026-11-06 proposed: `order` refuses a `never` that is not a map from
+  `("task", id)` or `("item", number)` to the refusal's text; the walk's third
+  check reads "landing reviews: N of M busy" (N live plus started, M
+  `review_slots`); and `place` says "a landing review waits while admitted
+  work can start" for a landing review the sequence does not hold because
+  tiers 1 to 3 can start work (this PR)
+- 2026-11-06 proposed: what a landing candidate is left out for (a schedule,
+  a flag, `never`) is in the sequence's `left`, as for any candidate; and the
+  landing tier is decided by a `Walk` over tiers 1 to 3 inside `order`, with
+  no starts, so the sequence and the walk's first three checks cannot disagree
+  (this PR)

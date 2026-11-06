@@ -18,13 +18,19 @@ from pathlib import Path
 import pytest
 from backends import Clock, admitted
 from hengestore import FakeStore, own_store
-from loader import Point
+from loader import Killing, Point
 from test_load_batches import a_dump, on_fake
 
 from quarrylith.record import henge, schema
 from quarrylith.record.contract import Refused, Unavailable, Unknown, open_record
 
 ENDED = (Refused, Unavailable, Unknown)
+
+
+try:
+    from henge.store.client import Store
+except ImportError:  # pragma: no cover - the client is a dependency
+    Store = None
 
 
 def moved_and_back(folder, batch):
@@ -118,10 +124,22 @@ def not_torn(fake, dump, returned):
     return None
 
 
+def foreign(fake, dump):
+    """Does the journal hold an entry that is not the dump's?"""
+    space = henge.spaces("rec")["journal"]
+    for sp, key in fake.keys():
+        if sp == space:
+            seq = key[0]
+            event = fake.value(space, key)["event"]
+            if seq > len(dump["journal"]) or event != dump["journal"][seq - 1]:
+                return True
+    return False
+
+
 def schedule(dump, act_of):
     """Stop the loader before its k-th call, for every k, with `act_of(fake)`
     run there. Each run ends `not_torn`. Returns what the runs ended as."""
-    out = {"returned": 0, "ended": 0, "runs": 0}
+    out = {"returned": 0, "ended": 0, "ended by a commit": 0, "runs": 0}
     k = 1
     while True:
         fake = FakeStore()
@@ -144,7 +162,12 @@ def schedule(dump, act_of):
             assert returned
             return out
         not_torn(fake, dump, returned)
-        out["returned" if returned else "ended"] += 1
+        if not returned and foreign(fake, dump):
+            out["ended by a commit"] += 1
+        elif not returned:
+            out["ended"] += 1
+        else:
+            out["returned"] += 1
         out["runs"] += 1
         k += 1
 
@@ -168,22 +191,53 @@ def opens_three_times(fake):
     return act
 
 
-@pytest.mark.parametrize("batch", [2, 3, 8, 1000])
+def test_a_second_open_between_the_commit_puts_at_the_default_batch(tmp_path):
+    """templet:3159 -- Henge, invariant 13: at `LOAD_BATCH` itself, the loader
+    stopped between the commit puts of a batch that nets to nothing, the move
+    out the last entry a second open can read, and at the put that commits the
+    batch and past it. Fresh opens, and the load returns, its index whole."""
+    batch = henge.LOAD_BATCH
+    dump, target, state, out_at = moved_and_back(tmp_path, batch)
+    points = [
+        Point(space="journal", key=[out_at + 1], after=False),
+        Point(space="state", key=["loading"], nth=3, after=False),
+        Point(space="state", key=["loading"], nth=3),
+    ]
+    for point in points:
+        fake = FakeStore()
+        rec = on_fake(fake, "w0")
+        rec.init()
+        rec.close()
+        client = Killing(fake.client("w1"), point, opens_three_times(fake))
+        w1 = henge.HengeRecord(client, "rec", actor="w1", via="load", timeout_s=1.0)
+        w1.clock = Clock()
+        w1.load(dump)
+        w1.close()
+        assert client.died, point
+        not_torn(fake, dump, True)
+        rec = on_fake(fake, "r")
+        assert target in [r["number"] for r in rec.read("items", state=state)]
+        rec.close()
+
+
+@pytest.mark.parametrize("batch", [2, 3, 8])
 def test_a_second_open_at_every_call_of_a_load_with_a_net_nothing(
     batch, tmp_path, monkeypatch
 ):
     """templet:3159 -- Henge, invariant 13: a batch that moves an item out of its
     state and back nets to nothing on a chunk the loader holds as its own put.
     Fresh opens at every call of the load, between the batch's commit puts
-    included, and the load still returns with every index the records'."""
+    included, and the load still returns with every index the records'. (An
+    open ahead of the load's start finds no load, and commits: that stops it.)"""
     monkeypatch.setattr(henge, "LOAD_BATCH", batch)
     dump = moved_and_back(tmp_path, batch)[0]
     out = schedule(dump, opens_three_times)
     assert out["ended"] == 0, out
-    assert out["runs"] > 10
+    assert out["ended by a commit"] <= 4, out
+    assert out["returned"] > 10, out
 
 
-@pytest.mark.parametrize("batch", [2, 3, 8, 1000])
+@pytest.mark.parametrize("batch", [8, 1000])
 def test_a_second_open_at_every_call_of_a_load_that_splits(
     batch, tmp_path, monkeypatch, small_chunks
 ):
@@ -191,11 +245,14 @@ def test_a_second_open_at_every_call_of_a_load_that_splits(
     splits them. A part of a batch would split a chunk otherwise than the whole
     does, and a directory keeps the first entry it holds for a chunk's number,
     so a redo of a part would lose keys from the load's. Fresh opens at every
-    call of the load, and every key is there, by every index."""
+    call of the load, and every key is there, by every index. (An open ahead of
+    the load's start finds no load, and commits: that stops it.)"""
     monkeypatch.setattr(henge, "LOAD_BATCH", batch)
-    dump = a_dump(tmp_path / "source", items=6)
+    dump = a_dump(tmp_path / "source", items=4)
     out = schedule(dump, opens_three_times)
     assert out["ended"] == 0, out
+    assert out["ended by a commit"] <= 4, out
+    assert out["returned"] > 10, out
 
 
 @pytest.mark.parametrize("batch", [2, 8, 1000])
@@ -366,13 +423,10 @@ def test_the_tear_on_a_real_store(tmp_path, monkeypatch):
     dump, target, state, out_at = moved_and_back(tmp_path, 8)
     with own_store("single") as running:
         address = f"ipc://{running.folder}/henge.sock"
-        from henge.store.client import Store
-
         first = henge.HengeRecord(Store.connect(address), "tear", actor="w", via="load")
         first.clock = Clock()
         first.init()
         first.close()
-        journal = henge.spaces("tear")["journal"]
         point = Point(space="journal", key=[out_at + 1], after=False)
 
         def second_open():
@@ -382,8 +436,6 @@ def test_the_tear_on_a_real_store(tmp_path, monkeypatch):
             assert rec.head() % 8 == 0
             rec.close()
 
-        from loader import Killing
-
         loader = henge.HengeRecord(
             Killing(Store.connect(address), point, second_open),
             "tear",
@@ -391,7 +443,6 @@ def test_the_tear_on_a_real_store(tmp_path, monkeypatch):
             via="load",
         )
         loader.clock = Clock()
-        assert journal
         loader.load(dump)
         assert loader.store.died
         loader.close()

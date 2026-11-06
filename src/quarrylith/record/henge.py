@@ -6,9 +6,12 @@ Henge gives one object's compare-and-set and nothing wider, so an operation is
 one **journal entry**, put `absent` at the next seq: that put is the commit
 point. The event's records, its index chunks and the `.state` keys follow it,
 each put with the version the writer expects, then one `sync` of the store,
-then `head`. Recovery redoes at most the one entry past `applied`. A load is
-the one write that commits many entries at once (`LOAD_BATCH`, `_store_batch`),
-and an open that finds a load in progress redoes all it left (`_redo_batch`).
+then `head`. Recovery redoes at most the one entry past `applied`.
+
+A load is the one write that commits many entries as one (`LOAD_BATCH`,
+`_store_batch`). Its commit point is the put of `loading` that names the batch's
+last seq, past all its entries: recovery redoes such a batch whole, and an entry
+past what `loading` names is no commit, and is redone by nobody but the load.
 
     quarrylith.<name>.journal  [seq]                  {"event", "priors"}
     quarrylith.<name>.rec      [kind, *key]           the record, and `_seq`
@@ -42,6 +45,7 @@ import contextlib
 import datetime
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -76,7 +80,7 @@ MANY = 1000
 #: object: a chunk, a counter, `applied` and `head` go once a batch, not once
 #: an event. At this size a batch's one sync and its chunks' rewrites are
 #: small beside its puts of entries and records, a crash redoes at most this
-#: many events, and those entries come back in one `get_many`.
+#: many events, and a redo reads those entries in one `get_many`.
 LOAD_BATCH = MANY
 #: How long the record waits for the store at one put, read or sync before it
 #: gives an operation up: past the commit point that is `Unknown`, before it
@@ -164,6 +168,12 @@ def same_entry(a, b):
         return schema.canonical(a) == schema.canonical(b)
     except schema.SchemaError:
         return False
+
+
+def _load_to(loading):
+    """The last seq `loading` commits: a batch's, 0 before the first."""
+    to = loading.get("to", 0)
+    return to if schema.is_int(to) else 0
 
 
 def _ckey(key):
@@ -553,10 +563,15 @@ class HengeRecord(Record):
 
     def _check_journal(self):
         """`get(journal, [high+1])`: absent, the versions read so far may be
-        put against; present, another writer is live."""
+        put against; present, another writer is live, unless a load in progress
+        has not committed it: `loading` then names no seq past `high`, and no
+        object is put for an event past `high` until it does."""
         got = self._call("get", self.J, [self._high + 1])
         if got is not None:
-            raise _Found(f"journal/[{self._high + 1}] is there")
+            row = self._call("get", self.S, ["loading"])
+            loading = None if row is None else row.value
+            if not isinstance(loading, dict) or _load_to(loading) > self._high:
+                raise _Found(f"journal/[{self._high + 1}] is there")
         self._epoch += 1
 
     def _put(self, space, key, fn, *, why, fresh=False, settle=True):
@@ -780,10 +795,12 @@ class HengeRecord(Record):
             tries.pause()
 
     def _store_batch(self, events, priors):
-        """A load's next events as one commit: their entries in seq order,
-        each a commit put, then what they write, each object once, at its
-        last value, and then `applied`, one sync and `head`, for the last
-        seq. Each put is sent once the one before it is answered."""
+        """A load's next events as one commit: their entries in seq order, then
+        the commit point, `loading` naming the last seq, then what they write,
+        each object once, at its last value, and then `applied`, one sync and
+        `head`, for the last seq. Each put is sent once the one before it is
+        answered. An open sees a batch whole or not at all, so its redo and
+        this writer have the same plan, as with one entry."""
         self._live()
         if events[0].seq != self._high + 1:
             raise Unavailable(f"seq {events[0].seq} is not next after {self._high}")
@@ -799,7 +816,20 @@ class HengeRecord(Record):
             raise Unavailable(f"the store at {self._where()}: {e}") from e
         for event, prior in pairs:
             self._commit_put(event.seq, {"event": event.to_dict(), "priors": prior})
+        self._put(self.S, ["loading"], self._batch_to(events[-1].seq), why="op")
         self._apply(events[-1].seq, plan, "op")
+
+    def _batch_to(self, seq):
+        """The batch's commit point, as a put of `loading`. It only moves up, and
+        it is this load's or nothing."""
+        digest = self._loading.get("digest")
+
+        def fn(cur):
+            if not isinstance(cur, dict) or cur.get("digest") != digest:
+                raise _Found("the load in progress changed")
+            return SKIP if _load_to(cur) >= seq else {**cur, "to": seq}
+
+        return fn
 
     def _batch_priors(self, events):
         """Each event's priors, each seeing the events before it in the batch,
@@ -874,10 +904,13 @@ class HengeRecord(Record):
         """At open, and after a commit put met another writer's entry: read
         `applied` (a), then journal/[a+1] and journal/[a+2]. None: at open,
         put `applied` again as read, then bring `head` up to a. One: redo it
-        whole. Two: another writer is live, and nothing is redone, unless the
-        open finds a load in progress, whose batch left them: `_redo_batch`.
-        After a commit put met another writer's entry, `applied` with nothing
-        to redo is put again by the next commit, before it goes on past it."""
+        whole. Two: another writer is live, and nothing is redone. With a load
+        in progress (`loading` read past those) an open redoes what `loading`
+        commits, whole (`_redo_batch`), and no other entry past `applied`, which
+        is the load's own; after a commit put met another writer's entry, this
+        writer stops. After a commit put met another writer's entry, `applied`
+        with nothing to redo is put again by the next commit, before it goes on
+        past it."""
         self._forget()
         self._unsettled = False
         try:
@@ -886,16 +919,29 @@ class HengeRecord(Record):
             a = applied[0] if schema.is_int(applied[0]) else 0
             one = self._fetch(self.J, [a + 1])
             two = self._fetch(self.J, [a + 2])
-            batch = (
-                at_open
-                and two[0] is not ABSENT
-                and isinstance(self._fetch(self.S, ["loading"])[0], dict)
-            )
+            loading = None
+            if one[0] is not ABSENT or two[0] is not ABSENT:
+                loading = self._fetch(self.S, ["loading"])[0]
         except _StoreDown as e:
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
-        if batch:
-            self._redo_batch(a)
-            return
+        if isinstance(loading, dict):
+            if not at_open:
+                if self._loading is not None and one[0] is not ABSENT:
+                    # the loader, as read: on a mirror it may be on one copy,
+                    # and a resumed load's compare must find it on either
+                    self._settle(a + 1, one[0], "recover", version=one[1])
+                self._closed = "a load is in progress"
+                self._forget()
+                self._shut()
+                raise Unavailable(
+                    f"the record {self.name}: a load is in progress: another "
+                    "writer is live"
+                )
+            if _load_to(loading) > a:
+                self._redo_batch(a, _load_to(loading))
+                return
+            # past what `loading` names: no commit, and the load's to put again
+            one = two = (ABSENT,)
         if two[0] is not ABSENT:
             self._closed = f"recovery found journal/[{a + 1}] and [{a + 2}]"
             self._forget()
@@ -947,32 +993,27 @@ class HengeRecord(Record):
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
         self._apply(a + 1, plan, "recover")
 
-    def _redo_batch(self, a):
-        """At open, a load in progress with entries past `applied`, from `a +
-        1` to the first seq absent: what a batch left, redone as one, as
-        recovery redoes one entry. Each entry is put again with the version
-        read, then what they write, with fresh reads, a split's redo included,
-        then `applied`, one sync and `head`. Whether they are the dump's is
-        the resumed load's to say."""
-        rows, seq = [], a + 1
+    def _redo_batch(self, a, to):
+        """At open, a load's batch committed and not applied: `a + 1` to `to`,
+        redone as one, as recovery redoes one entry, with the plan its loader
+        has. Each entry is put again with the version read, then what they
+        write, with fresh reads, a split's redo included, then `applied`, one
+        sync and `head`. Whether they are the dump's is the resumed load's to
+        say."""
+        seqs = list(range(a + 1, to + 1))
         try:
-            while True:
-                seqs = list(range(seq, seq + MANY))
-                got = self._fetch_many(self.J, [[s] for s in seqs], keep=False)
-                ended = False
-                for s, row in zip(seqs, got):
-                    if row[0] is ABSENT:
-                        ended = True
-                        break
-                    rows.append((s, row))
-                if ended:
-                    break
-                seq += MANY
+            got = self._fetch_many(self.J, [[s] for s in seqs], keep=False)
         except _StoreDown as e:
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
-        if not rows:
-            # read at a+1 and a+2 a moment ago: a copy that lacks them answered
-            raise Unavailable(f"the record {self.name}: journal/[{a + 1}] went")
+        rows = list(zip(seqs, got))
+        missing = [s for s, row in rows if row[0] is ABSENT]
+        if missing:
+            # every entry was answered before `loading` named them: only a copy
+            # that lacks them can answer so
+            raise Unavailable(
+                f"the record {self.name}: journal/[{missing[0]}] is absent below "
+                f"the load's committed {to}"
+            )
         try:
             pairs = [
                 (ev.Event.from_dict(row[0]["event"]), row[0]["priors"])
@@ -980,7 +1021,7 @@ class HengeRecord(Record):
             ]
         except (KeyError, TypeError, ValueError) as e:
             raise Unavailable(f"a journal entry past {a} is not an entry: {e}") from e
-        self._high = rows[-1][0]
+        self._high = to
         for s, row in rows:
             if self._settle(s, row[0], "recover", version=row[1]) is None:
                 self._fail(
@@ -995,7 +1036,7 @@ class HengeRecord(Record):
                 self._fetch(self.S, key)
         except _StoreDown as e:
             raise Unavailable(f"the record {self.name}: recovery: {e}") from e
-        self._apply(self._high, plan, "recover")
+        self._apply(to, plan, "recover")
 
     # -- administration -------------------------------------------------------
 
@@ -1197,10 +1238,23 @@ class HengeRecord(Record):
 
     def _holds_only_the_dump(self, journal):
         """A resumed load goes on from `high`, so the record's events up to it
-        are the dump's. Any other is refused, before an event is committed."""
+        are the dump's, and so are the entries past it, a batch not committed,
+        which it will put again. Any other is refused, before an event is
+        committed."""
         seqs = list(range(1, self._high + 1))
-        rows = self._look_many(self.J, [[s] for s in seqs], keep=False)
-        for seq, row in zip(seqs, rows):
+        rows = list(zip(seqs, self._look_many(self.J, [[s] for s in seqs], keep=False)))
+        seq = self._high + 1
+        while True:
+            seqs = list(range(seq, seq + MANY))
+            got = self._fetch_many(self.J, [[s] for s in seqs], keep=False)
+            held = list(
+                itertools.takewhile(lambda p: p[1][0] is not ABSENT, zip(seqs, got))
+            )
+            rows += held
+            if len(held) < len(seqs):
+                break
+            seq += MANY
+        for seq, row in rows:
             if (
                 seq > len(journal)
                 or row[0] is ABSENT
@@ -1376,8 +1430,8 @@ class HengeRecord(Record):
             if isinstance(state["loading"], dict):
                 findings.append(
                     f"henge: a load is in progress, at seq {top} of "
-                    f"{state['loading'].get('events')}: load the same dump "
-                    "to finish it"
+                    f"{state['loading'].get('events')}: only a load of its dump "
+                    "goes on"
                 )
             if state["applied"] != state["head"]:
                 findings.append(

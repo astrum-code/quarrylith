@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: b0b60a6
+    at: e4e3b92
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -1098,9 +1098,9 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
     dump, `applied` and `head` equal; one that does not has no record of that
     batch to redo. So `check()` finds nothing torn after a cut, and says the load
     is in progress.
-  - **A record that a load has not reached** reads as the prefix its last batch
-    leaves, and `check()` says so ("only a load of its dump goes on": it names
-    what can go on, and a resumed load can still refuse, below).
+  - **A load stopped part-way** reads as the prefix its last batch leaves, and
+    `check()` says so, "only a load of its dump goes on": it names what can go on,
+    and a resumed load can still refuse, below.
   - **A mirror.** A batch is the same puts, one at a time, so its copies are
     kept as any commit's are. `to` answered means both copies hold it and every
     entry below it, so a redo finds them all on either copy. A `to` on the leader

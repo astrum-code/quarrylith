@@ -262,7 +262,8 @@ def test_remeasure_probes_again_and_without_it_the_recorded_figures_stay(
     assert f"capacity disk = {130 * GIB}" in lines_of(out, "wrote ")
 
 
-def test_a_dry_run_declare_names_the_writes_and_makes_none(record, clock):
+@over_backends
+def test_a_dry_run_declare_names_the_writes_and_makes_none(backend, record, clock):
     """templet:3161 -- `HostPlacement.declare(..., dry_run=True)` returns what
     a declare would write, line for line, and writes nothing; the real declare
     then writes those lines."""
@@ -738,7 +739,8 @@ def test_declare_says_its_phases_and_the_sampling_it_waits_for(
     monkeypatch.setattr(cli, "SLOW_PHASE_S", 0.0)
     code, out, err = alloc(capsys, "declare", write_doc(tmp_path), url)
     assert code == 0, out
-    assert "sampling yard: 2/61, peak 1.0 GiB, 0:10" in err.splitlines()
+    assert "sampling yard: 1/61, peak 1.0 GiB, 0:00" in err.splitlines()
+    assert "sampling yard: 61/61, peak 1.0 GiB, 10:00" in err.splitlines()
     for phase in ("opening the record: ", "resolving: ", "declaring: "):
         assert phase in err
 
@@ -808,7 +810,8 @@ def test_every_command_takes_debug_and_prints_reads_shorts_and_writes(
         code, out, err = alloc(capsys, *argv, "--debug")
         assert out == plain, name
         assert any(x.startswith("read: ") for x in err.splitlines()), name
-        assert not any(x.startswith("write: ") for x in err.splitlines()), name
+        wrote = [x.split("(")[0] for x in err.splitlines() if x.startswith("write: ")]
+        assert wrote == (["write: record_reading"] if name == "measure" else []), name
     code, out, err = alloc(capsys, "place", url, huge, "--now", now, "--debug")
     assert code == 2
     shorts = [x for x in err.splitlines() if x.startswith("short: ")]
@@ -842,6 +845,7 @@ def test_debug_prints_one_write_line_for_each_event_a_command_makes(
         "write: record_reading"
     ]
     assert head_of(opener) == mark + 1
+    host.rss = 2 * GIB
     mark = head_of(opener)
     code, out, err = alloc(
         capsys,

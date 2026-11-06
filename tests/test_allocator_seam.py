@@ -342,3 +342,14 @@ def test_the_same_inputs_give_equal_refusals():
     two = refuse(1, "agent", {"memory": 1}, [short()], node="laptop")
     assert one == two
     assert one != refuse(2, "agent", {"memory": 1}, [short()], node="laptop")
+
+
+def test_a_refusal_with_no_node_says_so_instead_of_naming_none():
+    """templet:3161 -- a refusal for a record with no document names no node:
+    the line says no allocation document is declared."""
+    gone = Short("node", None, None, None, None, None, False, None, [])
+    text = refuse(4, None, {}, [gone], node=None).text
+    assert text == (
+        "allocator: task 4 refused: node: no allocation document is declared; never"
+    )
+    assert "None" not in text

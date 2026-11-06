@@ -35,6 +35,8 @@ TOP = (
     "format node drivers disk_path capacity harness budget floor drift"
     " consumer lane class"
 ).split()
+#: The tables a document may leave out.
+OPTIONAL = ("harness", "consumer", "lane")
 MATCH_KEYS = ("kind", "sandbox", "labels", "flags")
 CONSUMER_KEYS = ("name", "why", "probe", "path")
 PROBES = ("pidfile", "pid", "process")
@@ -454,6 +456,13 @@ def load_document(text):
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
         raise DocumentError(f"not a TOML document: {error}") from None
+    return document_from_data(raw)
+
+
+def document_from_data(raw):
+    """The document in `raw`, plain data shaped as the TOML reads (what
+    `to_data` gives, once through JSON), checked whole. Amounts may be whole
+    numbers, and a "measure" only where the sample shows it."""
     _table(
         "",
         raw,
@@ -487,3 +496,104 @@ def load_document(text):
         lanes=lanes,
         classes=classes,
     )
+
+
+# -- the document as plain data ----------------------------------------------------
+
+
+def _figure(where, value, figure):
+    """`value`, or for a "measure" its `figure` (a whole number from 0), with
+    the key named when there is none."""
+    if value != MEASURE:
+        return value
+    if figure is None:
+        raise DocumentError(f"{where}: {MEASURE} has no figure")
+    if isinstance(figure, bool) or not isinstance(figure, int) or figure < 0:
+        raise DocumentError(
+            f"{where}: a figure is a whole number from 0, not {figure!r}"
+        )
+    return figure
+
+
+def to_data(document, figures=None):
+    """The document as plain data shaped as the TOML reads it, every amount a
+    whole number: JSON-safe, and what `document_from_data` loads back. With
+    `figures` (`{"capacity": {resource: amount}, "consumers": {name:
+    {resource: amount}}}`) each "measure" is its figure, and a "measure" with
+    none is refused (`DocumentError`, naming the key); without, it stays."""
+    capacity = figures.get("capacity", {}) if figures is not None else None
+    consumers = figures.get("consumers", {}) if figures is not None else None
+
+    def measured(where, value, found):
+        return value if figures is None else _figure(where, value, found)
+
+    data = {
+        "format": FORMAT,
+        "node": document.node,
+        "drivers": list(document.drivers),
+        "disk_path": document.disk_path,
+        "capacity": {
+            resource: measured(
+                _join("capacity", resource),
+                value,
+                (capacity or {}).get(resource),
+            )
+            for resource, value in document.capacity.items()
+            if not resource.startswith("lane.")
+        },
+        "harness": {
+            row.name: {
+                "slots": row.slots,
+                **({"budget": row.budget} if row.budget is not None else {}),
+            }
+            for row in document.harness.values()
+        },
+        "budget": {
+            "weight": dict(document.budget.weight),
+            "warning_max": document.budget.warning_max,
+            "stop_at": document.budget.stop_at,
+            "max_age_s": document.budget.max_age_s,
+        },
+        "floor": {
+            "memory": document.floor.memory,
+            "disk": document.floor.disk,
+            "max_age_s": document.floor.max_age_s,
+        },
+        "drift": {"tolerance": document.drift_tolerance},
+        "consumer": [
+            _consumer_data(c, consumers, measured) for c in document.consumers
+        ],
+        "lane": [
+            {"name": lane.name, "labels": list(lane.labels), "max": lane.max}
+            for lane in document.lanes
+        ],
+        "class": [
+            {
+                "name": run_class.name,
+                "match": {
+                    key: list(getattr(run_class.match, key))
+                    for key in MATCH_KEYS
+                    if getattr(run_class.match, key)
+                },
+                "needs": dict(run_class.needs),
+            }
+            for run_class in document.classes
+        ],
+    }
+    for key in OPTIONAL:
+        if not data[key]:
+            del data[key]
+    return data
+
+
+def _consumer_data(consumer, figures, measured):
+    row = {"name": consumer.name, "why": consumer.why}
+    for resource, value in consumer.amounts.items():
+        found = ((figures or {}).get(consumer.name) or {}).get(resource)
+        where = _join(_join("consumer", consumer.name), resource)
+        row[resource] = measured(where, value, found)
+    if consumer.probe is not None:
+        row["probe"] = dict(consumer.probe)
+    if consumer.path is not None:
+        row["path"] = consumer.path
+    return row

@@ -1,0 +1,2 @@
+bump: minor
+- `HostPlacement` declares an allocation document into the record (`declare`, with the figures a "measure" stands for given, never probed) and answers from its table: `place` gives a `Fit` or a `Refusal` naming each short resource, `hold` and `release` keep standing and task-own reservations, and `headroom` gives what each live node can still take; the document is also available as plain data (`to_data`, `document_from_data`)

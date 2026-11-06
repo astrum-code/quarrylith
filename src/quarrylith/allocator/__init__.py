@@ -12,8 +12,10 @@ from .document import (
     Lane,
     Match,
     RunClass,
+    document_from_data,
     load_document,
     parse_amount,
+    to_data,
     unit_of,
 )
 from .seam import (
@@ -26,6 +28,7 @@ from .seam import (
     placement_for,
     refuse,
 )
+from .table import table_shorts
 
 __all__ = [
     "CAUSES",
@@ -42,10 +45,13 @@ __all__ = [
     "RunClass",
     "Short",
     "classify",
+    "document_from_data",
     "load_document",
     "needs_of",
     "parse_amount",
     "placement_for",
     "refuse",
+    "table_shorts",
+    "to_data",
     "unit_of",
 ]

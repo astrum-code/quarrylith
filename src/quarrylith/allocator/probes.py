@@ -5,6 +5,7 @@ They only read (`vm_stat`, `sysctl`, `/proc/meminfo`, `ps` and `statvfs`),
 give figures and nothing else, and keep no process's command line. A probe
 that cannot read raises `ProbeError`, naming itself."""
 
+import errno
 import math
 import os
 import re
@@ -52,11 +53,22 @@ def _run(probe, argv):
     return done.stdout
 
 
+class Absent(ProbeError):
+    """A reading that this host does not have (a file its kernel does not
+    write), as against one it has and could not read."""
+
+
+#: Errors that say a file is not on this host: not there, or not supported.
+NOT_THERE = (errno.ENOENT, errno.ENOTSUP, errno.EOPNOTSUPP)
+
+
 def _small(probe, path):
     try:
         with open(path, "rb") as handle:
             return handle.read(MAX_SMALL).decode("utf-8", "replace")
     except OSError as error:
+        if error.errno in NOT_THERE:
+            raise Absent(f"{probe}: {path} is not there") from None
         raise ProbeError(
             f"{probe}: {path} is not readable ({error.strerror})"
         ) from None
@@ -125,6 +137,98 @@ def probe_memory():
             "method": "meminfo",
         }
     raise ProbeError(f"probe_memory: no reader for {sys.platform}")
+
+
+# -- memory pressure ----------------------------------------------------------------
+
+#: The kernel's numbers for `kern.memorystatus_vm_pressure_level`.
+LEVELS = {1: "normal", 2: "warn", 4: "critical"}
+#: On Linux, `/proc/pressure/memory`'s `full avg10` (the share of the last ten
+#: seconds in which every task stalled on memory) at or above which the level is
+#: warn: 5%.
+PSI_FULL_WARN = 5.0
+UNITS = {"B": 1, "K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40}
+SWAPUSAGE = re.compile(r"\b(total|used|free)\s*=\s*([0-9]+(?:\.[0-9]+)?)([BKMGT]?)")
+PSI_FULL = re.compile(r"^full\b.*?\bavg10=([0-9]+(?:\.[0-9]+)?)", re.MULTILINE)
+
+
+def parse_pressure_level(text):
+    """The kernel's pressure level in `sysctl -n`'s output: 1, 2 or 4."""
+    found = text.strip()
+    if not found.isdigit() or int(found) < 1:
+        raise ProbeError("probe_pressure: the pressure level is not a number")
+    return int(found)
+
+
+def parse_swapusage(text):
+    """`(total, used)` bytes in `vm.swapusage`'s text, whatever unit it wrote."""
+    found = {}
+    for name, number, unit in SWAPUSAGE.findall(text):
+        found[name] = round(float(number) * UNITS[unit or "B"])
+    if "total" not in found or "used" not in found:
+        raise ProbeError("probe_pressure: vm.swapusage has no total and used")
+    return found["total"], found["used"]
+
+
+def parse_psi(text):
+    """The `full avg10` figure of `/proc/pressure/memory`."""
+    found = PSI_FULL.search(text)
+    if found is None:
+        raise ProbeError("probe_pressure: no full avg10 in the memory pressure file")
+    return float(found[1])
+
+
+def parse_swap_meminfo(text):
+    """`(total, used)` bytes of swap in `/proc/meminfo` (kB)."""
+    found = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        parts = rest.split()
+        if name in ("SwapTotal", "SwapFree") and parts and parts[0].isdigit():
+            found[name] = int(parts[0]) * 1024
+    if set(found) != {"SwapTotal", "SwapFree"}:
+        raise ProbeError("probe_pressure: SwapTotal or SwapFree is not in meminfo")
+    return found["SwapTotal"], max(found["SwapTotal"] - found["SwapFree"], 0)
+
+
+def probe_pressure():
+    """`{"level", "swap_used", "swap_total", "method"}` of this host: the memory
+    pressure level (the kernel's 1 normal, 2 warn, 4 critical) and the swap in
+    bytes. A figure the host does not have is None, and is not a failed read;
+    one it has and cannot read raises `ProbeError`. On macOS each is one
+    `sysctl -n`; on Linux the level is 2 when `/proc/pressure/memory`'s `full
+    avg10` is `PSI_FULL_WARN` or more, else 1, and the swap comes from
+    `/proc/meminfo`."""
+    if sys.platform == "darwin":
+        level = parse_pressure_level(
+            _run(
+                "probe_pressure",
+                ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            )
+        )
+        total, used = parse_swapusage(
+            _run("probe_pressure", ["sysctl", "-n", "vm.swapusage"])
+        )
+        return {
+            "level": level,
+            "swap_used": used,
+            "swap_total": total,
+            "method": "sysctl",
+        }
+    if sys.platform.startswith("linux"):
+        try:
+            full = parse_psi(_small("probe_pressure", "/proc/pressure/memory"))
+            level = 2 if full >= PSI_FULL_WARN else 1
+        except Absent:
+            level = None
+        total, used = parse_swap_meminfo(_small("probe_pressure", "/proc/meminfo"))
+        return {
+            "level": level,
+            "swap_used": used,
+            "swap_total": total,
+            "method": "psi" if level is not None else "meminfo",
+        }
+    return {"level": None, "swap_used": None, "swap_total": None, "method": "none"}
 
 
 # -- disk ---------------------------------------------------------------------------

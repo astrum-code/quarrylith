@@ -96,6 +96,101 @@ def measured_shorts(value, document, node, needs, why=""):
     return shorts
 
 
+#: The kernel's names for the pressure levels; a level it has not named reads
+#: as its number.
+LEVEL_NAMES = {1: "normal", 2: "warn", 4: "critical"}
+#: The lowest level that refuses new work: warn.
+REFUSE_LEVEL = 2
+#: Swap refuses new work when it is used past BOTH: a floor and a share of its
+#: total. macOS grows its swap on demand, so a share alone reads "nearly full"
+#: on a small swap (90% of 1 GiB is no crisis); the floor alone would refuse a
+#: large swap that still has room. The floor is twice the memory floor and about
+#: a sixth of this host's 48 GiB; the night that began it had 14 of 15 GiB.
+SWAP_FLOOR = 8 * 2**30
+SWAP_SHARE_PERCENT = 85
+
+
+def _gib(n):
+    return f"{n / 2**30:.1f} GiB"
+
+
+def pressure_view(value, why=""):
+    """What the host's pressure reading says, as plain data and the words that
+    would refuse new work: `{"level", "swap_used", "swap_total", "refused",
+    "unread"}`. `value` is `probe_pressure`'s dict, or None with `why` for a
+    read that failed. `refused` is a list of details, empty when new work may
+    start."""
+    if value is None:
+        return {
+            "level": None,
+            "swap_used": None,
+            "swap_total": None,
+            "refused": [],
+            "unread": why or "the pressure reading failed",
+        }
+    level = value.get("level")
+    used, total = value.get("swap_used"), value.get("swap_total")
+    refused = []
+    if _number(level) and level >= REFUSE_LEVEL:
+        refused.append(f"memory pressure is {LEVEL_NAMES.get(level, f'level {level}')}")
+    if (
+        _number(used)
+        and _number(total)
+        and used >= SWAP_FLOOR
+        and used * 100 >= total * SWAP_SHARE_PERCENT
+    ):
+        refused.append(f"swap {_gib(used)} of {_gib(total)}")
+    return {
+        "level": LEVEL_NAMES.get(level, f"level {level}") if _number(level) else None,
+        "swap_used": used if _number(used) else None,
+        "swap_total": total if _number(total) else None,
+        "refused": refused,
+        "unread": None,
+    }
+
+
+def pressure_shorts(value, why, node):
+    """The shorts of the host's memory pressure: one `unmeasured` (every
+    resource, saying `why`) when the read failed, and else one `pressure`
+    short for a level of warn or worse and one for a swap past its floor and
+    its share. All wait: pressure eases. A host that has no such reading
+    (None figures) is refused for neither."""
+    view = pressure_view(value, why)
+    if view["unread"]:
+        return [
+            Short(
+                "unmeasured",
+                node,
+                None,
+                None,
+                None,
+                None,
+                True,
+                None,
+                [],
+                view["unread"],
+            )
+        ]
+    shorts = []
+    for detail in view["refused"]:
+        swap = detail.startswith("swap")
+        shorts.append(
+            Short(
+                "pressure",
+                node,
+                None,
+                None,
+                view["swap_total"] - view["swap_used"] if swap else None,
+                view["swap_total"] if swap else None,
+                True,
+                None,
+                [],
+                detail,
+            )
+        )
+    return shorts
+
+
 def drift_entries(document, value, free_memory, capacity_memory):
     """What `value` shows past the declaration, as `{"what", "declared",
     "measured", "over"}`: a probed consumer whose resident memory passes what

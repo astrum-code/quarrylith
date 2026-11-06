@@ -31,6 +31,8 @@ from .measure import (
     measured_room,
     measured_shorts,
     measurement,
+    pressure_shorts,
+    pressure_view,
     reading_state,
 )
 from .probes import (  # noqa: F401 (the probes are the host plugin's, too)
@@ -133,10 +135,30 @@ class HostPlacement(Placement):
             return [short], True
         return [], True
 
+    def _pressure(self):
+        """`(value, why)`: the host's memory pressure read now, live, or `(None,
+        why)` when the read fails. It is read where a start is decided, outside
+        any reading of the record, and never taken from a stored reading: a
+        reading up to `floor.max_age_s` old could not stop what starts in that
+        window."""
+        try:
+            return self.probes.probe_pressure(), ""
+        except ProbeError as error:
+            return None, str(error)
+
+    def pressure(self):
+        """What the host's memory pressure says now, as plain data: `level` (a
+        name, or None where the host has none), `swap_used` and `swap_total`
+        (bytes, or None), `refused` (what refuses new work, as words) and
+        `unread` (why the read failed, else None). Reads the host, not the
+        record."""
+        return pressure_view(*self._pressure())
+
     # -- place, headroom ----------------------------------------------------------
 
     def place(self, task, *, now):
         record = self.record
+        pressure = self._pressure()
         with record.reading():
             row = record.get("tasks", task)
             if row is None:
@@ -160,6 +182,7 @@ class HostPlacement(Placement):
                 shorts += budget_shorts(record, document, node, needs, now=now)
                 found, why = reading_state(record, document, node, now=now)
                 shorts += measured_shorts(found, document, node, needs, why)
+                shorts += pressure_shorts(*pressure, node)
                 free = table_free(record, node, needs, now=now)
         if shorts:
             return refuse(task, run_class.name, needs, shorts, node=node)
@@ -175,6 +198,7 @@ class HostPlacement(Placement):
     def headroom(self, *, now):
         record = self.record
         out = {}
+        pressure = self._pressure()
         with record.reading():
             stored = self._stored()
             document = stored[0] if stored else None
@@ -203,6 +227,9 @@ class HostPlacement(Placement):
                         if room is not None:
                             resource = f"budget.{provider}"
                             out[name][resource] = min(out[name][resource], room)
+                    if pressure_shorts(*pressure, name):
+                        # new work is refused on this host, so none may start
+                        out[name] = dict.fromkeys(out[name], 0)
         return out
 
     # -- hold, release ------------------------------------------------------------
@@ -222,6 +249,9 @@ class HostPlacement(Placement):
                     f"hold {resource}: an amount is an int from 1: {amount!r}"
                 )
         record = self.record
+        # only new work meets the pressure: a consumer already running
+        # (`measured` False) is in the host's state already
+        pressure = self._pressure() if measured else None
         with record.reading():
             stored = self._stored()
             if node is None:
@@ -248,6 +278,7 @@ class HostPlacement(Placement):
                     if document is not None:
                         found, why = reading_state(record, document, node, now=now)
                     shorts += measured_shorts(found, document, node, needs, why)
+                    shorts += pressure_shorts(*pressure, node)
         if shorts:
             return refuse(task, None, needs, shorts, node=node)
         return record.reserve(

@@ -183,7 +183,9 @@ def test_hold_refuses_under_pressure_but_a_declared_consumer_does_not(effort, cl
     assert isinstance(held, Refusal)
     assert pressure_of(held).detail == "memory pressure is warn"
     assert held.task == task
-    assert record.read("reservations", live=True, holder="vm:one") == []
+    assert [
+        r for r in record.read("reservations", live=True) if r["holder"] == "vm:one"
+    ] == []
     ids = placement.hold("seen", {"memory": GIB}, measured=False, now=clock())
     assert isinstance(ids, list) and ids
     again = HostPlacement(record, probes=host).declare(

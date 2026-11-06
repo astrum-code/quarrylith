@@ -48,10 +48,11 @@ def _resource_of(entry):
     return str(entry.get("what", "")).rsplit(" ", 1)[-1]
 
 
-def snapshot(record, *, now):
+def snapshot(record, *, now, pressure=None):
     """Plain data: the document in force and its age, the host reading and its
-    age, per live node its resources, the consumers that are absent, the drift
-    and the allocator's latest observations."""
+    age, the host's memory pressure when the caller read it (`pressure`, from
+    `HostPlacement.pressure`), per live node its resources, the consumers that
+    are absent, the drift and the allocator's latest observations."""
     with record.reading():
         stored = _latest(record, *DOCUMENT)
         measure = _latest(record, MEASURE_SOURCE, MEASURE_KIND)
@@ -89,6 +90,7 @@ def snapshot(record, *, now):
                 "age_s": max(now - measure["at"], 0) // 1000,
             }
         ),
+        "pressure": pressure,
         "nodes": nodes,
         "absent": dict(absent),
         "drift": list(drift),
@@ -163,6 +165,24 @@ def _node(record, node, now, value, held_by):
     }
 
 
+def _pressure_lines(pressure):
+    """The line for the host's memory pressure: what refuses new work, or that
+    nothing does, or why it was not read."""
+    if pressure is None:
+        return []
+    if pressure["unread"]:
+        return [f"pressure: not read ({pressure['unread']})"]
+    if pressure["refused"]:
+        return ["pressure: " + "; ".join(pressure["refused"]) + "; new work is refused"]
+    parts = []
+    if pressure["level"] is not None:
+        parts.append(pressure["level"])
+    if pressure["swap_total"] is not None:
+        used, total = pressure["swap_used"], pressure["swap_total"]
+        parts.append(f"swap {used / 2**30:.1f} GiB of {total / 2**30:.1f} GiB")
+    return ["pressure: " + (", ".join(parts) or "no reading on this host")]
+
+
 def lines(snap):
     """`snap` as the text `alloc show` prints."""
     out = []
@@ -180,6 +200,7 @@ def lines(snap):
         out.append(
             f"host reading: node {reading['node']}, {reading['method']}, age {age}"
         )
+    out.extend(_pressure_lines(snap.get("pressure")))
     for node in snap["nodes"]:
         out.append(f"node {node['name']}: drivers {', '.join(node['drivers'])}")
         for r in node["resources"]:

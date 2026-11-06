@@ -110,6 +110,13 @@ TASK_ENDS = ("done", "failed", "cancelled")
 LOOP = {"max_attempts": 1, "interval_s": 0}
 SUPERVISION = {"expect_s": None, "beat_s": None}
 
+#: The rules a start may name in `placed` (the order's `RULES`, one list), and
+#: the one that starts a parked effort's review.
+PLACED_RULES = ("floor", "resume", "unblocks-then-age", "listed", "landing")
+LANDING = "landing"
+#: What `placed` says: the effort, the rule that placed the run, and why.
+PLACED_KEYS = ("effort", "rule", "why")
+
 
 class _Keep:
     """A field not given: an update keeps its value, an open takes its
@@ -199,17 +206,25 @@ def efforts_of(reader, item):
     return []
 
 
-def _ineligible(reader, item):
+def _ineligible(reader, item, *, landing=False):
     """Why an item is not eligible, or None: it is admitted, an effort it is
     linked to (its own links, else its parent chain's) is admitted, it has no
-    live dep and no live hold, and neither its holder nor its role has one."""
+    live dep and no live hold, and neither its holder nor its role has one.
+    With `landing` the effort rule turns the other way: none of its efforts is
+    admitted and one at least is parked."""
     n = item["number"]
     if not item["admitted"]:
         return f"item {n} is not admitted"
-    if not any(
-        (reader.get("efforts", e) or {}).get("standing") == "admitted"
+    standings = [
+        (reader.get("efforts", e) or {}).get("standing")
         for e in efforts_of(reader, item)
-    ):
+    ]
+    if landing:
+        if "admitted" in standings:
+            return f"an effort item {n} is linked to is admitted"
+        if "parked" not in standings:
+            return f"no effort item {n} is linked to is parked"
+    elif "admitted" not in standings:
         return f"no effort item {n} is linked to is admitted"
     if reader.read("deps", live=True, number=n):
         return f"item {n} has a live dep"
@@ -224,11 +239,26 @@ def _ineligible(reader, item):
     return None
 
 
-def _unready(reader, task, now):
+def _unreviewed(reader, number):
+    """Why item `number` reviews no change that is open, or None: it reviews
+    the item its latest review record (by round, then id) names, and that
+    item has a change that is open."""
+    found = reader.read("reviews", item=number)
+    if not found:
+        return f"item {number} reviews nothing"
+    target = max(found, key=lambda r: (r["round"], r["id"]))["target"]
+    if not reader.read("changes", live=True, number=target):
+        return f"item {target}, which item {number} reviews, has no open change"
+    return None
+
+
+def _unready(reader, task, now, *, landing=False):
     """Why an open task is not ready at `now`, or None. Its item, when it has
     one, is ready or claimed and eligible; with no item, its own effort is
     admitted. Its `not_before` has passed and its attempts are under
-    `loop.max_attempts`."""
+    `loop.max_attempts`. With `landing` it is the landing tier's instead: the
+    task has an item, a review (the task is one, or its item is) of an item
+    with an open change, and the item is eligible by `_ineligible(landing)`."""
     id = task["id"]
     if task["state"] != "open":
         return f"task {id} is {task['state']}, not open"
@@ -243,7 +273,14 @@ def _unready(reader, task, now):
             return f"task {id}'s item {task['number']} is not there"
         if item["state"] not in ("ready", "claimed"):
             return f"task {id}'s item {task['number']} is {item['state']}"
-        return _ineligible(reader, item)
+        why = _ineligible(reader, item, landing=landing)
+        if why is not None or not landing:
+            return why
+        if task["kind"] != "review" and item["kind"] != "review":
+            return f"task {id} and its item {item['number']} are not a review"
+        return _unreviewed(reader, item["number"])
+    if landing:
+        return f"task {id} has no item, so it reviews no change"
     effort = task["effort"]
     if (
         effort is None
@@ -251,6 +288,30 @@ def _unready(reader, task, now):
     ):
         return f"task {id} has no item and no admitted effort"
     return None
+
+
+def _placed_problem(value):
+    """Why `value` is not a `placed`, or None: `{effort, rule, why}`, three
+    non-empty strings and nothing else, the rule one of `PLACED_RULES`."""
+    if not isinstance(value, dict) or set(value) != set(PLACED_KEYS):
+        return f"placed is {{{', '.join(PLACED_KEYS)}}}, not {value!r}"
+    for key in PLACED_KEYS:
+        if not isinstance(value[key], str) or not value[key]:
+            return f"placed {key} is a non-empty str, not {value[key]!r}"
+    if value["rule"] not in PLACED_RULES:
+        return f"placed rule {value['rule']!r} is none of {', '.join(PLACED_RULES)}"
+    return None
+
+
+def _placed(value):
+    """`value`, a `placed` as an event carries it (a copy), or None; Refused
+    for anything else."""
+    if value is None:
+        return None
+    why = _placed_problem(value)
+    if why is not None:
+        raise Refused(why)
+    return {key: value[key] for key in PLACED_KEYS}
 
 
 def _peak(reservations, from_at, until_at):
@@ -777,6 +838,32 @@ class Record(abc.ABC):
                 t
                 for t in self.read("tasks", state="open")
                 if not _unready(self, t, now)
+            ]
+        return {"items": items, "tasks": tasks}
+
+    def landable(self, *, now):
+        """The landing tier's read, beside `ready`: the reviews `ready` leaves
+        out only because no effort they are linked to is admitted. A review is
+        an item of kind `review`, or a task of kind `review` (or of an item of
+        that kind); it is linked to a parked effort and to none admitted, it
+        is eligible by every other rule of `ready`, and the item it reviews
+        (the one its latest review record names) has a change that is open.
+        `{"items": [...], "tasks": [...]}`, each in key order. A task with no
+        item reviews no item and is not given."""
+        if not schema.is_int(now):
+            raise Refused(f"now is a time in milliseconds, not {now!r}")
+        with self.reading():
+            items = [
+                i
+                for i in self.read("items", state="ready")
+                if i["kind"] == "review"
+                and not _ineligible(self, i, landing=True)
+                and not _unreviewed(self, i["number"])
+            ]
+            tasks = [
+                t
+                for t in self.read("tasks", state="open")
+                if not _unready(self, t, now, landing=True)
             ]
         return {"items": items, "tasks": tasks}
 
@@ -1904,6 +1991,7 @@ class Record(abc.ABC):
         branch=None,
         expect_s,
         harness=None,
+        placed=None,
     ):
         """Start a run of a ready task, in one event: it checks the task is
         ready, that `fence` is its item's live lease held by `holder` (a task
@@ -1911,13 +1999,21 @@ class Record(abc.ABC):
         `sandbox`; then it reserves the task's needs on the node from now with
         no end, raises `attempts`, marks the task running and starts the run.
         Refused whole if any reservation has no room: never queued, never
-        part-reserved. Returns the run's id."""
+        part-reserved. Returns the run's id.
+
+        `placed` is `{effort, rule, why}` (`PLACED_RULES`), carried in the
+        event's data so the record says why the run started. With the rule
+        `landing` the ready check is replaced by `landable`'s, read in the same
+        event: the task must be one `landable(now)` gives, and nothing else of
+        a parked effort starts. Who may start a run stays `authorize`'s."""
         expect_ms = _seconds(expect_s, "expect_s")
+        placed = _placed(placed)
+        landing = placed is not None and placed["rule"] == LANDING
         with self._operation("start_run", "run.start") as op:
             t = op.need("tasks", [task], "task")
-            why = _unready(op, t, op.now)
+            why = _unready(op, t, op.now, landing=landing)
             if why:
-                raise Refused(why)
+                raise Refused(f"not landable: {why}" if landing else why)
             if t["number"] is not None:
                 if fence is None:
                     raise Refused(
@@ -1981,6 +2077,8 @@ class Record(abc.ABC):
                 "fence": fence,
                 "reservations": ids,
             }
+            if placed is not None:
+                op.data["placed"] = placed
         return id
 
     def run_phase(self, id, phase, *, expect_s=None):
@@ -2591,6 +2689,17 @@ def _capacity_findings(records):
     return findings
 
 
+def _placed_findings(journal):
+    """A `run.start` that carries a `placed` carries a whole one."""
+    findings = []
+    for raw in journal:
+        if raw["kind"] == "run.start" and "placed" in raw["data"]:
+            why = _placed_problem(raw["data"]["placed"])
+            if why is not None:
+                findings.append(f"event {raw['seq']}: {why}")
+    return findings
+
+
 def _run_findings(dump):
     """Invariant 7: every running run started in the record (by a
     `run.start`, not brought by an import) holds live reservations for its
@@ -2714,6 +2823,7 @@ def _findings(dump):
                 f"meta: {schema.counter_name(kind)} is not past {max(ids)}, the "
                 f"highest {kind} id"
             )
+    findings += _placed_findings(dump["journal"])
     findings += _capacity_findings(dump["records"])
     findings += _run_findings(dump)
     findings += _pgid_findings(dump["journal"])

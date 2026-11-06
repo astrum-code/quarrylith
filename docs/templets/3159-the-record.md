@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 1992142
+    at: dac02efa
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -313,6 +313,15 @@ class Event:
   still opens, replays, checks and writes a record that holds `reserve.replace`;
   what it cannot do is `load` a dump of that record, which it refuses at the
   kind.
+- **`run.start`'s `data` may carry `placed`**: `{effort, rule, why}`, three
+  non-empty strings, `rule` one of `PLACED_RULES` (`floor`, `resume`,
+  `unblocks-then-age`, `listed`, `landing`, the order's own list), so the
+  record says why each run started. It is data, not a record: the fold reads
+  `puts` only, no schema moves, and no kind is added, so an older build opens,
+  replays, checks and writes a record that holds it, and ignores it. A run
+  started with no `placed` writes the data it always did, and a record written
+  before `placed` loads, replays and checks as it did. `check()` reads the
+  `placed` of every `run.start` and reports one that is not whole.
 - **`apply(view, event)`** writes `event.puts` into `view`, in order, by
   key. Nothing else. It reads no clock, no counter and no other record.
   Every rule is decided before the event exists, so applying one event
@@ -389,6 +398,23 @@ name (one live lease per item, one open change per branch) is a `Refused`.
   item, its own `effort` is `admitted`), `not_before` has passed, and
   `attempts < loop.max_attempts`. Step 4 orders this set and does not widen
   it. It gives `{"items": [...], "tasks": [...]}`, each in key order.
+- `landable(*, now)` -> **the landing tier's read**, beside `ready`, which
+  stays as it is: `{"items": [...], "tasks": [...]}`, each in key order, the
+  reviews that `ready()` leaves out only because no effort they are linked
+  to is `admitted`. A review is an item of kind `review`, or a task of kind
+  `review` or of an item of that kind. It is given when its item is `admitted`
+  and (a task's) `ready` or `claimed`, with no live dep and no live hold (its
+  own, its holder's or its role's), the task's `not_before` has passed and
+  `attempts < loop.max_attempts`, **at least one effort it is linked to
+  (directly, else through its parent chain) is `parked` and none is
+  `admitted`**, and **the item it reviews has a change that is open**: the
+  item its latest review record (by `round`, then `id`) names as `target`
+  for it. An item is given only in state `ready`, as `ready()` gives one;
+  the open task of a claimed review item is given alone. A task with no item
+  reviews no item and is never given. `items` holds review items only, while a
+  task is given with its item left out of `items` when the item is not a review
+  or is claimed. Nothing else of a parked effort is
+  ever given.
 - `lease_view(number, *, now)` -> the live lease with `state` running,
   paused or expired (1423's three, the same rules) and its `expiry`,
   computed from `renewed_at`, the latest beat of the holder's live run on
@@ -416,7 +442,7 @@ returns what it made (an id, a number, a fence).
 | leases | `grant(n, holder, *, role=None, branch, machine, expect=None)` -> fence: a live lease held by another, a live hold (on the item, the holder or the role), `expect` not the state, or a state `MOVES` does not take to `claimed`. It moves the item to `claimed`; the holder's own second grant renews its lease and keeps its fence. `renew(n, holder, fence, *, paused_until=None)` (`paused_until`: a usage limit's reset): a stale fence, or a lease another holds. `release(n, by, why, *, fence=None)`: no live lease, or a stale fence; it moves a `claimed` or `blocked` item to `ready` |
 | tasks | `file_task(kind, *, number=None, effort=None, labels=(), flags=(), needs=None, sandbox, schedule=None, not_before=None, supervision=None, loop=None)` -> id: an item or effort not there, `needs` not `{resource: amount}` (an amount from 1); `loop` defaults to `{"max_attempts": 1, "interval_s": 0}` and `supervision` to `{"expect_s": null, "beat_s": null}`. `edit_task(id, **fields)`: an ended task, or its `needs` while a run is live. `end_task(id, state, why)` (done, failed, cancelled): an ended task, or one with a live run; it releases the task's own live reservations (the task's, with no run) in the same event |
 | allocation | `declare_node(name, drivers, labels)`: a retired node (a live one is declared anew; False when nothing changes). `retire_node(name)`: live reservations on it. `set_capacity(node, resource, amount, unit)`: below what is reserved at any instant from now. `reserve(node, needs, *, task=None, run=None, holder, from_at, until_at)` -> ids: any resource without room (**the reservation invariant**), a task that has ended, or a run that is finished. `release_reservation(id, why)`: a reservation released already, or one whose run is live (`finish_run` releases it). `replace_reservation(id, amount, why)` -> id, in **one event** (`reserve.replace`): it releases the live reservation `id` and reserves `amount` of the same node, resource, holder and task from now with no end and no run, the room checked without the one it replaces and at every instant from now; refused whole for an `amount` that is not an int from 1, one that does not fit, a reservation released already, one a live run holds (`finish_run` releases it), and a retired node. The same amount, open ended, writes nothing and gives `id` back |
-| runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `run_phase(id, phase, *, expect_s=None)`. `run_pgid(id, pgid)`: a live run's process group, known only after its spawn, in an event of its own (`run.pgid`, data `{run, task, pgid}`), once: refused for a run with a `pgid`, whichever group is given, and for a finished run, and moving nothing else of the run (below). `beat(run)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
+| runs | `start_run(task, holder, *, node, sandbox, fence, branch=None, expect_s, harness=None, placed=None)` -> run id: in **one event**, it checks the task is eligible (and `open`), that `fence` is the item's live lease, held by `holder` (when it has an item; a task with no item takes no fence), that `attempts < max_attempts`, and that `node` is live and runs `sandbox`, then reserves `needs` on `node` from now with no end, raises `attempts`, marks the task `running` and starts the run. It is refused whole if any reservation does not fit: never queued, never part-reserved. `placed` (`{effort, rule, why}`, validated as above) is carried in the event's `data`. **With `placed["rule"]` `landing`, the eligibility check is `landable`'s, read in the same event:** the task must be one `landable(now)` gives (so a task `ready()` gives, an admitted effort's included, is refused with `landing`, and a parked effort's task `landable` does not give is refused), refused with the reason after `not landable:`; the lease, fence, node, attempts and reservation checks are as above. Who may start a landing is `authorize`'s, as for any start: it is called with the operation `start_run` and the records before and after, which carry no `placed`, so **a policy cannot tell a landing start from any other**, and whoever may start a run may start a landable review (separating them takes a different operation, not a different policy). `placed["effort"]` is **not checked** against the task's efforts: the record carries the order's word for why a run started, and no decision reads it. `run_phase(id, phase, *, expect_s=None)`. `run_pgid(id, pgid)`: a live run's process group, known only after its spawn, in an event of its own (`run.pgid`, data `{run, task, pgid}`), once: refused for a run with a `pgid`, whichever group is given, and for a finished run, and moving nothing else of the run (below). `beat(run)` (bookkeeping, never refused). `finish_run(id, outcome, reason, *, footprint, cost, result=None)`: releases the run's reservations in the same event, sets its task `open` again, and is **never refused for a stale fence** (below) |
 | changes | `open_or_update_change(repo, branch, head, *, title, body, number, relation, base, position, draft, url, by)` -> id: a second open change on a branch, one whose `number` is not the open change's. With no open change on the branch it opens one (`change.open`), with the repo's next `n`, and a `title`; else it updates the open one (`change.edit`). A field not given keeps its value on an update and takes its default on an open (`body` "", `relation` part, `draft` false, the rest null). An open change with no `number` takes one by an update; one with a number keeps it, so another `number`, or `None` given, is a second open change. `pushed_at` moves when the head does, and an update that changes nothing writes nothing and returns its id. `drop_change(id, by, why)`: a change not open. `record_check(change, head, name, state, detail=None)`, by the actor: False when the check reads so already |
 | reviews | `file_review(target, round, kind, *, item=None, author, heads=None, pages=None, filed_by=None)` -> id: `heads` keyed by the ids of changes the record holds, each a non-empty sha. `heads` is written once and never edited. `record_verdict(id, reviewer, verdict, findings)`: a review that already has one. `review_read(id)`: False when it was read already |
 | merges | `record_merge(change, sha, by, rule, *, commit=None)` -> id: a change not open, or `sha` not its head. It sets `merged_at` in the same event |
@@ -1463,7 +1489,9 @@ What looked reusable but was not:
    never a release.
 9. **Only an admitted effort's work is ever ready**: `ready()` never gives
    an item or task whose every linked effort is not `admitted`, nor a
-   machine-filed should-fix item before `admit`.
+   machine-filed should-fix item before `admit`. `start_run` starts no task
+   of a parked effort either, except a review `landable` gives when its
+   `placed` names the rule `landing`.
 10. **Every item has an effort link** once filed (its own, its parent's, or
     `unsorted`).
 11. **A review's heads are written once**, at `file_review`.
@@ -1555,6 +1583,26 @@ Each item is a test marked `templet:3159`, run over every backend in
   Henge: concurrent callers of the one writer)
 - [ ] `start_run` with a fence that is not the live lease's, or past
   `loop.max_attempts`, is refused and reserves nothing
+- [ ] `landable(now=)` gives a parked effort's review (an item of kind
+  `review`, ready, and its open task) whose reviewed item has an open change,
+  and nothing `ready()` gives: not a task item, a job, a task with no item, a
+  review of an item with no open change (none, merged, dropped), a review
+  linked to an admitted effort or to none parked, nor one with a live dep
+  or hold, unadmitted, or a task not before its time or out of attempts;
+  it writes nothing and `ready()` is as it was
+- [ ] `start_run(..., placed=)` carries `{effort, rule, why}` in the
+  `run.start` event's data and nothing else changes in it; a `placed` that is
+  not those three non-empty strings, or a `rule` that is none of
+  `PLACED_RULES`, is refused whole; `check()` reports a journal whose
+  `placed` is not whole; a record written before `placed` (a frozen dump)
+  loads, replays, checks clean and takes a start with it
+- [ ] `start_run` with `placed` rule `landing` starts a task `landable` gives
+  (its check read through the start's own operation, never before it) and refuses every other task, a parked effort's
+  non-review task, a review of nothing to land and an admitted effort's ready
+  task included; without `landing` a parked effort's task is refused as it
+  was; the fence, holder, node and reservation checks and `authorize` still
+  decide; over a matrix of efforts and tasks a task starts under `landing`
+  exactly when `landable` gives it
 - [ ] `finish_run` releases the run's reservations in its own event
 - [ ] inside `acting(actor, via)`, an operation calls `authorize` with that
   actor and its event names that actor and via, and the data's `by`,
@@ -2624,6 +2672,18 @@ client alone is the dependency (above).
   run first written by an `import` is exempt, one imported with a group below 2
   is reported, and a run first written by a `run.pgid` is reported too (the
   review of quarrylith#21, round 1) (this PR)
+- 2026-11-05 proposed: `landable(*, now)`, the landing tier's read beside
+  `ready()` (the order's page, "Needs from the record" 1): a read and an
+  acceptance item (this PR)
+- 2026-11-05 proposed: `start_run(..., placed=None)`, `placed` being
+  `{effort, rule, why}` carried in the `run.start` event's data, with
+  `PLACED_RULES` and `check()` reading it; data only, no record, kind or
+  schema version moves, and a record written before it loads as it did: the
+  operations row, "Events" and an acceptance item (this PR)
+- 2026-11-05 proposed: `start_run` with `placed` rule `landing` replaces the
+  eligibility check by `landable`'s, read in the same event, and invariant 9
+  gains its sentence: the operations row, the invariant and an acceptance
+  item (this PR)
 - 2026-11-05 proposed: a load on Henge writes in batches of `LOAD_BATCH` (1,000),
   each one commit, one put at a time, with one sync: "The load's batches", row 10
   and its Rationale. An open that finds a load in progress redoes every entry past

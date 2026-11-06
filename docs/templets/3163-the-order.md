@@ -1138,15 +1138,19 @@ merge happens.
 ## History
 
 - 2026-11-03 agreed (merge of this PR, user)
-- 2026-11-03 proposed: a window judged by wall-clock time, so a start in a
-  spring-forward gap opens at the gap's end (this PR)
-- 2026-11-03 proposed: `next_not_before` reads a loop as `interval_s` above 0
-  or `max_attempts` above 1, so the record's default loop is none (this PR)
-- 2026-11-03 proposed: `Schedule.next_start`, `Schedule.local_iso` and
+- 2026-11-03 changed: a window judged by wall-clock time, so a start in a
+  spring-forward gap opens at the gap's end (approved: the conformance review
+  of quarrylith#15)
+- 2026-11-03 changed: `next_not_before` reads a loop as `interval_s` above 0
+  or `max_attempts` above 1, so the record's default loop is none (approved:
+  the conformance review of quarrylith#15)
+- 2026-11-03 changed: `Schedule.next_start`, `Schedule.local_iso` and
   `openings`, which `quarrylith order schedule` prints from; the shape of
-  `cron`; and the no-window wording of the five-year error (this PR)
-- 2026-11-04 proposed: a day field that starts with `*` (`*`, `*/10`) is
-  unrestricted, as in classic cron (user decision, 2026-11-04) (this PR)
+  `cron`; and the no-window wording of the five-year error (approved: the
+  conformance review of quarrylith#15)
+- 2026-11-04 changed: a day field that starts with `*` (`*`, `*/10`) is
+  unrestricted, as in classic cron (user decision, 2026-11-04) (approved: the
+  conformance review of quarrylith#15)
 - 2026-11-04 changed: "The ready set" reads an item's task as open or
   running, so an item moved back to `ready` while its task runs is left out
   (approved: the conformance review of quarrylith#17)

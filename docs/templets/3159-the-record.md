@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 1c1dff1
+    at: 7e283d2
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -644,8 +644,11 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   of every `Record`, is None while the record is open and a line saying why once
   it has closed: `"closed"` after `close()`, or the reason a failure that stopped
   the writer gave (a check that found another writer, an operation past its
-  commit point, a load in progress). Asking never raises, so a service asks the
-  record and does not read its private field.
+  commit point, a load in progress). The reason can hold newlines and paths from
+  the store's exceptions, so a caller prints it on one line: Henge writes it out
+  that way in the `Unavailable` of a refused call, and `closed` keeps it as it
+  was. Asking never raises, so a service asks the record and does not read its
+  private field.
 
   **One engine per folder is the store's**: its `henge.lock` binds every
   opener of the folder (`henge single`, `henge local`, `Store.single`,

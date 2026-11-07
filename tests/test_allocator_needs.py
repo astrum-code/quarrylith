@@ -17,9 +17,11 @@ from test_allocator_host import (
     sample_text,
     start,
 )
+from test_allocator_measure import stub
 
 from quarrylith.allocator import Fit, Refusal, load_document, show
 from quarrylith.allocator.host import HostPlacement
+from quarrylith.record.contract import Refused
 
 # -- declare with drivers -----------------------------------------------------------
 
@@ -409,3 +411,184 @@ def test_a_resize_keeps_the_drivers_the_node_was_declared_with(effort, clock):
     sized = placement.resize("yard", 2 * GIB, now=clock())
     assert sized.ok, sized
     assert node_drivers(record) == ["harness", "process"]
+
+
+# -- what a hold is stamped with, and the order the record keeps --------------------
+
+
+def measured_round(record, clock, available, floor="4GiB"):
+    """A declared node, then a round as the services run it: `now` is taken, the
+    host is measured (a reading written at the record's clock, a second on),
+    and the holds are made with the `now` taken before the reading. Returns the
+    placement and that earlier `now`."""
+    placement = HostPlacement(record, probes=stub(available))
+    assert placement.declare(floor_of(floor), figures=FIGURES, now=clock()).ok
+    earlier = clock()
+    clock.step()
+    placement.measure(now=clock())
+    return placement, earlier
+
+
+@over_backends
+def test_holds_stamped_before_the_reading_are_counted_by_the_records_order(
+    effort, clock
+):
+    """templet:3161 -- a round takes `now`, measures, then holds with that `now`,
+    which is earlier than the reading's instant. What was reserved since the
+    reading is decided by the record's order, not by two clocks: with a 4 GiB
+    floor and 8 GiB available, three holds of 4 GiB made with the earlier `now`
+    leave the first granted and the second and third refused."""
+    record = effort
+    placement, earlier = measured_round(record, clock, 8 * GIB)
+    granted = [
+        placement.hold(f"vm:{n}", {"memory": 4 * GIB}, now=earlier) for n in "abc"
+    ]
+    assert isinstance(granted[0], list)
+    for refusal in granted[1:]:
+        assert isinstance(refusal, Refusal)
+        assert [s.cause for s in refusal.shorts] == ["measured"]
+        assert "4.0 GiB reserved since the reading" in refusal.text
+
+
+@over_backends
+def test_the_reading_names_the_last_reservation_it_could_see(effort, clock):
+    """templet:3161 -- `measure` writes `reserved_through`, the id of the last
+    reservation the record held when it measured, and a reservation made
+    before the reading but stamped after it is not counted (the order decides),
+    where one made after it is, however it is stamped."""
+    record = effort
+    placement = HostPlacement(record, probes=stub(8 * GIB))
+    assert placement.declare(floor_of("4GiB"), figures=FIGURES, now=clock()).ok
+    t = clock()
+    (early,) = record.reserve(
+        "laptop",
+        {"memory": 2 * GIB},
+        holder="vm:early",
+        from_at=t + 60_000,
+        until_at=None,
+    )
+    clock.step()
+    value = placement.measure(now=clock())
+    assert value["reserved_through"] == max(
+        r["id"] for r in record.read("reservations", live=True)
+    )
+    assert early <= value["reserved_through"]
+    # made before the reading: seen by it, though stamped after it
+    assert isinstance(
+        placement.hold("vm:one", {"memory": 4 * GIB}, now=clock() + 120_000), list
+    )
+    # made after it: counted, however stamped
+    refused = placement.hold("vm:two", {"memory": 1}, now=clock())
+    assert isinstance(refused, Refusal)
+
+
+# -- drivers are validated ----------------------------------------------------------
+
+BAD_DRIVERS = {
+    "a string": "vm",
+    "an empty list": [],
+    "a driver the document does not name": ["harness", "docker"],
+    "duplicates": ["harness", "harness"],
+    "a name that is not text": ["harness", 3],
+    "a blank name": ["harness", ""],
+    "not a list": {"harness": 1},
+}
+
+
+@over_backends
+@pytest.mark.parametrize("why", sorted(BAD_DRIVERS))
+def test_drivers_that_are_not_a_list_of_the_documents_names_are_refused_whole(
+    record, clock, why
+):
+    """templet:3161 -- `drivers` is a list of distinct names the document
+    names, and at least one: a string (which would be declared by its
+    letters), a driver the document does not name, a duplicate, a blank or
+    non-text name and an empty list (a node nothing can run on) are each
+    refused plainly with nothing written, a dry run included."""
+    placement = HostPlacement(record)
+    mark = record.head()
+    for dry_run in (False, True):
+        with pytest.raises(Refused, match="drivers"):
+            placement.declare(
+                sample_document(),
+                figures=FIGURES,
+                drivers=BAD_DRIVERS[why],
+                dry_run=dry_run,
+                now=clock(),
+            )
+    assert record.head() == mark and record.get("nodes", "laptop") is None
+
+
+@over_backends
+def test_drivers_may_be_a_tuple_a_subset_or_all_of_the_documents(record, clock):
+    """templet:3161 -- a tuple of some of the document's drivers declares them,
+    and all of them is the document's own."""
+    placement = HostPlacement(record)
+    assert placement.declare(
+        sample_document(), figures=FIGURES, drivers=("process", "harness"), now=clock()
+    ).ok
+    assert node_drivers(record) == ["harness", "process"]
+    clock.step()
+    assert placement.declare(
+        sample_document(),
+        figures=FIGURES,
+        drivers=["vm", "podman", "process", "harness"],
+        now=clock(),
+    ).ok
+    assert node_drivers(record) == ["harness", "podman", "process", "vm"]
+
+
+# -- the two rules a mutant showed untested -----------------------------------------
+
+
+@over_backends
+def test_only_the_documents_node_lists_drivers_it_lacks(effort, clock):
+    """templet:3161 -- the drivers declared but not available are those of the
+    node the document names: another node of the record, declared with few
+    drivers, lists none."""
+    record = effort
+    placement = HostPlacement(record)
+    assert placement.declare(sample_document(), figures=FIGURES, now=clock()).ok
+    record.declare_node("elsewhere", ["harness"], [])
+    nodes = {n["name"]: n for n in show.snapshot(record, now=clock())["nodes"]}
+    assert nodes["elsewhere"]["unavailable"] == []
+    assert nodes["laptop"]["unavailable"] == []
+    assert not any(
+        "not available" in line
+        for line in show.lines(show.snapshot(record, now=clock()))
+    )
+
+
+@over_backends
+def test_a_task_hold_under_a_consumers_name_is_still_counted(effort, clock):
+    """templet:3161 -- only a standing hold of a consumer the document names is
+    left off the room: a hold made for a task, whatever its holder is called,
+    is new work and is counted."""
+    record = effort
+    placement = ready(record, clock, 3 * GIB)
+    task = make_task(record)
+    held = placement.hold("yard", {"memory": 2 * GIB}, task=task, now=clock())
+    assert isinstance(held, list)
+    assert isinstance(placement.place(make_task(record), now=clock()), Refusal)
+
+
+# -- the reason a record closed -----------------------------------------------------
+
+
+def test_a_closed_henge_records_refusal_writes_its_reason_on_one_line(tmp_path):
+    """templet:3159 -- the reason a record closed can hold newlines and paths from
+    the store's exceptions; where the record says it is closed, in the
+    `Unavailable` a call gets, it is written out on one line, and `closed`
+    itself keeps the reason as it was."""
+    from quarrylith.record import henge
+    from quarrylith.record.contract import Unavailable
+
+    fake = object.__new__(henge.HengeRecord)
+    fake.name = "q"
+    fake._closed = "put failed\nat /tmp/x/store.py\x1b[31m red"
+    with pytest.raises(Unavailable) as caught:
+        fake._live()
+    text = str(caught.value)
+    assert "\n" not in text and "\x1b" not in text
+    assert "put failed\\nat /tmp/x/store.py\\x1b[31m red" in text
+    assert fake.closed == "put failed\nat /tmp/x/store.py\x1b[31m red"

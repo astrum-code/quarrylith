@@ -317,6 +317,15 @@ def index_edits(event, priors):
 # -- the backend --------------------------------------------------------------
 
 
+def _one_line(text):
+    """`text` on one line: a character that is not printable (a newline, an
+    escape) is written out, so the reason a record closed, which can carry a
+    store exception's text, cannot forge a line of output."""
+    return "".join(
+        c if c.isprintable() else c.encode("unicode_escape").decode() for c in str(text)
+    )
+
+
 class HengeRecord(Record):
     """The record in a Henge store, written by this one process.
 
@@ -477,7 +486,9 @@ class HengeRecord(Record):
 
     def _live(self):
         if self._closed is not None:
-            raise Unavailable(f"the record {self.name} is closed: {self._closed}")
+            raise Unavailable(
+                f"the record {self.name} is closed: {_one_line(self._closed)}"
+            )
 
     def _call(self, op, *args, **kw):
         """One call of the store, its errors as `_Conflict`, `_ForGood` or

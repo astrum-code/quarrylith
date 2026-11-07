@@ -659,7 +659,9 @@ class Record(abc.ABC):
     @property
     def closed(self):
         """None while the record is open, else a line saying why it closed
-        (`"closed"` after `close()`). Asking never raises."""
+        (`"closed"` after `close()`). Asking never raises. The reason can hold
+        newlines and paths from the store's exceptions: a caller that prints it
+        writes it out on one line (`Henge`'s refusal of a call does)."""
         return self._closed
 
     # -- the common parts -----------------------------------------------------

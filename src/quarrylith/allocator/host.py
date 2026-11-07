@@ -68,6 +68,28 @@ class Declaration:
         return not self.refusals and not self.failed
 
 
+def _drivers_of(document, drivers):
+    """`drivers` as a list, or a plain `Refused`: it is a list (or tuple) of
+    distinct, non-blank names, at least one (a node with none can run nothing),
+    each one the document names."""
+    if not isinstance(drivers, (list, tuple)):
+        raise Refused(f"drivers is a list of names, not {drivers!r}")
+    if not drivers:
+        raise Refused("drivers names at least one: a node with none runs nothing")
+    for name in drivers:
+        if not isinstance(name, str) or not name.strip():
+            raise Refused(f"drivers names are text, not {name!r}")
+    if len(set(drivers)) != len(drivers):
+        raise Refused(f"drivers names each driver once: {list(drivers)!r}")
+    unknown = sorted(set(drivers) - set(document.drivers))
+    if unknown:
+        raise Refused(
+            f"drivers {unknown} are not drivers the document names: "
+            f"{sorted(document.drivers)}"
+        )
+    return list(drivers)
+
+
 def _digest(data):
     """The fingerprint of the document as the caller wrote it, its "measure"
     kept: it tells `declare` the same document again, and is no check that
@@ -354,6 +376,11 @@ class HostPlacement(Placement):
             document = stored[0]
             free, capacity = self._memory_table(document, now)
             row = latest(record)
+            # the last reservation the record holds as it measures: what is
+            # made after it is "since the reading", by the record's order and
+            # not by the clocks the callers stamp with
+            last = record.read("reservations", desc=True, limit=1)
+            through = last[0]["id"] if last else 0
         before, before_absent = [], {}
         if row is not None and isinstance(row["value"], dict):
             same = row["value"].get("node") == document.node
@@ -369,6 +396,7 @@ class HostPlacement(Placement):
             "memory_available": memory["memory_available"],
             "method": memory["method"],
             "disk_free": probes.probe_disk(document.disk_path),
+            "reserved_through": through,
             "consumers": {},
             "absent": {},
         }
@@ -532,6 +560,8 @@ class HostPlacement(Placement):
         figures = {} if figures is None else figures
         data = to_data(document, figures)
         resolved = document_from_data(data)
+        if drivers is not None:
+            drivers = _drivers_of(resolved, drivers)
         digest = _digest(to_data(document))
         node = resolved.node
         drivers = sorted(resolved.drivers if drivers is None else drivers)

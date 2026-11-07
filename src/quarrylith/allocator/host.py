@@ -34,6 +34,7 @@ from .measure import (
     pressure_shorts,
     pressure_view,
     reading_state,
+    reserved_since,
 )
 from .probes import (  # noqa: F401 (the probes are the host plugin's, too)
     ProbeError,
@@ -65,6 +66,28 @@ class Declaration:
     @property
     def ok(self):
         return not self.refusals and not self.failed
+
+
+def _drivers_of(document, drivers):
+    """`drivers` as a list, or a plain `Refused`: it is a list (or tuple) of
+    distinct, non-blank names, at least one (a node with none can run nothing),
+    each one the document names."""
+    if not isinstance(drivers, (list, tuple)):
+        raise Refused(f"drivers is a list of names, not {drivers!r}")
+    if not drivers:
+        raise Refused("drivers names at least one: a node with none runs nothing")
+    for name in drivers:
+        if not isinstance(name, str) or not name.strip():
+            raise Refused(f"drivers names are text, not {name!r}")
+    if len(set(drivers)) != len(drivers):
+        raise Refused(f"drivers names each driver once: {list(drivers)!r}")
+    unknown = sorted(set(drivers) - set(document.drivers))
+    if unknown:
+        raise Refused(
+            f"drivers {unknown} are not drivers the document names: "
+            f"{sorted(document.drivers)}"
+        )
+    return list(drivers)
 
 
 def _digest(data):
@@ -181,7 +204,10 @@ class HostPlacement(Placement):
                 shorts += table_shorts(record, node, needs, now=now)
                 shorts += budget_shorts(record, document, node, needs, now=now)
                 found, why = reading_state(record, document, node, now=now)
-                shorts += measured_shorts(found, document, node, needs, why)
+                reserved = (
+                    reserved_since(record, document, node, now=now) if found else None
+                )
+                shorts += measured_shorts(found, document, node, needs, why, reserved)
                 shorts += pressure_shorts(*pressure, node)
                 free = table_free(record, node, needs, now=now)
         if shorts:
@@ -217,7 +243,15 @@ class HostPlacement(Placement):
                 }
                 if document is not None and name == document.node:
                     found = measurement(record, document, name, now=now)
-                    room = measured_room(found, document) if found else None
+                    room = (
+                        measured_room(
+                            found,
+                            document,
+                            reserved_since(record, document, name, now=now),
+                        )
+                        if found
+                        else None
+                    )
                     for resource in ("memory", "disk"):
                         if resource in out[name]:
                             limit = room[resource] if room else 0
@@ -275,9 +309,14 @@ class HostPlacement(Placement):
                 if measured and (stored is None or stored[0].node == node):
                     document = stored[0] if stored else None
                     found, why = None, "no allocation document is declared"
+                    reserved = None
                     if document is not None:
                         found, why = reading_state(record, document, node, now=now)
-                    shorts += measured_shorts(found, document, node, needs, why)
+                        if found:
+                            reserved = reserved_since(record, document, node, now=now)
+                    shorts += measured_shorts(
+                        found, document, node, needs, why, reserved
+                    )
                     shorts += pressure_shorts(*pressure, node)
         if shorts:
             return refuse(task, None, needs, shorts, node=node)
@@ -337,6 +376,11 @@ class HostPlacement(Placement):
             document = stored[0]
             free, capacity = self._memory_table(document, now)
             row = latest(record)
+            # the last reservation the record holds as it measures: what is
+            # made after it is "since the reading", by the record's order and
+            # not by the clocks the callers stamp with
+            last = record.read("reservations", desc=True, limit=1)
+            through = last[0]["id"] if last else 0
         before, before_absent = [], {}
         if row is not None and isinstance(row["value"], dict):
             same = row["value"].get("node") == document.node
@@ -352,6 +396,7 @@ class HostPlacement(Placement):
             "memory_available": memory["memory_available"],
             "method": memory["method"],
             "disk_free": probes.probe_disk(document.disk_path),
+            "reserved_through": through,
             "consumers": {},
             "absent": {},
         }
@@ -498,7 +543,7 @@ class HostPlacement(Placement):
 
     # -- declare ------------------------------------------------------------------
 
-    def declare(self, document, *, figures, now, dry_run=False):
+    def declare(self, document, *, figures, drivers=None, now, dry_run=False):
         """Bring the record to `document`, each "measure" taken from
         `figures` and nothing probed (`DocumentError` naming the key of one
         with no figure). The whole document is checked against the record
@@ -507,14 +552,21 @@ class HostPlacement(Placement):
         one is in `failed`, the rest go on, and a second `declare` finishes
         it. The document reading is written last, and only when nothing
         failed. With `dry_run` it writes nothing and returns the lines it
-        would write, the ones a real `declare` then writes."""
+        would write, the ones a real `declare` then writes. `drivers`, when
+        given, are what the node declares in place of the document's (the
+        drivers the host has, of the ones the document names); the document
+        stays whole in its reading, so what is declared and not available can
+        be shown."""
         figures = {} if figures is None else figures
         data = to_data(document, figures)
         resolved = document_from_data(data)
+        if drivers is not None:
+            drivers = _drivers_of(resolved, drivers)
         digest = _digest(to_data(document))
         node = resolved.node
+        drivers = sorted(resolved.drivers if drivers is None else drivers)
         with self.record.reading():
-            plan = self._plan(resolved, now)
+            plan = self._plan(resolved, now, drivers)
             before = self._stored()
         if plan["refusals"]:
             return Declaration(refusals=plan["refusals"])
@@ -538,9 +590,7 @@ class HostPlacement(Placement):
                 return False, None
 
         if plan["node"]:
-            if write("node", lambda: record.declare_node(node, resolved.drivers, []))[
-                1
-            ]:
+            if write("node", lambda: record.declare_node(node, drivers, []))[1]:
                 wrote.append(f"node {node}")
         for r, why in plan["release"]:
             what = f"release {r['holder']} {r['resource']}"
@@ -625,7 +675,10 @@ class HostPlacement(Placement):
         document, figures = self.declared()
         figures = copy.deepcopy(figures)
         figures["consumers"][name]["memory"] = size
-        return self.declare(document, figures=figures, now=now)
+        # the node keeps the drivers it was declared with, not the document's
+        row = self.record.get("nodes", document.node)
+        drivers = row["drivers"] if row and row["retired_at"] is None else None
+        return self.declare(document, figures=figures, drivers=drivers, now=now)
 
     def _capacity(self, node, resource, amount, wrote, write):
         what = f"capacity {resource}"
@@ -664,7 +717,7 @@ class HostPlacement(Placement):
         elif done:
             wrote.append(f"{what} {amount}")
 
-    def _plan(self, document, now):
+    def _plan(self, document, now, drivers):
         """What `declare` would do, read from the record: the reservations to
         release, the capacities to raise and to lower, and per consumer its
         replaces and holds; or the Refusal of each consumer that does not
@@ -744,9 +797,7 @@ class HostPlacement(Placement):
             for name, found in shorts.items()
         }
         return {
-            "node": row is None
-            or row["drivers"] != sorted(document.drivers)
-            or row["labels"] != [],
+            "node": row is None or row["drivers"] != drivers or row["labels"] != [],
             "release": release,
             "grow": grow,
             "shrink": shrink,

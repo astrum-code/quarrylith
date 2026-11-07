@@ -51,16 +51,63 @@ def measurement(reader, document, node, *, now):
     return reading_state(reader, document, node, now=now)[0]
 
 
-def measured_room(value, document):
+def reserved_since(reader, document, node, *, now):
+    """`{"memory": n, "disk": n}`: what was reserved on `node` after the latest
+    host reading was taken, still live, which that reading cannot have seen:
+    the runs and holds of new work started since. "After" is the record's
+    order: `measure` writes `reserved_through`, the id of the last reservation
+    the record held as it measured, and a reservation with a larger id was made
+    after, whatever `from_at` its caller stamped (a round takes `now`, measures,
+    then holds with that earlier `now`). A reading that has no such figure (one
+    another writer made) falls back to the clocks: a reservation counts when its
+    `from_at` is after the reading's instant (one at the instant itself is taken
+    as seen, the record keeping no finer order than the millisecond). A
+    reservation counts only while it is live now. A consumer the document names
+    is not counted: it was running when it was declared, so the reading has
+    it. Released ones are gone from the live set. **A limit, named:** a run
+    started before the latest reading and still growing is not counted; only
+    the reading sees it."""
+    row = latest(reader)
+    if row is None:
+        return {"memory": 0, "disk": 0}
+    standing = {consumer.name for consumer in document.consumers}
+    through = (
+        row["value"].get("reserved_through") if isinstance(row["value"], dict) else None
+    )
+    ordered = isinstance(through, int) and not isinstance(through, bool)
+    out = {"memory": 0, "disk": 0}
+    for r in reader.read("reservations", live=True, node=node):
+        if r["resource"] not in out:
+            continue
+        if (r["id"] <= through) if ordered else (r["from_at"] <= row["at"]):
+            continue
+        if r["until_at"] is not None and r["until_at"] <= now:
+            continue
+        if r["task"] is None and r["run"] is None and r["holder"] in standing:
+            continue
+        out[r["resource"]] += r["amount"]
+    return out
+
+
+def measured_room(value, document, reserved=None):
     """`{"memory": n, "disk": n}`: what a start may still take above the
-    floor by `value`, never below 0."""
+    floor by `value`, less what was `reserved` since the reading, never below
+    0."""
+    reserved = reserved or {}
     return {
-        "memory": max(value["memory_available"] - document.floor.memory, 0),
-        "disk": max(value["disk_free"] - document.floor.disk, 0),
+        "memory": max(
+            value["memory_available"]
+            - reserved.get("memory", 0)
+            - document.floor.memory,
+            0,
+        ),
+        "disk": max(
+            value["disk_free"] - reserved.get("disk", 0) - document.floor.disk, 0
+        ),
     }
 
 
-def measured_shorts(value, document, node, needs, why=""):
+def measured_shorts(value, document, node, needs, why="", reserved=None):
     """The shorts of `needs` by the measurement: one `unmeasured` (every
     resource, saying `why`) when there is no `value`; else a `measured` short
     for a memory or disk need that would leave less than the floor, with the
@@ -68,7 +115,8 @@ def measured_shorts(value, document, node, needs, why=""):
     frees and a reading comes."""
     if value is None:
         return [Short("unmeasured", node, None, None, None, None, True, None, [], why)]
-    room = measured_room(value, document)
+    reserved = reserved or {}
+    room = measured_room(value, document, reserved)
     capacity = value.get("memory_total")
     capacity = capacity if _number(capacity) else None
     floors = {"memory": document.floor.memory, "disk": document.floor.disk}
@@ -76,9 +124,15 @@ def measured_shorts(value, document, node, needs, why=""):
     for resource in ("memory", "disk"):
         asked = needs.get(resource)
         if asked is not None and asked > room[resource]:
-            available = value[
-                "memory_available" if resource == "memory" else "disk_free"
-            ]
+            held = reserved.get(resource, 0)
+            available = max(
+                value["memory_available" if resource == "memory" else "disk_free"]
+                - held,
+                0,
+            )
+            detail = f"floor {_size(resource, floors[resource])}"
+            if held:
+                detail += f", {_size(resource, held)} reserved since the reading"
             shorts.append(
                 Short(
                     "measured",
@@ -90,7 +144,7 @@ def measured_shorts(value, document, node, needs, why=""):
                     True,
                     None,
                     [],
-                    f"floor {_size(resource, floors[resource])}",
+                    detail,
                 )
             )
     return shorts

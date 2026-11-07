@@ -353,6 +353,8 @@ class SqliteRecord(Record):
 
     def close(self):
         with self._lock:
+            if self._closed is None:
+                self._closed = "closed"
             self._conn.close()
 
     def _check_store(self):

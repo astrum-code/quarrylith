@@ -59,7 +59,9 @@ def reserved_since(reader, document, node, *, now):
     the record held as it measured, and a reservation with a larger id was made
     after, whatever `from_at` its caller stamped (a round takes `now`, measures,
     then holds with that earlier `now`). A reading that has no such figure (one
-    another writer made) falls back to the clocks: a reservation counts when its
+    another writer made, or one that is not a whole number up to the highest
+    reservation id the record holds, which it cannot have seen) falls back to
+    the clocks: a reservation counts when its
     `from_at` is after the reading's instant (one at the instant itself is taken
     as seen, the record keeping no finer order than the millisecond). A
     reservation counts only while it is live now. A consumer the document names
@@ -75,6 +77,10 @@ def reserved_since(reader, document, node, *, now):
         row["value"].get("reserved_through") if isinstance(row["value"], dict) else None
     )
     ordered = isinstance(through, int) and not isinstance(through, bool)
+    if ordered:
+        # a figure above the highest id the record holds cannot have been seen
+        last = reader.read("reservations", desc=True, limit=1)
+        ordered = through <= (last[0]["id"] if last else 0)
     out = {"memory": 0, "disk": 0}
     for r in reader.read("reservations", live=True, node=node):
         if r["resource"] not in out:

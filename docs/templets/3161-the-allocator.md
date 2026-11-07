@@ -25,7 +25,7 @@ pins:
       - src/quarrylith/allocator/
       - src/quarrylith/alloc_cli.py
       - src/quarrylith/cli.py
-    at: 7e283d2
+    at: de0a999
 ---
 
 # The allocator
@@ -1193,7 +1193,9 @@ which pass.
   5.0 starts 2, 4.99 starts 1, 3.0 starts 1, 2.99 starts 0; a released
   reservation, an ended one, a run the newer reading sees and a consumer the
   document names are not counted; one at the reading's instant is taken as
-  seen on the clock fallback; holds made with a `now` before the reading are
+  seen on the clock fallback (a `reserved_through` above the highest
+  reservation id, or a bool or other non-number, is no figure and the clocks
+  decide); holds made with a `now` before the reading are
   counted by the record's order: a 4 GiB floor, 8 GiB available and three 4 GiB
   holds leave the second and third refused), `drivers` that are a string, a
   driver the document does not name, repeated, blank or empty are refused with
@@ -1622,6 +1624,10 @@ later: nothing in the effort runs sessions through the queue.
   names, at least one, else `Refused` with nothing written); both after the
   review of the services' need, which found a hold stamped before the reading
   read as seen, and a string declared by its letters (this PR)
+- 2026-11-06 proposed: a reading's `reserved_through` above the highest
+  reservation id the record holds cannot have been seen and is read as no
+  figure, the clocks deciding, as for a bool or a value that is no whole number
+  (this PR)
 - 2026-11-06 proposed: a consumer with nothing resident fails `sample_consumer`
   at its first sample, not after the window; a command's phase that passes the
   slow bound says `<phase>: still running, N s` while it runs, as well as its

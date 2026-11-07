@@ -25,7 +25,7 @@ pins:
     at: 2a8a78e5
   - repo: quarrylith
     paths: [src/quarrylith/record/, src/quarrylith/gauges.py, src/quarrylith/cli.py]
-    at: 7e283d2
+    at: de0a999
   - repo: henge-store-client
     symbols:
       - src/henge/store/client/store.py::Store.connect
@@ -646,8 +646,8 @@ such case. (An open also puts `loading` null, `absent`, where it finds none:
   the writer gave (a check that found another writer, an operation past its
   commit point, a load in progress). The reason can hold newlines and paths from
   the store's exceptions, so a caller prints it on one line: Henge writes it out
-  that way in the `Unavailable` of a refused call, and `closed` keeps it as it
-  was. Asking never raises, so a service asks the record and does not read its
+  that way in the `Unavailable` of a refused call and in the `Unknown` or
+  `Unavailable` of the failure itself, and `closed` keeps it as it was. Asking never raises, so a service asks the record and does not read its
   private field.
 
   **One engine per folder is the store's**: its `henge.lock` binds every
@@ -2846,3 +2846,6 @@ client alone is the dependency (above).
   reason once closed, `"closed"` after `close()`), on the contract and both
   backends, where a service read the private `_closed` of a Henge record (this
   PR)
+- 2026-11-06 proposed: the `Unknown` and `Unavailable` a Henge record raises as
+  it fails write the store's exception text out on one line, as the refusals
+  after it do (this PR)

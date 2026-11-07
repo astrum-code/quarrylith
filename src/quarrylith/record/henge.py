@@ -668,10 +668,10 @@ class HengeRecord(Record):
             self._shut()
         if why == "op":
             raise Unknown(
-                f"the record {self.name}: {message}; the operation may have "
-                "happened (read its subject, or events() past the last seq)"
+                f"the record {self.name}: {_one_line(message)}; the operation may "
+                "have happened (read its subject, or events() past the last seq)"
             ) from cause
-        raise Unavailable(f"the record {self.name}: {message}") from cause
+        raise Unavailable(f"the record {self.name}: {_one_line(message)}") from cause
 
     def _sync(self, why):
         tries = _Tries(time.monotonic() + self.timeout_s)

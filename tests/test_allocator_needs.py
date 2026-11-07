@@ -485,13 +485,13 @@ def test_the_reading_names_the_last_reservation_it_could_see(effort, clock):
 # -- drivers are validated ----------------------------------------------------------
 
 BAD_DRIVERS = {
-    "a string": "vm",
-    "an empty list": [],
-    "a driver the document does not name": ["harness", "docker"],
-    "duplicates": ["harness", "harness"],
-    "a name that is not text": ["harness", 3],
-    "a blank name": ["harness", ""],
-    "not a list": {"harness": 1},
+    "a string": ("vm", "list of names"),
+    "an empty list": ([], "at least one"),
+    "a driver the document does not name": (["harness", "docker"], "not drivers"),
+    "duplicates": (["harness", "harness"], "each driver once"),
+    "a name that is not text": (["harness", 3], "names are text"),
+    "a blank name": (["harness", ""], "names are text"),
+    "not a list": ({"harness": 1}, "list of names"),
 }
 
 
@@ -507,12 +507,13 @@ def test_drivers_that_are_not_a_list_of_the_documents_names_are_refused_whole(
     refused plainly with nothing written, a dry run included."""
     placement = HostPlacement(record)
     mark = record.head()
+    bad, said = BAD_DRIVERS[why]
     for dry_run in (False, True):
-        with pytest.raises(Refused, match="drivers"):
+        with pytest.raises(Refused, match=f"drivers.*{said}|{said}"):
             placement.declare(
                 sample_document(),
                 figures=FIGURES,
-                drivers=BAD_DRIVERS[why],
+                drivers=bad,
                 dry_run=dry_run,
                 now=clock(),
             )
